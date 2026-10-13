@@ -54,6 +54,13 @@ instead blocks until the teardown's worktree:delete:end event lands
 (live spinner on a TTY). If the daemon can't be reached (even after
 autostart), the teardown runs in-process instead (blocks until done).
 
+A worktree that another process is still using (its working
+directory, executable, or an open or mapped file is inside the
+worktree) is refused, naming each process, even with --force: deleting
+it would pull vendor/, node_modules/ and binaries out from under a
+running deploy, server or editor. The invoking shell and treemand's
+own processes don't count.
+
 Several targets may be given, and the no-argument picker is a
 Tab-toggle multi-select — both delete every named worktree in one
 invocation.
@@ -164,7 +171,7 @@ print main repo path (with --remove, drop current worktree if clean)
 
 | Flag | Usage |
 |---|---|
-| `--remove` | delete current worktree if clean + no unpushed commits |
+| `--remove` | delete current worktree if clean, fully pushed and not in use by another process |
 | `--force` | with --remove: pass --force to delete |
 
 ### `treeman worktree prev`

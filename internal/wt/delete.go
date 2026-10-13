@@ -119,6 +119,10 @@ func Delete(ctx context.Context, req DeleteRequest, sink Sink) (DeleteResult, er
 			"teardown already in progress for %s (use --force to run it again)", wtPath)
 	}
 
+	if err := EnsureNotInUse(ctx, wtPath); err != nil {
+		return DeleteResult{WtPath: wtPath}, err
+	}
+
 	if req.Detached {
 		if err := inlineTeardown(ctx, req.RepoRoot, wtPath, req.Force, req.Env, sink); err != nil {
 			return DeleteResult{WtPath: wtPath}, err

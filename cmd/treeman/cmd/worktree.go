@@ -427,6 +427,13 @@ instead blocks until the teardown's worktree:delete:end event lands
 (live spinner on a TTY). If the daemon can't be reached (even after
 autostart), the teardown runs in-process instead (blocks until done).
 
+A worktree that another process is still using (its working
+directory, executable, or an open or mapped file is inside the
+worktree) is refused, naming each process, even with --force: deleting
+it would pull vendor/, node_modules/ and binaries out from under a
+running deploy, server or editor. The invoking shell and treemand's
+own processes don't count.
+
 Several targets may be given, and the no-argument picker is a
 Tab-toggle multi-select — both delete every named worktree in one
 invocation.
@@ -1483,7 +1490,7 @@ func wtBack() *cli.Command {
 		Name:  "back",
 		Usage: "print main repo path (with --remove, drop current worktree if clean)",
 		Flags: []cli.Flag{
-			&cli.BoolFlag{Name: "remove", Usage: "delete current worktree if clean + no unpushed commits"},
+			&cli.BoolFlag{Name: "remove", Usage: "delete current worktree if clean, fully pushed and not in use by another process"},
 			&cli.BoolFlag{Name: "force", Usage: "with --remove: pass --force to delete"},
 		},
 		Action: func(ctx context.Context, c *cli.Command) error {
@@ -1572,6 +1579,10 @@ func wtBack() *cli.Command {
 			ui.Out = os.Stderr
 			err = wtDelete().Run(ctx, argv)
 			ui.Out = prevOut
+			if inUse := (*wt.InUseError)(nil); errors.As(err, &inUse) {
+				fmt.Fprintf(os.Stderr, "keeping worktree (%v)\n", inUse)
+				return nil
+			}
 			if err != nil {
 				// wt delete already rendered its own error lines; this is
 				// the back-level echo that the remove step failed.

@@ -348,6 +348,10 @@ func gcExecute(ctx context.Context, cands []gcCandidate) error {
 				PrintOK("deleted %s (%s)", cand.row.Path, cand.reason)
 			}
 		case "caches":
+			if err := wt.EnsureNotInUse(ctx, cand.row.Path); err != nil {
+				errs = append(errs, fmt.Errorf("caches %s: %w", cand.row.Path, err))
+				continue
+			}
 			reclaimed, err := dropCacheDirs(cand.row.Path)
 			if err != nil {
 				errs = append(errs, fmt.Errorf("caches %s: %w", cand.row.Path, err))
