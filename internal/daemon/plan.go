@@ -46,15 +46,16 @@ func handleRunPlan(ctx context.Context, st *State, req rpc.Request) rpc.Response
 	if id == "" {
 		id = runid.New()
 	}
+	requested := trigger{Source: triggerRPC, RequestedBy: args.Requester}
 
 	if args.Wait {
-		results := ExecutePlan(runid.With(ctx, id), st, args.Groups)
+		results := ExecutePlan(withTrigger(runid.With(ctx, id), requested), st, args.Groups)
 		return rpc.Response{Kind: rpc.KindPlanResult, TaskResults: results}
 	}
 
 	safeGo(lblPlanRun, "", func() {
-		bg := runid.With(st.BgCtx, id)
-		_ = st.Store.WriteEvent(bg, store.LevelInfo, store.EvtPlanStart, "plan beginning", 0, 0, "", 0, nil)
+		bg := withTrigger(runid.With(st.BgCtx, id), requested)
+		_ = st.Store.WriteEvent(bg, store.LevelInfo, store.EvtPlanStart, "plan beginning", 0, 0, "", 0, triggerPayload(bg))
 		results := ExecutePlan(bg, st, args.Groups)
 		if msg := firstFailure(results); msg != "" {
 			_ = st.Store.WriteEvent(bg, store.LevelError, store.EvtPlanError, msg, 0, 0, "", 0, nil)
@@ -84,6 +85,7 @@ func RunPlanInProcess(ctx context.Context, args rpc.RunPlanArgs) (rpc.Response, 
 	defer func() { _ = st.Close() }()
 	state := NewState(ctx, st)
 	state.SyncFinalize = true
+	ctx = withTrigger(ctx, trigger{Source: triggerRPC, RequestedBy: rpc.CurrentRequester()})
 	return rpc.Response{Kind: rpc.KindPlanResult, TaskResults: ExecutePlan(ctx, state, args.Groups)}, nil
 }
 
@@ -561,7 +563,7 @@ func runTaskWorktreeCreate(ctx context.Context, st *State, task rpc.Task) (json.
 			// No daemon to outlive the call — run the tail before returning.
 			runFinalize(runid.With(ctx, runid.New()))
 		} else {
-			safeGo(lblWorktreeFinalize, "", func() { runFinalize(runid.With(st.BgCtx, runid.New())) })
+			safeGo(lblWorktreeFinalize, "", func() { runFinalize(inheritTrigger(runid.With(st.BgCtx, runid.New()), ctx)) })
 		}
 		res.Status = wt.CreatedQueued
 	}

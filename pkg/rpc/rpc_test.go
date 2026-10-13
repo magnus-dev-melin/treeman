@@ -19,8 +19,9 @@ var sockCounter atomic.Uint64
 // directly under os.TempDir(), not t.TempDir(): on macOS the latter
 // embeds the test name under /var/folders/... and overruns the
 // 104-byte sun_path limit ("bind: invalid argument").
-func serveOnce(t *testing.T, resp Response) {
+func serveOnce(t *testing.T, resp Response) <-chan Request {
 	t.Helper()
+	received := make(chan Request, 1)
 	n := sockCounter.Add(1)
 	sock := filepath.Join(os.TempDir(), fmt.Sprintf("rpc-%d-%d.sock", os.Getpid(), n))
 	t.Cleanup(func() { _ = os.Remove(sock) })
@@ -39,12 +40,30 @@ func serveOnce(t *testing.T, resp Response) {
 		if derr := json.NewDecoder(conn).Decode(&req); derr != nil {
 			return
 		}
+		received <- req
 		e := json.NewEncoder(conn)
 		if eerr := e.Encode(&resp); eerr != nil {
 			_ = conn.Close()
 		}
 	}()
 	t.Setenv(SocketEnv, sock)
+	return received
+}
+
+func TestCallStampsRunPlanRequester(t *testing.T) {
+	received := serveOnce(t, Response{Kind: KindPlanQueued, ProtocolVersion: ProtocolVersion})
+	req := Plan(false, One(Task{Type: TaskWorktreeTeardown}))
+	if _, err := Call(context.Background(), req); err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	got := (<-received).RunPlan.Requester
+	if got == nil || got.PID != os.Getpid() || got.PPID != os.Getppid() || got.Command == "" {
+		t.Fatalf("requester = %+v, want this process (pid %d, ppid %d) with its command line",
+			got, os.Getpid(), os.Getppid())
+	}
+	if req.RunPlan.Requester != nil {
+		t.Fatal("Call must not mutate the caller's plan args")
+	}
 }
 
 func TestRequestRoundtripStatus(t *testing.T) {

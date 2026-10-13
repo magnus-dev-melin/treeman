@@ -223,7 +223,8 @@ func (lw *LifecycleWatcher) onCreate(ctx context.Context, adminDir string) {
 	if env == nil {
 		env = map[string]string{}
 	}
-	if err := FinalizeWorktree(ctx, lw.st, lw.repoPath, wtPath, env, false); err != nil {
+	appeared := withTrigger(ctx, trigger{Source: triggerWorktreeAppeared})
+	if err := FinalizeWorktree(appeared, lw.st, lw.repoPath, wtPath, env, false); err != nil {
 		slog.Warn("lifecycle: setup failed", "wt", wtPath, "err", err)
 	}
 }

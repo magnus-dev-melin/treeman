@@ -13,6 +13,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/stubbedev/treeman/pkg/safego"
@@ -394,9 +395,20 @@ func setFlagParam(params map[string]string, key string, on bool) {
 // the plan and returns immediately (KindPlanQueued); Wait=true runs it to
 // completion and returns per-task results (KindPlanResult).
 type RunPlanArgs struct {
-	Groups [][]Task `json:"groups"`
-	RunID  string   `json:"run_id,omitempty"`
-	Wait   bool     `json:"wait,omitempty"`
+	Groups    [][]Task   `json:"groups"`
+	RunID     string     `json:"run_id,omitempty"`
+	Wait      bool       `json:"wait,omitempty"`
+	Requester *Requester `json:"requester,omitempty"`
+}
+
+type Requester struct {
+	PID     int    `json:"pid"`
+	PPID    int    `json:"ppid"`
+	Command string `json:"command"`
+}
+
+func CurrentRequester() *Requester {
+	return &Requester{PID: os.Getpid(), PPID: os.Getppid(), Command: strings.Join(os.Args, " ")}
 }
 
 // TaskResult is one task's outcome, returned for a Wait=true plan.
@@ -652,6 +664,11 @@ func Call(ctx context.Context, req Request) (Response, error) {
 		_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
 	}
 
+	if req.RunPlan != nil && req.RunPlan.Requester == nil {
+		stamped := *req.RunPlan
+		stamped.Requester = CurrentRequester()
+		req.RunPlan = &stamped
+	}
 	enc := json.NewEncoder(conn)
 	if err := enc.Encode(&req); err != nil {
 		return Response{}, fmt.Errorf("encode: %w", err)

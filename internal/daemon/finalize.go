@@ -247,7 +247,7 @@ func FinalizeWorktree(
 
 	_ = st.Store.WriteEvent(ctx, store.LevelInfo, store.EvtWorktreeCreateStart,
 		"daemon-detached setup + prepare beginning",
-		repoID, wtID, "", 0, nil)
+		repoID, wtID, "", 0, triggerPayload(ctx))
 
 	// Wait for `git worktree add` to finish checking out the tree
 	// before firing hooks. Watcher-triggered finalize can race: the
@@ -851,7 +851,7 @@ func TeardownWorktree(
 
 	_ = st.Store.WriteEvent(ctx, store.LevelInfo, store.EvtWorktreeDeleteStart,
 		"daemon-detached teardown hooks + db teardown + git remove beginning",
-		repoID, wtID, "", 0, nil)
+		repoID, wtID, "", 0, triggerPayload(ctx))
 
 	// Three-step teardown: delete-before-engines actions →
 	// engine drop (inline + synchronous so post-engine actions can
