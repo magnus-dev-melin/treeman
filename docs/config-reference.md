@@ -546,8 +546,8 @@ Elasticsearch / OpenSearch connection. HTTP URL form.
 
 #### `s3` *(one of: [S3Conn](#s3conn), map of name → [S3Conn](#s3conn))*
 
-S3-compatible object storage connection (AWS S3, MinIO, Garage,
-Ceph RGW, Backblaze B2, Cloudflare R2, ...). Required when any
+S3-compatible object storage connection (AWS S3, MinIO, RustFS,
+Garage, Ceph RGW, Backblaze B2, Cloudflare R2, ...). Required when any
 `databases:` entry uses `engine: s3`. One connection serves many
 per-worktree buckets named via the entry's `key_prefix`.
 

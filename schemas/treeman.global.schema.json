@@ -182,7 +182,7 @@
               "description": "Named connection blocks — a `databases[].connection` selector picks one"
             }
           ],
-          "description": "S3-compatible object storage connection (AWS S3, MinIO, Garage,\nCeph RGW, Backblaze B2, Cloudflare R2, ...). Required when any\n`databases:` entry uses `engine: s3`. One connection serves many\nper-worktree buckets named via the entry's `key_prefix`."
+          "description": "S3-compatible object storage connection (AWS S3, MinIO, RustFS,\nGarage, Ceph RGW, Backblaze B2, Cloudflare R2, ...). Required when any\n`databases:` entry uses `engine: s3`. One connection serves many\nper-worktree buckets named via the entry's `key_prefix`."
         },
         "sqlite": {
           "anyOf": [

@@ -415,8 +415,8 @@ type ConnectionsConfig struct {
 	// Elasticsearch / OpenSearch connection. HTTP URL form.
 	Elasticsearch *EsConn `yaml:"elasticsearch,omitempty"`
 
-	// S3-compatible object storage connection (AWS S3, MinIO, Garage,
-	// Ceph RGW, Backblaze B2, Cloudflare R2, ...). Required when any
+	// S3-compatible object storage connection (AWS S3, MinIO, RustFS,
+	// Garage, Ceph RGW, Backblaze B2, Cloudflare R2, ...). Required when any
 	// `databases:` entry uses `engine: s3`. One connection serves many
 	// per-worktree buckets named via the entry's `key_prefix`.
 	S3 *S3Conn `yaml:"s3,omitempty"`
@@ -937,18 +937,21 @@ func (c *EsConn) UnmarshalYAML(node *yaml.Node) error {
 func (EsConn) JSONSchema() *jsonschema.Schema { return uriOrMap("elasticsearch", "url") }
 
 // S3Conn — connection to an S3-compatible object store. Covers AWS
-// S3, MinIO, Garage, Ceph RGW, Backblaze B2, Cloudflare R2, and any
-// service that speaks the S3 API.
+// S3, MinIO, RustFS, Garage, Ceph RGW, Backblaze B2, Cloudflare R2,
+// and any service that speaks the S3 API.
 //
 // `Endpoint` is the base URL the SDK dials (e.g. `http://localhost:9000`
-// for a local MinIO/Garage; leave empty for AWS S3 — the SDK picks the
+// for a local MinIO/RustFS/Garage; leave empty for AWS S3 — the SDK picks the
 // regional endpoint). When a ContainerRef is set, host/port in the
 // endpoint URL are rewritten at dial time using the container's
-// published port (or bridge IP).
+// published port (or bridge IP), and empty `AccessKey` / `SecretKey`
+// are read from the container's env (MINIO_ROOT_USER/PASSWORD,
+// MINIO_ACCESS_KEY/SECRET_KEY, RUSTFS_ACCESS_KEY/SECRET_KEY,
+// AWS_ACCESS_KEY_ID/SECRET_ACCESS_KEY).
 //
 // `UsePathStyle` toggles path-style addressing (`endpoint/bucket/key`)
-// vs virtual-host-style (`bucket.endpoint/key`). MinIO and Garage
-// require path-style; AWS S3 supports either but virtual-host is the
+// vs virtual-host-style (`bucket.endpoint/key`). MinIO, RustFS and
+// Garage require path-style; AWS S3 supports either but virtual-host is the
 // default. Set true for any non-AWS endpoint.
 //
 // Every string field (`Endpoint`, `Region`, `AccessKey`, `SecretKey`)
@@ -961,8 +964,8 @@ type S3Conn struct {
 	// or `$NAME` / `${NAME}` env-var ref.
 	Endpoint string `yaml:"endpoint,omitempty"`
 
-	// Region. Defaults to `us-east-1` (the AWS-SDK default that MinIO
-	// and Garage also accept). Required for AWS S3 outside us-east-1.
+	// Region. Defaults to `us-east-1` (the AWS-SDK default that MinIO,
+	// RustFS and Garage also accept). Required for AWS S3 outside us-east-1.
 	// Literal or `$NAME` / `${NAME}` env-var ref.
 	Region string `yaml:"region,omitempty"`
 
@@ -973,7 +976,7 @@ type S3Conn struct {
 	SecretKey string `yaml:"secret_key,omitempty"`
 
 	// Use path-style addressing (`endpoint/bucket/key`). Required for
-	// MinIO and Garage; optional for AWS S3.
+	// MinIO, RustFS and Garage; optional for AWS S3.
 	UsePathStyle bool `yaml:"use_path_style,omitempty"`
 
 	ContainerRef `yaml:",inline"`

@@ -194,10 +194,17 @@ func fillPostgresPasswordFromContainerEnv(p *config.PostgresConn) {
 	}
 }
 
+// The env vars S3-compatible servers publish their root credentials
+// under, in lookup order: MinIO, RustFS, then the AWS SDK names.
+var (
+	s3AccessKeyEnv = []string{"MINIO_ROOT_USER", "MINIO_ACCESS_KEY", "RUSTFS_ACCESS_KEY", "AWS_ACCESS_KEY_ID"}
+	s3SecretKeyEnv = []string{"MINIO_ROOT_PASSWORD", "MINIO_SECRET_KEY", "RUSTFS_SECRET_KEY", "AWS_SECRET_ACCESS_KEY"}
+)
+
 // fillS3FromContainerEnv back-fills S3 access/secret keys from the
 // container's own environment when they weren't supplied in config —
-// MinIO/Garage publish their root creds as well-known env vars
-// (MINIO_ROOT_USER/PASSWORD, AWS_ACCESS_KEY_ID/SECRET_ACCESS_KEY), so a
+// MinIO, RustFS and Garage setups publish their root creds as
+// well-known env vars (s3AccessKeyEnv / s3SecretKeyEnv), so a
 // container-referenced block can authenticate with zero secret wiring.
 func fillS3FromContainerEnv(s *config.S3Conn) {
 	if s == nil || (s.Container == "" && s.ComposeService == "") {
@@ -209,21 +216,18 @@ func fillS3FromContainerEnv(s *config.S3Conn) {
 		ComposeProject: s.ComposeProject,
 		Engine:         s.ContainerEngine,
 	})
+	fillS3KeysFromEnv(s, env)
+}
+
+// fillS3KeysFromEnv sets each empty key from the first well-known
+// variable env carries a value for.
+func fillS3KeysFromEnv(s *config.S3Conn, env map[string]string) {
+	vars := envfile.EnvFile{Vars: env}
 	if s.AccessKey == "" {
-		for _, k := range []string{"MINIO_ROOT_USER", "MINIO_ACCESS_KEY", "AWS_ACCESS_KEY_ID"} {
-			if v, ok := env[k]; ok && nonEmpty(v) {
-				s.AccessKey = v
-				break
-			}
-		}
+		s.AccessKey = firstEnv(vars, s3AccessKeyEnv...)
 	}
 	if s.SecretKey == "" {
-		for _, k := range []string{"MINIO_ROOT_PASSWORD", "MINIO_SECRET_KEY", "AWS_SECRET_ACCESS_KEY"} {
-			if v, ok := env[k]; ok && nonEmpty(v) {
-				s.SecretKey = v
-				break
-			}
-		}
+		s.SecretKey = firstEnv(vars, s3SecretKeyEnv...)
 	}
 }
 
@@ -745,9 +749,11 @@ func springPassword(env envfile.EnvFile, u *url.URL) (string, bool) {
 	return urlPassword(u)
 }
 
+// firstEnv returns the first of keys env sets to a value — skipping
+// empty ones and Laravel's literal `null`.
 func firstEnv(env envfile.EnvFile, keys ...string) string {
 	for _, k := range keys {
-		if v, ok := env.Get(k); ok && v != "" {
+		if v, ok := env.Get(k); ok && nonEmpty(v) {
 			return v
 		}
 	}

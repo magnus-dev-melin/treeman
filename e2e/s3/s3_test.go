@@ -2,11 +2,11 @@
 
 // Package s3_e2e exercises the s3 engine's lifecycle — prepare creates
 // the per-worktree bucket, teardown empties it and drops it — against
-// every S3-compatible backend treeman claims to support. Two live
-// backends run side by side: MinIO and Garage. Both speak the S3 API
-// with path-style addressing, so a single driver code path covers them;
-// running both proves the driver isn't quietly MinIO-specific. No AWS
-// credentials or network access are required.
+// every S3-compatible backend treeman claims to support. Three live
+// backends run side by side: MinIO, RustFS and Garage. All speak the S3
+// API with path-style addressing, so a single driver code path covers
+// them; running them all proves the driver isn't quietly MinIO-specific.
+// No AWS credentials or network access are required.
 //
 // Each backend runs as its own subtest and self-skips if it isn't
 // reachable/provisioned, so a flaky or misconfigured backend can't mask
@@ -18,7 +18,9 @@ import (
 	"context"
 	"errors"
 	"net"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
@@ -34,6 +36,7 @@ import (
 	"github.com/stubbedev/treeman/internal/config"
 	dbs3 "github.com/stubbedev/treeman/internal/db/s3"
 	"github.com/stubbedev/treeman/internal/prepare"
+	"github.com/stubbedev/treeman/internal/resolve"
 	"github.com/stubbedev/treeman/internal/slug"
 )
 
@@ -47,16 +50,22 @@ const (
 	garageContainer = "treeman-e2e-garage"
 	garageAccessKey = "GK0123456789abcdef01234567"
 	garageSecretKey = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+	rustfsContainer = "treeman-e2e-rustfs"
 )
 
 // backend is one S3-compatible target. provision (optional) runs after
 // the TCP port is up and before the lifecycle test — used by Garage to
-// stage its cluster layout and import a key.
+// stage its cluster layout and import a key. container (optional) names
+// a container whose own env publishes the credentials: the backend is
+// then also driven through a container-referenced connection with no
+// keys in config.
 type backend struct {
 	name      string
 	readyAddr string
 	conn      config.S3Conn
 	provision func(t *testing.T) error
+	container string
 }
 
 func backends() []backend {
@@ -71,6 +80,18 @@ func backends() []backend {
 				SecretKey:    "minioadmin",
 				UsePathStyle: true,
 			},
+		},
+		{
+			name:      "rustfs",
+			readyAddr: "127.0.0.1:19020",
+			conn: config.S3Conn{
+				Endpoint:     "http://127.0.0.1:19020",
+				Region:       "us-east-1",
+				AccessKey:    "tme2erustfs",
+				SecretKey:    "tme2erustfs-secret-key",
+				UsePathStyle: true,
+			},
+			container: rustfsContainer,
 		},
 		{
 			name:      "garage",
@@ -170,6 +191,55 @@ func runBackend(ctx context.Context, t *testing.T, b backend) {
 
 	// ── 5. branch_scoped: per-branch durable bucket copy ──────────────
 	branchScopedSwap(ctx, t, b)
+
+	// ── 6. container-referenced connection: credentials from the
+	//      container's own env only ────────────────────────────────────
+	if b.container != "" {
+		containerReferencedAuth(ctx, t, b)
+	}
+}
+
+// containerReferencedAuth resolves a `connections.s3` block that names
+// the backend's container and carries no keys, and proves the resolver
+// back-fills working credentials from the container's env and the
+// driver reaches it through its published port.
+func containerReferencedAuth(ctx context.Context, t *testing.T, b backend) {
+	t.Helper()
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	repo := t.TempDir()
+	yaml := `connections:
+  s3:
+    endpoint: http://localhost:9000
+    region: ` + b.conn.Region + `
+    use_path_style: true
+    container: ` + b.container + `
+databases:
+  - engine: s3
+    key_prefix: "` + keyPrefix + `"
+`
+	if err := os.WriteFile(filepath.Join(repo, ".treeman.yaml"), []byte(yaml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := resolve.LoadResolved(repo)
+	if err != nil {
+		t.Fatalf("resolve container-referenced config: %v", err)
+	}
+	conn := *cfg.Connections.S3
+	if conn.AccessKey != b.conn.AccessKey || conn.SecretKey != b.conn.SecretKey {
+		t.Fatalf("keys back-filled from %s env = (%q, %q), want (%q, %q)",
+			b.container, conn.AccessKey, conn.SecretKey, b.conn.AccessKey, b.conn.SecretKey)
+	}
+	env := harness.NewEnv(t, repo)
+	o := harness.AssertOutcome(t, env.RunPrepare(t, &cfg), "s3", false)
+	if !bucketExists(ctx, t, b.conn, o.SourceDB) {
+		t.Fatalf("bucket %s missing after container-referenced prepare", o.SourceDB)
+	}
+	if err := prepare.TeardownDatabases(ctx, &cfg, env.Slug.Value, env.RepoID, env.WTID, env.Store); err != nil {
+		t.Fatalf("container-referenced teardown: %v", err)
+	}
+	if bucketExists(ctx, t, b.conn, o.SourceDB) {
+		t.Errorf("bucket %s still exists after container-referenced teardown", o.SourceDB)
+	}
 }
 
 // branchScopedSwap drives the full branch-scoped swap lifecycle on `b`:

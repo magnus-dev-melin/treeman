@@ -217,3 +217,46 @@ func TestYamlURILiteralsPassThrough(t *testing.T) {
 		t.Errorf("mongo literal: %q", r.Conn.URI)
 	}
 }
+
+func TestFillS3KeysFromEnv(t *testing.T) {
+	cases := []struct {
+		name               string
+		conn               config.S3Conn
+		env                map[string]string
+		wantAccess, wantSK string
+	}{
+		{
+			name:       "rustfs container env",
+			env:        map[string]string{"RUSTFS_ACCESS_KEY": "rak", "RUSTFS_SECRET_KEY": "rsk"},
+			wantAccess: "rak", wantSK: "rsk",
+		},
+		{
+			name: "minio root creds win over the aws names",
+			env: map[string]string{
+				"MINIO_ROOT_USER": "mu", "MINIO_ROOT_PASSWORD": "mp",
+				"AWS_ACCESS_KEY_ID": "ak", "AWS_SECRET_ACCESS_KEY": "as",
+			},
+			wantAccess: "mu", wantSK: "mp",
+		},
+		{
+			name:       "configured keys are kept",
+			conn:       config.S3Conn{AccessKey: "cfg-ak", SecretKey: "cfg-sk"},
+			env:        map[string]string{"RUSTFS_ACCESS_KEY": "rak", "RUSTFS_SECRET_KEY": "rsk"},
+			wantAccess: "cfg-ak", wantSK: "cfg-sk",
+		},
+		{
+			name:       "null and empty values are skipped",
+			env:        map[string]string{"MINIO_ROOT_USER": "null", "RUSTFS_ACCESS_KEY": "", "AWS_ACCESS_KEY_ID": "ak"},
+			wantAccess: "ak",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := tc.conn
+			fillS3KeysFromEnv(&s, tc.env)
+			if s.AccessKey != tc.wantAccess || s.SecretKey != tc.wantSK {
+				t.Errorf("keys = (%q, %q), want (%q, %q)", s.AccessKey, s.SecretKey, tc.wantAccess, tc.wantSK)
+			}
+		})
+	}
+}

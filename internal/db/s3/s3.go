@@ -1,6 +1,6 @@
 // Package s3 is the treeman driver for S3-compatible object stores
-// (AWS S3, MinIO, Garage, Ceph RGW, Backblaze B2, Cloudflare R2,
-// anything that speaks the S3 API).
+// (AWS S3, MinIO, RustFS, Garage, Ceph RGW, Backblaze B2, Cloudflare
+// R2, anything that speaks the S3 API).
 //
 // Scope: per-worktree BUCKET lifecycle — create on prepare, drop
 // (with all keys) on teardown — plus whole-bucket branch_scoped

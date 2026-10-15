@@ -20,6 +20,24 @@ services:
       timeout: 3s
       retries: 30
 
+  # RustFS: the maintained, MinIO-compatible replacement now that MinIO
+  # community edition is EOL. Credentials come only from its own
+  # RUSTFS_ACCESS_KEY / RUSTFS_SECRET_KEY, which the container-referenced
+  # auth check reads back (non-default values, so RustFS doesn't warn).
+  rustfs:
+    image: rustfs/rustfs:1.0.1
+    container_name: treeman-e2e-rustfs
+    environment:
+      RUSTFS_ACCESS_KEY: tme2erustfs
+      RUSTFS_SECRET_KEY: tme2erustfs-secret-key
+    ports:
+      - "19020:9000"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9000/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
   # Garage is the second S3-compatible backend the driver must support.
   # It speaks the S3 API with path-style addressing and a fixed region,
   # so it exercises the same code path as MinIO but on an independent
