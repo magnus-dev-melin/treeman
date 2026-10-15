@@ -102,6 +102,7 @@ String-keyed side-channel on a Task (booleans encoded as `"1"`).
 | `skip_hooks` | `rpc.ParamSkipHooks` |  |
 | `skip_prepare` | `rpc.ParamSkipPrepare` |  |
 | `wait` | `rpc.ParamWait` |  |
+| `fresh` | `rpc.ParamFresh` |  |
 | `levels` | `rpc.ParamLevels` |  |
 | `event_types` | `rpc.ParamEventTypes` |  |
 | `until_ms` | `rpc.ParamUntilMs` |  |

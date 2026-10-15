@@ -232,7 +232,7 @@ func runTaskPrepare(ctx context.Context, st *State, task rpc.Task) (json.RawMess
 	return json.Marshal(map[string]any{"outcomes": outs})
 }
 
-// lockedPrepare runs prepare.Run for a task under the worktree's
+// lockedPrepare runs prepare.RunFiltered for a task under the worktree's
 // engine-prepare lock, so a queued prepare can't collide with the
 // finalize pipeline, a watcher re-prepare, or another prepare task
 // building the same source databases (issue #28).
@@ -240,7 +240,8 @@ func lockedPrepare(ctx context.Context, st *State, id taskIdentity, task rpc.Tas
 	prepLk := st.LockWorktreePrepare(task.WorktreePath)
 	prepLk.Lock()
 	defer prepLk.Unlock()
-	return prepare.Run(ctx, &id.cfg, task.WorktreePath, id.sl, st.Store, id.repoID, id.wtID, task.InheritedEnv)
+	opts := prepare.RunOptions{Fresh: rpc.PrepareArgsOf(task).Fresh}
+	return prepare.RunFiltered(ctx, &id.cfg, task.WorktreePath, id.sl, st.Store, id.repoID, id.wtID, task.InheritedEnv, opts)
 }
 
 func runTaskDBReset(ctx context.Context, st *State, task rpc.Task) (json.RawMessage, error) {

@@ -53,6 +53,10 @@ func PrepareCmd() *cli.Command {
 				Name:  "dry-run",
 				Usage: "render the per-database pipeline plan (source dbs, dumps, migrate/seed commands, fanout) without executing anything",
 			},
+			&cli.BoolFlag{
+				Name:  "fresh",
+				Usage: "restore every templated database and its test clones from the cached template even when they are already at the current fingerprint (discards state left by earlier test runs)",
+			},
 			foregroundFlag(),
 		},
 		Action: func(ctx context.Context, c *cli.Command) error {
@@ -64,10 +68,7 @@ func PrepareCmd() *cli.Command {
 			if c.Bool("dry-run") {
 				return previewPrepare(ctx, c, wtPath, repoRoot)
 			}
-			task := rpc.Task{
-				Type: rpc.TaskPrepare, RepoPath: repoRoot, WorktreePath: wtPath,
-				InheritedEnv: CaptureInheritedEnv(),
-			}
+			task := rpc.PrepareArgs{Fresh: c.Bool("fresh")}.Task(repoRoot, wtPath, CaptureInheritedEnv())
 			if c.Bool("no-daemon") {
 				resp, err := daemon.RunPlanInProcess(ctx, *rpc.Plan(true, rpc.One(task)).RunPlan)
 				if err != nil {

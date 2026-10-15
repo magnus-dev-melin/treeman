@@ -575,8 +575,15 @@ values fall through to the next source, then to
 `$XDG_CONFIG_HOME/treeman/config.yaml` (or `~/.config/treeman/config.yaml`).
 Relative override paths resolve from the invocation's working directory.
 An explicitly selected missing file is an error; a missing default file
-still uses built-in defaults. Scope validation and repo / repo-local /
-worktree-local precedence are unchanged.
+still uses built-in defaults. Repo / repo-local / worktree-local precedence
+is unchanged.
+
+The default global file accepts only global and shared keys. An explicit
+file may also carry repo-scoped keys (`databases`, `patches`, `hooks`,
+`main_worktree`, `env_sources`), so a checkout without a `.treeman.yaml`
+of its own, such as a CI build, can be driven by one committed file:
+`treeman --config ci/treeman.yaml prepare --no-daemon`. The repo's
+`.treeman.yaml` and `.treeman.local.yaml` still load on top of it.
 
 The override applies only to config loaded by that foreground invocation.
 It is not sent over RPC: an already-running daemon, its watchers, and

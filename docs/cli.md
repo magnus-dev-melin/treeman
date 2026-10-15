@@ -520,6 +520,7 @@ ensure → dump → migrate → snapshot → replicate
 | `--json` |  |
 | `--no-daemon` | run synchronously in this process without connecting to or starting a daemon (for CI) |
 | `--dry-run` | render the per-database pipeline plan (source dbs, dumps, migrate/seed commands, fanout) without executing anything |
+| `--fresh` | restore every templated database and its test clones from the cached template even when they are already at the current fingerprint (discards state left by earlier test runs) |
 | `-f`, `--wait`, `--foreground` | stream the daemon's live progress and block until done, exiting non-zero on failure (default: dispatch and return) |
 
 ### `treeman db`

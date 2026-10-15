@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -87,10 +88,25 @@ func TestConfigOverrideLoaders(t *testing.T) {
 			if cfg, err := loader.load(repo, wt); err != nil || cfg.DebounceMs != 500 {
 				t.Fatalf("empty explicit: %+v, %v", cfg, err)
 			}
-			writePathConfig(t, path, "hooks: {}\n")
-			if _, err := loader.load(repo, wt); err == nil || !strings.Contains(err.Error(), "belongs in the repo config") {
-				t.Fatalf("global scope: %v", err)
+			writePathConfig(t, path, "databases:\n  - {engine: mysql, name_template: 'explicit_{slug}'}\n")
+			if got, err := loadedNameTemplate(loader.load, repo, wt); err != nil || got != "explicit_{slug}" {
+				t.Fatalf("repo keys in explicit config: %q, %v", got, err)
 			}
+			if loader.name != "global" {
+				repoFile := filepath.Join(repo, ".treeman.yaml")
+				writePathConfig(t, repoFile, "databases:\n  - {engine: mysql, name_template: 'repo_{slug}'}\n")
+				if got, err := loadedNameTemplate(loader.load, repo, wt); err != nil || got != "repo_{slug}" {
+					t.Fatalf("repo file over explicit config: %q, %v", got, err)
+				}
+				writePathConfig(t, repoFile, "")
+			}
+			t.Setenv("TREEMAN_CONFIG", "")
+			writePathConfig(t, filepath.Join(root, "treeman", "config.yaml"), "hooks: {}\n")
+			if _, err := loader.load(repo, wt); err == nil || !strings.Contains(err.Error(), "belongs in the repo config") {
+				t.Fatalf("default global scope: %v", err)
+			}
+			writePathConfig(t, filepath.Join(root, "treeman", "config.yaml"), "")
+			t.Setenv("TREEMAN_CONFIG", path)
 			writePathConfig(t, path, "debounce_ms: 101\n")
 			if cfg, err := loader.load(repo, wt); err != nil || cfg.DebounceMs != 101 {
 				t.Fatalf("override: %+v, %v", cfg, err)
@@ -105,6 +121,17 @@ func TestConfigOverrideLoaders(t *testing.T) {
 			}
 		})
 	}
+}
+
+func loadedNameTemplate(load func(string, string) (Config, error), repo, wt string) (string, error) {
+	cfg, err := load(repo, wt)
+	if err != nil {
+		return "", err
+	}
+	if len(cfg.Databases) != 1 {
+		return "", fmt.Errorf("want one database, got %+v", cfg.Databases)
+	}
+	return cfg.Databases[0].NameTemplate, nil
 }
 
 func checkOverridePrecedence(t *testing.T, load func(string, string) (Config, error), worktree bool, repo, wt string) {

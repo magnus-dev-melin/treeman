@@ -2126,21 +2126,28 @@ type CustomFramework struct {
 // repo-local overlay). Used by the daemon at startup to read fields
 // that need to be live before any repo is known — currently just
 // daemon.log_level. Missing global file → defaults-only Config.
+//
+// An explicit config (`--config` / TREEMAN_CONFIG) is exempt from the
+// global-layer scope check: it is chosen per invocation, so it may also
+// carry repo-scoped keys (databases, patches, hooks, …) for a checkout
+// that has no `.treeman.yaml` of its own, e.g. a CI build. The repo's
+// `.treeman.yaml` and `.treeman.local.yaml` still load on top of it.
 func LoadGlobal() (Config, error) {
 	var cfg Config
 	applyDefaults(&cfg)
-	if g, ok := globalConfigPath(); ok {
-		if explicitGlobalConfigPath() != "" {
-			if _, err := os.Stat(g); err != nil {
-				return cfg, fmt.Errorf("explicit config %s: %w", g, err)
-			}
-		}
+	g, ok := globalConfigPath()
+	if !ok {
+		return cfg, nil
+	}
+	if explicitGlobalConfigPath() == "" {
 		if err := checkLayerScope(g, "global"); err != nil {
 			return cfg, err
 		}
-		if err := mergeYAMLFile(&cfg, g); err != nil {
-			return cfg, err
-		}
+	} else if _, err := os.Stat(g); err != nil {
+		return cfg, fmt.Errorf("explicit config %s: %w", g, err)
+	}
+	if err := mergeYAMLFile(&cfg, g); err != nil {
+		return cfg, err
 	}
 	return cfg, nil
 }
