@@ -282,9 +282,13 @@ vendor/bin/phpunit
 
 `TREEMAN_CONFIG` (or `--config /absolute/path/config.yaml`, which wins over
 the environment variable) replaces the default **global** config layer.
-Repository `.treeman.yaml` still loads afterward and takes precedence for
-repo-scoped settings. Global-only settings such as `snapshots`, `daemon`,
-and `logs` belong in that replacement global file, not the repo file.
+Unlike the default global file, an explicit file may also carry repo-scoped
+settings (`databases`, `patches`, `hooks`, …), so a repository can commit
+its CI config and pass it with `--config` instead of shipping a
+`.treeman.yaml`. A repository `.treeman.yaml` still loads afterward and
+takes precedence for repo-scoped settings. Global-only settings such as
+`snapshots`, `daemon`, and `logs` belong in the explicit file, not the
+repo file.
 This selects configuration for foreground/local execution; it does not
 reconfigure an already-running daemon handling RPC commands.
 
