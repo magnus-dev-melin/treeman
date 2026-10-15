@@ -201,9 +201,9 @@ func spawnPrewarm(
 	if _, busy := prewarmInFlight.LoadOrStore(fingerprint, struct{}{}); busy {
 		return
 	}
-	st.Go("snapshot:prewarm", templateName, func(bg context.Context) {
+	st.Go("snapshot:prewarm", templateName, func() {
 		defer prewarmInFlight.Delete(fingerprint)
-		ctx, cancel := context.WithTimeout(bg, 5*time.Minute)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cancel()
 		unpin := snapshot.Pin(fingerprint)
 		defer unpin()

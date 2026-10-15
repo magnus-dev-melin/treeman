@@ -1550,16 +1550,16 @@ func mysqlMergedColdFanout(
 }
 
 // spawnEvict fires LRU snapshot eviction for a repo in the background,
-// as store-owned work: it outlives the prepare request's own context
-// but not the store, whose Close cancels and awaits it. A hard 5-minute
-// deadline means a stalled DROP (e.g. engine lock contention) can never
-// hold it forever. Errors are logged inside EvictExcess.
+// as store-owned work: it outlives the prepare request's own context,
+// and the store's Close waits for it. A hard 5-minute deadline means a
+// stalled DROP (e.g. engine lock contention) can never hold it forever.
+// Errors are logged inside EvictExcess.
 func spawnEvict(cfg *config.Config, st *store.Store, repoID int64) {
 	if st == nil {
 		return
 	}
-	st.Go("snapshot:evict", "", func(ctx context.Context) {
-		evictCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	st.Go("snapshot:evict", "", func() {
+		evictCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cancel()
 		snapshot.EvictExcess(evictCtx, cfg, st, repoID)
 	})

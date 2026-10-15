@@ -74,13 +74,11 @@ type Store struct {
 	// flusher goroutine had already taken but not yet committed.
 	flushMu sync.Mutex
 
-	// Background work started through Go: bgCtx is cancelled by Close,
-	// which then waits on bgWG, so no goroutine is still using the store
-	// (or its SQLite files) once Close returns.
+	// Background work started through Go: Close waits on bgWG, so no
+	// goroutine is still using the store (or its SQLite files) once
+	// Close returns.
 	bgMu     sync.Mutex
 	bgClosed bool
-	bgCtx    context.Context
-	bgCancel context.CancelFunc
 	bgWG     sync.WaitGroup
 
 	// Event-hook registry. Hooks fire after every successful WriteEvent
@@ -145,15 +143,16 @@ func Open(ctx context.Context, path string) (*Store, error) {
 		_ = db.Close()
 		return nil, err
 	}
-	bgCtx, bgCancel := context.WithCancel(context.Background())
-	return &Store{DB: db, bgCtx: bgCtx, bgCancel: bgCancel}, nil
+	return &Store{DB: db}, nil
 }
 
 // Go runs fn in the background for work that outlives the call that
-// starts it but still uses the store. fn's context is cancelled when
-// the store closes, and Close waits for fn to return. On a closed store
-// fn is not run.
-func (s *Store) Go(label, detail string, fn func(ctx context.Context)) {
+// starts it but still uses the store. Close waits for fn to finish
+// rather than cancelling it — an inline `prepare --no-daemon` closes the
+// store right after prepare, and a cancelled eviction never completes
+// (#131) — so fn must bound itself with its own deadline. On a closed
+// store fn is not run.
+func (s *Store) Go(label, detail string, fn func()) {
 	s.bgMu.Lock()
 	if s.bgClosed {
 		s.bgMu.Unlock()
@@ -163,7 +162,7 @@ func (s *Store) Go(label, detail string, fn func(ctx context.Context)) {
 	s.bgMu.Unlock()
 	safego.Go(label, detail, func() {
 		defer s.bgWG.Done()
-		fn(s.bgCtx)
+		fn()
 	})
 }
 
@@ -289,13 +288,12 @@ func pendingEventToEvent(p pendingEvent) Event {
 }
 
 // Close shuts down the underlying pool. Background work started with
-// Go is cancelled and awaited first, then the event batcher (if
-// running) is drained synchronously so no in-flight rows are lost.
+// Go is awaited first, then the event batcher (if running) is drained
+// synchronously so no in-flight rows are lost.
 func (s *Store) Close() error {
 	s.bgMu.Lock()
 	s.bgClosed = true
 	s.bgMu.Unlock()
-	s.bgCancel()
 	s.bgWG.Wait()
 	s.StopEventBatcher()
 	return s.DB.Close()

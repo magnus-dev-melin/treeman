@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"golang.org/x/sync/errgroup"
@@ -37,7 +38,7 @@ func EvictExcess(ctx context.Context, cfg *config.Config, st *store.Store, repoI
 		slog.Warn("snapshot eviction lookup", "repo_id", repoID, "err", err)
 		return
 	}
-	evictCandidates(ctx, cfg, st, candidates, repoID, store.EvtSnapshotsEvictCap, "snapshot eviction",
+	evictCandidates(ctx, newDropPool(cfg, engineconn.Connect), st, candidates, repoID, store.EvtSnapshotsEvictCap, "snapshot eviction",
 		func(c store.SnapshotEvictionCandidate) string {
 			return fmt.Sprintf("evicted %s (%s)", c.TemplateName, c.Engine)
 		})
@@ -64,11 +65,10 @@ func EvictExcess(ctx context.Context, cfg *config.Config, st *store.Store, repoI
 // errgroup — the store writes stay serial so the SQLite side is never
 // contended. Pinned fingerprints are skipped.
 func evictCandidates(
-	ctx context.Context, cfg *config.Config, st *store.Store,
+	ctx context.Context, pool *dropPool, st *store.Store,
 	cands []store.SnapshotEvictionCandidate, repoID int64,
 	eventType, logPrefix string, msg func(store.SnapshotEvictionCandidate) string,
 ) {
-	pool := newDropPool(cfg, engineconn.Connect)
 	defer pool.close()
 
 	results := make([]error, len(cands))
@@ -87,14 +87,17 @@ func evictCandidates(
 		})
 	}
 	_ = g.Wait()
+	// The templates are gone from the engine; their rows must go too,
+	// whatever happens to ctx now (#131).
+	rowCtx := context.WithoutCancel(ctx)
 	for i, c := range cands {
 		if results[i] != nil || IsPinned(c.Fingerprint) {
 			continue
 		}
-		if err := st.DeleteSnapshot(ctx, c.Fingerprint); err != nil {
+		if err := st.DeleteSnapshot(rowCtx, c.Fingerprint); err != nil {
 			slog.Warn(logPrefix+" delete row", "fp", c.Fingerprint, "template", c.TemplateName, "err", err)
 		}
-		_ = st.WriteEvent(ctx, store.LevelInfo, eventType, msg(c),
+		_ = st.WriteEvent(rowCtx, store.LevelInfo, eventType, msg(c),
 			repoID, 0, "", 0, map[string]string{
 				"engine":      c.Engine,
 				"template":    c.TemplateName,
@@ -120,17 +123,22 @@ func PurgeRepo(ctx context.Context, cfg *config.Config, st *store.Store, repoID 
 	}
 	pool := newDropPool(cfg, engineconn.Connect)
 	defer pool.close()
+	rowCtx := context.WithoutCancel(ctx)
 	for _, c := range cands {
+		if err := ctx.Err(); err != nil {
+			errs = append(errs, fmt.Errorf("purge stopped before %s: %w", c.TemplateName, err))
+			break
+		}
 		if err := pool.drop(ctx, c); err != nil {
 			errs = append(errs, fmt.Errorf("drop %s (%s): %w", c.TemplateName, c.Engine, err))
 			continue
 		}
-		if err := st.DeleteSnapshot(ctx, c.Fingerprint); err != nil {
+		if err := st.DeleteSnapshot(rowCtx, c.Fingerprint); err != nil {
 			errs = append(errs, fmt.Errorf("delete row %s: %w", c.Fingerprint, err))
 			continue
 		}
 		dropped++
-		_ = st.WriteEvent(ctx, store.LevelInfo, store.EvtSnapshotsPurge,
+		_ = st.WriteEvent(rowCtx, store.LevelInfo, store.EvtSnapshotsPurge,
 			fmt.Sprintf("purged %s (%s)", c.TemplateName, c.Engine),
 			repoID, 0, "", 0, map[string]string{
 				"engine":      c.Engine,
@@ -159,7 +167,7 @@ func SweepBySource(ctx context.Context, cfg *config.Config, st *store.Store) {
 		slog.Warn("snapshot source sweep query", "err", err)
 		return
 	}
-	evictCandidates(ctx, cfg, st, cands, 0, store.EvtSnapshotsEvictSource, "snapshot source sweep",
+	evictCandidates(ctx, newDropPool(cfg, engineconn.Connect), st, cands, 0, store.EvtSnapshotsEvictSource, "snapshot source sweep",
 		func(c store.SnapshotEvictionCandidate) string {
 			return fmt.Sprintf("evicted %s (over keep_per_source=%d)", c.TemplateName, keep)
 		})
@@ -172,7 +180,10 @@ func SweepBySource(ctx context.Context, cfg *config.Config, st *store.Store) {
 type dropPool struct {
 	cfg     *config.Config
 	connect func(context.Context, *config.Config, engine.Family, string) (engineconn.Conn, bool, error)
-	conns   map[connKey]engineconn.Conn
+	// mu guards conns: evictCandidates drops in parallel, and holding it
+	// across the dial keeps it to one connection per engine.
+	mu    sync.Mutex
+	conns map[connKey]engineconn.Conn
 }
 
 type connKey struct {
@@ -189,6 +200,8 @@ func newDropPool(
 
 func (p *dropPool) get(ctx context.Context, fam engine.Family, name string) (engineconn.Conn, error) {
 	key := connKey{fam, name}
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	if c, ok := p.conns[key]; ok {
 		return c, nil
 	}
@@ -204,6 +217,8 @@ func (p *dropPool) get(ctx context.Context, fam engine.Family, name string) (eng
 }
 
 func (p *dropPool) close() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	for _, c := range p.conns {
 		_ = c.Close()
 	}
@@ -255,7 +270,7 @@ func SweepByAge(ctx context.Context, cfg *config.Config, st *store.Store) {
 		slog.Warn("snapshot age sweep query", "err", err)
 		return
 	}
-	evictCandidates(ctx, cfg, st, cands, 0, store.EvtSnapshotsEvictAge, "snapshot age sweep",
+	evictCandidates(ctx, newDropPool(cfg, engineconn.Connect), st, cands, 0, store.EvtSnapshotsEvictAge, "snapshot age sweep",
 		func(c store.SnapshotEvictionCandidate) string {
 			return fmt.Sprintf("evicted %s (older than %dd)", c.TemplateName, days)
 		})

@@ -2,6 +2,7 @@ package snapshot
 
 import (
 	"context"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -14,6 +15,7 @@ import (
 // countingDropConn is a fake engineconn.Conn: DropSnapshot always
 // succeeds, dials are counted at the connect-func level.
 type countingDropConn struct {
+	mu      *sync.Mutex
 	dropped *[]string
 }
 
@@ -21,11 +23,15 @@ func (c countingDropConn) Close() error                                  { retur
 func (c countingDropConn) EngineVersion(context.Context) (string, error) { return "", nil }
 func (c countingDropConn) Exists(context.Context, string) (bool, error)  { return false, nil }
 func (c countingDropConn) DropSnapshot(_ context.Context, n string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	*c.dropped = append(*c.dropped, n)
 	return nil
 }
 
 func (c countingDropConn) DropMatching(_ context.Context, n string) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	*c.dropped = append(*c.dropped, n)
 	return 1, nil
 }
@@ -55,7 +61,7 @@ func TestEvictCandidatesOneDialPerFamily(t *testing.T) {
 	dropped := &[]string{}
 	fake := func(context.Context, *config.Config, engine.Family, string) (engineconn.Conn, bool, error) {
 		dials.Add(1)
-		return countingDropConn{dropped: dropped}, true, nil
+		return countingDropConn{mu: &sync.Mutex{}, dropped: dropped}, true, nil
 	}
 
 	n := 12
@@ -66,7 +72,7 @@ func TestEvictCandidatesOneDialPerFamily(t *testing.T) {
 			Fingerprint: fp, Engine: "mysql", TemplateName: "_tm_t" + string(rune('a'+i)), SourceDB: "src",
 		})
 	}
-	evictCandidatesVia(ctx, st, repoID, cands, fake)
+	evictCandidates(ctx, newDropPool(&config.Config{}, fake), st, cands, repoID, store.EvtSnapshotsEvictCap, "test", testEvictMsg)
 
 	if got := dials.Load(); got != 1 {
 		t.Errorf("dials = %d, want 1 (one conn for the whole mysql batch)", got)
@@ -100,7 +106,7 @@ func TestEvictCandidatesSkipsPinned(t *testing.T) {
 
 	dropped := &[]string{}
 	fake := func(context.Context, *config.Config, engine.Family, string) (engineconn.Conn, bool, error) {
-		return countingDropConn{dropped: dropped}, true, nil
+		return countingDropConn{mu: &sync.Mutex{}, dropped: dropped}, true, nil
 	}
 
 	pinned := fingerprintForTest(1)
@@ -118,10 +124,10 @@ func TestEvictCandidatesSkipsPinned(t *testing.T) {
 	unpin := Pin(pinned)
 	defer unpin()
 
-	evictCandidatesVia(ctx, st, repoID, []store.SnapshotEvictionCandidate{
+	evictCandidates(ctx, newDropPool(&config.Config{}, fake), st, []store.SnapshotEvictionCandidate{
 		{Fingerprint: pinned, Engine: "mysql", TemplateName: "_tm_p"},
 		{Fingerprint: free, Engine: "mysql", TemplateName: "_tm_f"},
-	}, fake)
+	}, repoID, store.EvtSnapshotsEvictCap, "test", testEvictMsg)
 
 	for _, name := range *dropped {
 		if name == "_tm_p" || name == "_tm_p"+PrewarmSuffix {
@@ -137,30 +143,62 @@ func TestEvictCandidatesSkipsPinned(t *testing.T) {
 	}
 }
 
-// evictCandidatesVia runs evictCandidates with an injected connect so
-// tests never touch a real engine.
-func evictCandidatesVia(
-	ctx context.Context, st *store.Store, repoID int64,
-	cands []store.SnapshotEvictionCandidate,
-	connect func(context.Context, *config.Config, engine.Family, string) (engineconn.Conn, bool, error),
-) {
-	pool := newDropPool(&config.Config{}, connect)
-	defer pool.close()
+func testEvictMsg(store.SnapshotEvictionCandidate) string { return "test" }
 
-	results := make([]error, len(cands))
-	for i, c := range cands {
-		if IsPinned(c.Fingerprint) {
-			continue
-		}
-		results[i] = pool.drop(ctx, c)
+// cancelAfterDropConn drops successfully, then cancels the eviction's
+// context — the moment a closing store or an expiring deadline lands
+// between a template's drop and its row delete.
+type cancelAfterDropConn struct {
+	countingDropConn
+	cancel context.CancelFunc
+}
+
+func (c cancelAfterDropConn) DropSnapshot(ctx context.Context, n string) error {
+	err := c.countingDropConn.DropSnapshot(ctx, n)
+	c.cancel()
+	return err
+}
+
+// TestEvictCandidatesDeletesRowsOfDroppedTemplatesAfterCancel pins
+// #131: once a template is dropped, its snapshot row goes too, even if
+// the eviction's context is cancelled right after the drop. Otherwise
+// `snapshots list` keeps rows for templates that no longer exist.
+func TestEvictCandidatesDeletesRowsOfDroppedTemplatesAfterCancel(t *testing.T) {
+	st, err := store.Open(context.Background(), t.TempDir()+"/t.db")
+	if err != nil {
+		t.Fatal(err)
 	}
-	for i, c := range cands {
-		if results[i] != nil || IsPinned(c.Fingerprint) {
-			continue
-		}
-		_ = st.DeleteSnapshot(ctx, c.Fingerprint)
-		_ = st.WriteEvent(ctx, store.LevelInfo, store.EvtSnapshotsEvictCap, "test",
-			repoID, 0, "", 0, nil)
+	defer func() { _ = st.Close() }()
+	repoID, err := st.EnsureRepo(context.Background(), "/repo", "repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fp := fingerprintForTest(7)
+	if err := st.RecordSnapshot(context.Background(), store.SnapshotRecord{
+		Fingerprint: fp, RepoID: repoID, Engine: "mysql", TemplateName: "_tm_c", SourceDB: "s",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	dropped := &[]string{}
+	fake := func(context.Context, *config.Config, engine.Family, string) (engineconn.Conn, bool, error) {
+		return cancelAfterDropConn{mu: &sync.Mutex{}, dropped: dropped, cancel: cancel}, true, nil
+	}
+	evictCandidates(ctx, newDropPool(&config.Config{}, fake), st, []store.SnapshotEvictionCandidate{
+		{Fingerprint: fp, Engine: "mysql", TemplateName: "_tm_c", SourceDB: "s"},
+	}, repoID, store.EvtSnapshotsEvictCap, "test", testEvictMsg)
+
+	if len(*dropped) == 0 {
+		t.Fatal("template was not dropped")
+	}
+	rows, err := st.ListSnapshotsForRepo(context.Background(), repoID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 0 {
+		t.Errorf("row of a dropped template survived the cancelled eviction: %+v", rows)
 	}
 }
 

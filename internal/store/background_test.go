@@ -1,23 +1,24 @@
 package store
 
 import (
-	"context"
 	"path/filepath"
 	"testing"
 	"time"
 )
 
-func TestCloseCancelsAndAwaitsBackgroundWork(t *testing.T) {
+func TestCloseAwaitsBackgroundWork(t *testing.T) {
 	s, err := Open(t.Context(), filepath.Join(t.TempDir(), "tm.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	started := make(chan struct{})
 	finished := make(chan struct{})
-	s.Go("test:bg", "", func(ctx context.Context) {
+	s.Go("test:bg", "", func() {
 		close(started)
-		<-ctx.Done()
-		time.Sleep(50 * time.Millisecond)
+		time.Sleep(100 * time.Millisecond)
+		if _, err := s.DB.Exec(`SELECT 1`); err != nil {
+			t.Errorf("background work saw a closed store: %v", err)
+		}
 		close(finished)
 	})
 	<-started
@@ -31,7 +32,7 @@ func TestCloseCancelsAndAwaitsBackgroundWork(t *testing.T) {
 	}
 
 	ran := make(chan struct{}, 1)
-	s.Go("test:late", "", func(context.Context) { ran <- struct{}{} })
+	s.Go("test:late", "", func() { ran <- struct{}{} })
 	select {
 	case <-ran:
 		t.Fatal("Go ran work on a closed store")
