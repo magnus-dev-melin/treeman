@@ -112,34 +112,31 @@ func TestRunHooksReturnsFastRegardlessOfCommandDuration(t *testing.T) {
 // return until every group has actually completed.
 func TestRunHooksWaitBlocksUntilGroupsExit(t *testing.T) {
 	wt := t.TempDir()
-	entries := []config.Action{
-		{Run: []string{"sleep 0.3 && touch a"}},
-		{Run: []string{"sleep 0.3 && touch b"}},
+	// Each group announces itself, then waits for the other before it
+	// finishes: run sequentially, the first group would never see its
+	// peer and exit 1, so parallelism is proven without timing.
+	rendezvous := func(self, peer string) string {
+		return "touch " + self + ".started && " +
+			"for i in $(seq 200); do [ -e " + peer + ".started ] && touch " + self + " && exit 0; sleep 0.05; done; exit 1"
 	}
-	started := time.Now()
+	entries := []config.Action{
+		{Run: []string{rendezvous("a", "b")}},
+		{Run: []string{rendezvous("b", "a")}},
+	}
 	out, err := RunHooks(context.Background(), "setup", entries, wt, wt, "slug", false, emptyEnv(), true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	elapsed := time.Since(started)
-	// Both files must exist when RunHooks returns — no waitUntil.
-	if _, err := os.Stat(filepath.Join(wt, "a")); err != nil {
-		t.Errorf("a missing after wait=true return: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(wt, "b")); err != nil {
-		t.Errorf("b missing after wait=true return: %v", err)
-	}
-	// Groups run in parallel — wall time should track one sleep, not
-	// the sum. Allow generous slack for slow runners.
-	if elapsed < 250*time.Millisecond {
-		t.Errorf("returned before group sleep finished: %v", elapsed)
-	}
-	if elapsed > 700*time.Millisecond {
-		t.Errorf("groups didn't parallelise (took %v)", elapsed)
-	}
 	for i, g := range out.Groups {
 		if g.ExitCode != 0 {
-			t.Errorf("group %d exit %d", i, g.ExitCode)
+			t.Errorf("group %d exit %d — groups didn't run in parallel", i, g.ExitCode)
+		}
+	}
+	// Both files are written as each group's last step, so they must
+	// exist when RunHooks returns — no waitUntil.
+	for _, f := range []string{"a", "b"} {
+		if _, err := os.Stat(filepath.Join(wt, f)); err != nil {
+			t.Errorf("%s missing after wait=true return: %v", f, err)
 		}
 	}
 }
