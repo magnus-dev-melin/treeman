@@ -1,0 +1,10 @@
+ignore:
+  - vulnerability: GO-2026-5932
+    package:
+      name: golang.org/x/crypto
+      type: go-module
+    reason: >-
+      Flags golang.org/x/crypto/openpgp as unmaintained in every release, so
+      no version fixes it. treeman never links openpgp (go list -deps ./...);
+      x/crypto is only pulled in for pbkdf2 via the mongo driver. govulncheck,
+      which checks reachability, reports it as not called.
