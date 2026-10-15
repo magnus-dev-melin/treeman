@@ -288,3 +288,20 @@ func TestWorktreeCreateArgsRoundTrip(t *testing.T) {
 		t.Errorf("unset fields leaked onto the wire: %v", p)
 	}
 }
+
+// TestPrepareArgsRoundTrip: the prepare task's param encoding and
+// decoding are inverses, and an unset Fresh stays off the wire.
+func TestPrepareArgsRoundTrip(t *testing.T) {
+	for _, in := range []PrepareArgs{{}, {Fresh: true}} {
+		task := in.Task("/repo", "/repo/wt", map[string]string{"PATH": "/bin"})
+		if task.Type != TaskPrepare || task.RepoPath != "/repo" || task.WorktreePath != "/repo/wt" || task.InheritedEnv["PATH"] != "/bin" {
+			t.Errorf("Task routing fields = %+v", task)
+		}
+		if got := PrepareArgsOf(task); got != in {
+			t.Errorf("round trip = %+v, want %+v", got, in)
+		}
+	}
+	if p := (PrepareArgs{}).Task("/r", "/r", nil).Params; len(p) != 0 {
+		t.Errorf("unset fields leaked onto the wire: %v", p)
+	}
+}

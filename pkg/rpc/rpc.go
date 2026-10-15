@@ -185,6 +185,7 @@ const (
 	ParamNoFetch      = "no_fetch"
 	ParamSkipHooks    = "skip_hooks"
 	ParamSkipPrepare  = "skip_prepare"
+	ParamFresh        = "fresh"
 	ParamLevels       = "levels"
 	ParamEventTypes   = "event_types"
 	ParamUntilMs      = "until_ms"
@@ -367,6 +368,25 @@ func WorktreeCreateArgsOf(t Task) WorktreeCreateArgs {
 		SkipHooks:   FlagParam(t, ParamSkipHooks),
 		SkipPrepare: FlagParam(t, ParamSkipPrepare),
 	}
+}
+
+// PrepareArgs is the typed form of a TaskPrepare's Params, shared by
+// the CLI producer and the daemon consumer like WorktreeCreateArgs.
+type PrepareArgs struct {
+	Fresh bool
+}
+
+// Task builds the TaskPrepare for worktreePath in repoPath, carrying
+// the caller's inherited env.
+func (a PrepareArgs) Task(repoPath, worktreePath string, inheritedEnv map[string]string) Task {
+	params := map[string]string{}
+	setFlagParam(params, ParamFresh, a.Fresh)
+	return Task{Type: TaskPrepare, RepoPath: repoPath, WorktreePath: worktreePath, Params: params, InheritedEnv: inheritedEnv}
+}
+
+// PrepareArgsOf decodes a TaskPrepare's Params into PrepareArgs.
+func PrepareArgsOf(t Task) PrepareArgs {
+	return PrepareArgs{Fresh: FlagParam(t, ParamFresh)}
 }
 
 // FlagParam reports whether boolean param key is set on t (encoded "1").

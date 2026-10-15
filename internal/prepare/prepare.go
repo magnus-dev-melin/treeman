@@ -606,6 +606,11 @@ type RunOptions struct {
 	OnlyDBIndex int
 	// FilterDBs is true when OnlyDBIndex should be honoured.
 	FilterDBs bool
+	// Fresh restores every templated database and its test clones from
+	// the cached template even when this worktree already holds them at
+	// the current fingerprint, discarding whatever state they picked up
+	// since (e.g. rows a previous CI build's tests left behind).
+	Fresh bool
 }
 
 // RunFiltered prepares the configured databases, optionally
@@ -642,6 +647,11 @@ func RunFiltered(
 		return nil, fmt.Errorf("wait for concurrent prepare: %w", err)
 	}
 	defer unlock()
+	if opts.Fresh && st != nil {
+		if err := st.ClearTemplateBuiltForWorktree(ctx, worktreeID); err != nil {
+			return nil, fmt.Errorf("clear built-at fingerprints of worktree %d for a fresh prepare: %w", worktreeID, err)
+		}
+	}
 	// Share engine version / max_connections probes across the parallel
 	// per-database goroutines below — N databases on one engine pay one
 	// round-trip instead of N.
