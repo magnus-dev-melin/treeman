@@ -18,6 +18,7 @@ import (
 	"github.com/stubbedev/treeman/internal/ports"
 	"github.com/stubbedev/treeman/internal/prepare"
 	"github.com/stubbedev/treeman/internal/resolve"
+	"github.com/stubbedev/treeman/internal/runid"
 	"github.com/stubbedev/treeman/internal/slug"
 	"github.com/stubbedev/treeman/internal/store"
 	"github.com/stubbedev/treeman/internal/template"
@@ -186,7 +187,7 @@ func FinalizeWorktree(
 	// slips through (e.g. an explicit `treeman worktree finalize` while
 	// one is still running), it returns immediately instead of
 	// re-running setup hooks in parallel.
-	release, err := beginFinalize(ctx, st, wtRoot, cancel)
+	release, err := beginFinalize(ctx, st, wtRoot, st.MarkFinalizeInFlight(wtRoot, cancel))
 	if release == nil {
 		return err
 	}
@@ -578,31 +579,57 @@ func runFinalizeSetupPipeline(
 	return false, nil
 }
 
-// beginFinalize claims wtRoot for one finalize run and returns the
-// func that releases it. A nil release means the caller must return
-// the (possibly nil) error without doing any work:
-//   - another finalize of wtRoot is already in flight in this daemon
-//     (MarkFinalizeInFlight) — the duplicate is dropped, nil error;
+// beginFinalize takes the cross-process lock for a run that has
+// claimed wtRoot's in-flight slot and returns the func that releases
+// both. A nil release means the caller must return the (possibly nil)
+// error without doing any work:
+//   - claimed is false: another finalize of wtRoot is already in
+//     flight in this daemon — a full finalize is dropped, a watch
+//     re-prepare was queued on it (MarkFinalizeInFlightOrQueue); nil
+//     error;
 //   - ctx was cancelled (teardown preempt, deadline) while queued —
 //     a clean stop, nil error.
 //
-// MarkFinalizeInFlight only sees this daemon. A `treeman worktree
+// The in-flight slot only sees this daemon. A `treeman worktree
 // finalize --local` runs the same tail in its own process (#123), so
 // the run then queues behind it on the cross-process lock instead of
 // running the hooks and the database build alongside it.
-func beginFinalize(ctx context.Context, st *State, wtRoot string, cancel context.CancelFunc) (func(), error) {
-	if !st.MarkFinalizeInFlight(wtRoot, cancel) {
+//
+// Releasing the slot replays the watch reruns queued on it.
+func beginFinalize(ctx context.Context, st *State, wtRoot string, claimed bool) (func(), error) {
+	if !claimed {
 		return nil, nil
 	}
 	unlock, err := wtlock.Acquire(ctx, wtlock.Finalize, wtRoot, nil)
 	if err == nil {
 		return func() {
 			unlock()
-			st.UnmarkFinalizeInFlight(wtRoot)
+			replayWatchReruns(st, wtRoot, st.UnmarkFinalizeInFlight(wtRoot))
 		}, nil
 	}
-	st.UnmarkFinalizeInFlight(wtRoot)
+	replayWatchReruns(st, wtRoot, st.UnmarkFinalizeInFlight(wtRoot))
 	return nil, unlessCancelled(ctx, err)
+}
+
+// replayWatchReruns runs, in order and off the releasing goroutine,
+// the watch re-prepares that were queued behind a finalize of wtRoot.
+// A teardown that started meanwhile drops them, the same way the
+// watch dispatcher drops events during a teardown.
+func replayWatchReruns(st *State, wtRoot string, reruns []WatchRerun) {
+	if len(reruns) == 0 {
+		return
+	}
+	safeGo(lblWatchFinalize, wtRoot, func() {
+		for _, r := range reruns {
+			if st.IsTeardownInFlight(wtRoot) {
+				return
+			}
+			ctx := runid.With(st.BgCtx, r.RunID)
+			if err := FinalizeWorktreeForWatch(ctx, st, r.RepoPath, wtRoot, r.DBIndex, r.Env); err != nil {
+				slog.Warn("queued watcher-triggered finalize", "wt", wtRoot, "db_idx", r.DBIndex, "err", err)
+			}
+		}
+	})
 }
 
 // unlessCancelled drops err when ctx was cancelled: a run stopped by
@@ -659,7 +686,16 @@ func FinalizeWorktreeForWatch(
 	// patches (EnsureFilter → `git add --renormalize` → clean filter)
 	// and runs on st.BgCtx with no inherited override.
 	ctx = gitcmd.WithPath(ctx, inheritedEnv["PATH"])
-	release, err := beginFinalize(ctx, st, wtRoot, cancel)
+	claimed := st.MarkFinalizeInFlightOrQueue(wtRoot, cancel, WatchRerun{
+		RepoPath: repoRoot,
+		DBIndex:  dbIdx,
+		Env:      inheritedEnv,
+		RunID:    runid.From(ctx),
+	})
+	if !claimed {
+		slog.Info("watch re-prepare queued behind in-flight finalize", "wt", wtRoot, "db_idx", dbIdx)
+	}
+	release, err := beginFinalize(ctx, st, wtRoot, claimed)
 	if release == nil {
 		return err
 	}

@@ -1,10 +1,12 @@
 package daemon
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"maps"
 	"path/filepath"
+	"slices"
 	"sync"
 	"time"
 
@@ -163,6 +165,21 @@ func (st *State) RefsDigestChanged(repoPath, digest string) bool {
 type inFlightFinalize struct {
 	cancel    context.CancelFunc
 	startedAt time.Time
+	// watchReruns holds the watch-triggered re-prepares that arrived
+	// while this finalize ran, keyed by database index (-1 = every
+	// database). They are handed back by UnmarkFinalizeInFlight.
+	watchReruns map[int]WatchRerun
+}
+
+// WatchRerun is a watch-triggered re-prepare that found another
+// finalize of its worktree in flight. Its input change may postdate
+// the in-flight run's fingerprint (#128), so it is replayed once that
+// run releases instead of being dropped.
+type WatchRerun struct {
+	RepoPath string
+	DBIndex  int
+	Env      map[string]string
+	RunID    string
 }
 
 // DBDropJob is one queued `prepare.TeardownDatabases` invocation,
@@ -331,6 +348,38 @@ func (st *State) IsTeardownInFlight(wtPath string) bool {
 func (st *State) MarkFinalizeInFlight(wtPath string, cancel context.CancelFunc) bool {
 	st.inFlightMu.Lock()
 	defer st.inFlightMu.Unlock()
+	return st.markFinalizeLocked(wtPath, cancel)
+}
+
+// MarkFinalizeInFlightOrQueue is MarkFinalizeInFlight for the watch
+// re-prepare path: when another finalize of wtPath is in flight it
+// queues r on that finalize (coalesced per database index) and returns
+// false. Claiming and queueing share one critical section with
+// UnmarkFinalizeInFlight, so a rerun can never be queued on a finalize
+// that has already handed its queue back.
+func (st *State) MarkFinalizeInFlightOrQueue(wtPath string, cancel context.CancelFunc, r WatchRerun) bool {
+	st.inFlightMu.Lock()
+	defer st.inFlightMu.Unlock()
+	if st.markFinalizeLocked(wtPath, cancel) {
+		return true
+	}
+	entry := st.inFlightFinalizes[wtPath]
+	_, all := entry.watchReruns[-1]
+	switch {
+	case all:
+		r.DBIndex = -1
+	case r.DBIndex == -1:
+		clear(entry.watchReruns)
+	}
+	if entry.watchReruns == nil {
+		entry.watchReruns = map[int]WatchRerun{}
+	}
+	entry.watchReruns[r.DBIndex] = r
+	st.inFlightFinalizes[wtPath] = entry
+	return false
+}
+
+func (st *State) markFinalizeLocked(wtPath string, cancel context.CancelFunc) bool {
 	if _, exists := st.inFlightFinalizes[wtPath]; exists {
 		return false
 	}
@@ -341,11 +390,16 @@ func (st *State) MarkFinalizeInFlight(wtPath string, cancel context.CancelFunc) 
 	return true
 }
 
-// UnmarkFinalizeInFlight clears the in-flight marker for wtPath.
-func (st *State) UnmarkFinalizeInFlight(wtPath string) {
+// UnmarkFinalizeInFlight clears the in-flight marker for wtPath and
+// returns the watch reruns queued on it, ordered by database index.
+func (st *State) UnmarkFinalizeInFlight(wtPath string) []WatchRerun {
 	st.inFlightMu.Lock()
+	entry := st.inFlightFinalizes[wtPath]
 	delete(st.inFlightFinalizes, wtPath)
 	st.inFlightMu.Unlock()
+	reruns := slices.Collect(maps.Values(entry.watchReruns))
+	slices.SortFunc(reruns, func(a, b WatchRerun) int { return cmp.Compare(a.DBIndex, b.DBIndex) })
+	return reruns
 }
 
 // MarkCreateInFlight records that a worktree_create task is running
