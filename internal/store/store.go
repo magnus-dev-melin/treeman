@@ -69,6 +69,10 @@ type Store struct {
 	batchCancel context.CancelFunc
 	batchDone   chan struct{}
 	batchActive bool
+	// flushMu serialises flushes, so FlushEvents returning means every
+	// row enqueued before the call is committed — including a batch the
+	// flusher goroutine had already taken but not yet committed.
+	flushMu sync.Mutex
 
 	// Event-hook registry. Hooks fire after every successful WriteEvent
 	// insert (both sync and batched paths). Used by the daemon's
@@ -343,6 +347,8 @@ func (s *Store) eventBatchLoop() {
 // lose unrelated events, so we fall back to a per-row insert when
 // the transaction fails.
 func (s *Store) flushEvents(ctx context.Context) {
+	s.flushMu.Lock()
+	defer s.flushMu.Unlock()
 	s.batchMu.Lock()
 	if len(s.batchBuf) == 0 {
 		s.batchMu.Unlock()
@@ -374,6 +380,14 @@ func (s *Store) flushEvents(ctx context.Context) {
 		slog.Warn("event batch: commit failed, falling back to per-row", "err", err, "rows", len(batch))
 		s.flushEventsFallback(ctx, batch)
 	}
+}
+
+// FlushEvents commits every event enqueued so far before returning. A
+// no-op without the batcher, where WriteEvent is synchronous. Call it
+// before announcing that a run finished, so a subscriber that reads the
+// event log as soon as it sees the announcement finds the run's events.
+func (s *Store) FlushEvents(ctx context.Context) {
+	s.flushEvents(ctx)
 }
 
 // flushEventsFallback re-inserts a batch one row at a time when the

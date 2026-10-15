@@ -50,6 +50,7 @@ func handleRunPlan(ctx context.Context, st *State, req rpc.Request) rpc.Response
 
 	if args.Wait {
 		results := ExecutePlan(withTrigger(runid.With(ctx, id), requested), st, args.Groups)
+		st.Store.FlushEvents(ctx)
 		return rpc.Response{Kind: rpc.KindPlanResult, TaskResults: results}
 	}
 
@@ -57,6 +58,7 @@ func handleRunPlan(ctx context.Context, st *State, req rpc.Request) rpc.Response
 		bg := withTrigger(runid.With(st.BgCtx, id), requested)
 		_ = st.Store.WriteEvent(bg, store.LevelInfo, store.EvtPlanStart, "plan beginning", 0, 0, "", 0, triggerPayload(bg))
 		results := ExecutePlan(bg, st, args.Groups)
+		st.Store.FlushEvents(bg)
 		if msg := firstFailure(results); msg != "" {
 			_ = st.Store.WriteEvent(bg, store.LevelError, store.EvtPlanError, msg, 0, 0, "", 0, nil)
 			return
@@ -531,8 +533,13 @@ func runTaskConfigWrite(ctx context.Context, st *State, task rpc.Task) (json.Raw
 
 // runTaskWorktreeCreate performs the git-front of worktree creation
 // (git worktree add + register + port alloc) on the daemon's warm store,
-// then kicks the hooks+prepare finalize tail asynchronously (under
-// BgCtx, so it outlives the result RPC) and returns the new path + ids.
+// then runs the hooks+prepare finalize tail. By default the tail is
+// kicked asynchronously (under BgCtx, so it outlives the result RPC) and
+// the task returns the new path + ids at once. With args.Wait, or with
+// no daemon to outlive the call (SyncFinalize), the tail runs inline on
+// the plan's run id — a foreground caller streams its events — and its
+// failure fails the task (#129). FinalizeWorktree records the failure
+// event itself either way.
 func runTaskWorktreeCreate(ctx context.Context, st *State, task rpc.Task) (json.RawMessage, error) {
 	args := rpc.WorktreeCreateArgsOf(task)
 	req := wt.CreateRequest{
@@ -551,22 +558,24 @@ func runTaskWorktreeCreate(ctx context.Context, st *State, task rpc.Task) (json.
 	if err != nil {
 		return nil, err
 	}
-	if needsFinalize {
-		repoRoot, wtPath, env := req.RepoRoot, res.WtPath, req.Env
-		runFinalize := func(bg context.Context) {
-			if ferr := FinalizeWorktree(bg, st, repoRoot, wtPath, env, req.SkipPrepare); ferr != nil {
-				_ = st.Store.WriteEvent(bg, store.LevelError, store.EvtWorktreeCreateError, ferr.Error(),
-					0, 0, "", 0, map[string]string{"repo_path": repoRoot, "worktree_path": wtPath})
-			}
-		}
-		if st.SyncFinalize {
-			// No daemon to outlive the call — run the tail before returning.
-			runFinalize(runid.With(ctx, runid.New()))
-		} else {
-			safeGo(lblWorktreeFinalize, "", func() { runFinalize(inheritTrigger(runid.With(st.BgCtx, runid.New()), ctx)) })
-		}
-		res.Status = wt.CreatedQueued
+	if !needsFinalize {
+		return json.Marshal(res)
 	}
+	repoRoot, wtPath, env := req.RepoRoot, res.WtPath, req.Env
+	if args.Wait || st.SyncFinalize {
+		if err := FinalizeWorktree(ctx, st, repoRoot, wtPath, env, req.SkipPrepare); err != nil {
+			return nil, fmt.Errorf("worktree %s was created but its setup failed: %w", wtPath, err)
+		}
+		res.Status = wt.CreatedReady
+		return json.Marshal(res)
+	}
+	safeGo(lblWorktreeFinalize, "", func() {
+		bg := inheritTrigger(runid.With(st.BgCtx, runid.New()), ctx)
+		if err := FinalizeWorktree(bg, st, repoRoot, wtPath, env, req.SkipPrepare); err != nil {
+			slog.Warn("create finalize", "wt", wtPath, "err", err)
+		}
+	})
+	res.Status = wt.CreatedQueued
 	return json.Marshal(res)
 }
 

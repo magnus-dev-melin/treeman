@@ -67,6 +67,10 @@ type finalizeFailure struct {
 // dropping the databases destroys healthy state and turns the retry
 // into a rebuild-from-nothing (#21).
 //
+// A failure before the worktree's row is resolved (config load,
+// EnsureRepo, ResolveIdentity) has f.wtID == 0 and is recorded as a
+// repo-less event carrying the paths in its payload.
+//
 // Reaching here with f.err != nil already means a GENUINE failure: the
 // pipeline converts every cancellation/timeout into `done=true,
 // err=nil` at its phase boundaries (see runFinalizeSetupPipeline), so a
@@ -134,13 +138,9 @@ func FinalizeWorktree(
 		if err == nil {
 			return
 		}
-		if termWtID == 0 {
-			// Pre-identity error (LoadResolved, EnsureRepo,
-			// ResolveIdentity): we don't have a row to attach a
-			// terminal event to. Let the dispatch-level safety net at
-			// dispatch.go log a global worktree:create:error error instead.
-			return
-		}
+		// Every failure is recorded here, exactly once, and still
+		// returned so a caller that waits on the run (create/finalize
+		// --foreground) fails with it (#129).
 		recordFinalizeFailure(ctx, st, &cfg, finalizeFailure{
 			repoRoot:       repoRoot,
 			wtRoot:         wtRoot,
@@ -150,9 +150,6 @@ func FinalizeWorktree(
 			enginesTouched: enginesTouched,
 			err:            err,
 		})
-		// Swallow the error so dispatch doesn't double-log the same
-		// failure as a second (row-less) worktree:create:error event.
-		err = nil
 	}()
 
 	// Derive a cancellable, DEADLINE-bound ctx. Two jobs:

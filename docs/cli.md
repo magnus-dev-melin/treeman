@@ -40,7 +40,7 @@ Examples:
 | `--skip-prepare` | run hooks/links/copies/patches but provision no databases |
 | `--no-fetch` | skip the pre-create `git fetch origin <base>` (defaults on so new branches pick up upstream commits) |
 | `--print-path` | print only the new worktree path on stdout; status lines redirect to stderr (enables `cd "$(treeman worktree create …)"`) |
-| `-f`, `--wait`, `--foreground` | stream live progress and block until finalize completes (default: dispatch and return) |
+| `-f`, `--wait`, `--foreground` | stream the daemon's live progress and block until done, exiting non-zero on failure (default: dispatch and return) |
 
 ### `treeman worktree delete`
 
@@ -200,6 +200,7 @@ which may check out in the main repo). To always land in a worktree, use
 | `--from` | base branch (with --create/--checkout) |
 | `-r`, `--repo` |  |
 | `--no-fetch` | skip the pre-checkout `git fetch origin <base>` |
+| `-f`, `--wait`, `--foreground` | stream the daemon's live progress and block until done, exiting non-zero on failure (default: dispatch and return) |
 
 ### `treeman worktree switch`
 
@@ -210,6 +211,7 @@ switch to or create a branch's worktree — never checks out in the main repo (p
 | `-r`, `--repo` |  |
 | `--from` | base branch when creating |
 | `--no-fetch` | skip the pre-checkout fetch |
+| `--wait`, `--foreground` | stream the daemon's live progress and block until done, exiting non-zero on failure (default: dispatch and return) |
 
 ### `treeman worktree prune`
 
@@ -367,6 +369,7 @@ checkout or create a branch, worktree-aware (prints dest path for cd)
 | `-r`, `--repo` |  |
 | `--from` | base branch when creating |
 | `--no-fetch` | skip the pre-checkout fetch |
+| `--wait`, `--foreground` | stream the daemon's live progress and block until done, exiting non-zero on failure (default: dispatch and return) |
 
 ### `treeman git amend`
 
@@ -517,7 +520,7 @@ ensure → dump → migrate → snapshot → replicate
 | `--json` |  |
 | `--no-daemon` | run synchronously in this process without connecting to or starting a daemon (for CI) |
 | `--dry-run` | render the per-database pipeline plan (source dbs, dumps, migrate/seed commands, fanout) without executing anything |
-| `-f`, `--wait`, `--foreground` | stream the daemon's live progress and block until done (default: dispatch and return) |
+| `-f`, `--wait`, `--foreground` | stream the daemon's live progress and block until done, exiting non-zero on failure (default: dispatch and return) |
 
 ### `treeman db`
 
@@ -533,7 +536,7 @@ re-sync branch_scoped databases from the live base branch (defaults to the cwd's
 | `--engine` | restrict the reset to one engine family (mysql, postgres, mongodb, redis, elasticsearch; aliases like mariadb/postgresql/valkey/dragonfly accepted) |
 | `--json` |  |
 | `--dry-run` | list the branch_scoped namespaces that would be dropped + re-seeded; change nothing, connect nowhere |
-| `-f`, `--wait`, `--foreground` | stream the daemon's live progress and block until done (default: dispatch and return) |
+| `-f`, `--wait`, `--foreground` | stream the daemon's live progress and block until done, exiting non-zero on failure (default: dispatch and return) |
 
 ### `treeman db save`
 
@@ -544,7 +547,7 @@ capture branch_scoped databases into the current branch's durable copies without
 | `-r`, `--repo` |  |
 | `--engine` | restrict the save to one engine family (mysql, postgres, mongodb, redis, elasticsearch; aliases like mariadb/postgresql/valkey/dragonfly accepted) |
 | `--json` |  |
-| `-f`, `--wait`, `--foreground` | stream the daemon's live progress and block until done (default: dispatch and return) |
+| `-f`, `--wait`, `--foreground` | stream the daemon's live progress and block until done, exiting non-zero on failure (default: dispatch and return) |
 
 ### `treeman db status`
 
@@ -577,7 +580,7 @@ run a hook phase using the cwd's repo config
 |---|---|
 | `-w`, `--worktree` |  |
 | `--json` |  |
-| `-f`, `--wait`, `--foreground` | stream the daemon's live progress and block until done (default: dispatch and return) |
+| `-f`, `--wait`, `--foreground` | stream the daemon's live progress and block until done, exiting non-zero on failure (default: dispatch and return) |
 
 ### `treeman logs`
 
@@ -961,7 +964,7 @@ delete snapshot rows whose engine-side template no longer exists (orphans); live
 |---|---|
 | `-r`, `--repo` |  |
 | `--json` |  |
-| `-f`, `--wait`, `--foreground` | stream the daemon's live progress and block until done (default: dispatch and return) |
+| `-f`, `--wait`, `--foreground` | stream the daemon's live progress and block until done, exiting non-zero on failure (default: dispatch and return) |
 
 ### `treeman snapshots purge`
 
@@ -971,7 +974,7 @@ drop every cached snapshot for this repo and force the next prepare to rebuild
 |---|---|
 | `-r`, `--repo` |  |
 | `--json` |  |
-| `-f`, `--wait`, `--foreground` | stream the daemon's live progress and block until done (default: dispatch and return) |
+| `-f`, `--wait`, `--foreground` | stream the daemon's live progress and block until done, exiting non-zero on failure (default: dispatch and return) |
 
 ### `treeman mcp`
 

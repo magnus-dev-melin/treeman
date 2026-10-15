@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/urfave/cli/v3"
+
 	"github.com/stubbedev/treeman/internal/gitenv"
 	"github.com/stubbedev/treeman/internal/ui"
 )
@@ -65,6 +67,14 @@ func MustAbs(p string) string {
 // PrintOK / PrintWarn delegate to the ui package's colored helpers.
 // Color auto-disables on pipes, NO_COLOR=1, or dumb terminals — see
 // internal/ui.ColorEnabled.
+const foregroundUsage = "stream the daemon's live progress and block until done, exiting non-zero on failure (default: dispatch and return)"
+
+// foregroundFlag is the --foreground switch shared by every command that
+// dispatches daemon work and can instead block on it.
+func foregroundFlag() cli.Flag {
+	return &cli.BoolFlag{Name: "foreground", Aliases: []string{"wait", "f"}, Usage: foregroundUsage}
+}
+
 func PrintOK(format string, args ...any)   { ui.Success(format, args...) }
 func PrintWarn(format string, args ...any) { ui.Warn(format, args...) }
 func PrintErr(format string, args ...any)  { ui.Error(format, args...) }

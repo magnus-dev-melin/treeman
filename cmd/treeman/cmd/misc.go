@@ -53,11 +53,7 @@ func PrepareCmd() *cli.Command {
 				Name:  "dry-run",
 				Usage: "render the per-database pipeline plan (source dbs, dumps, migrate/seed commands, fanout) without executing anything",
 			},
-			&cli.BoolFlag{
-				Name:    "foreground",
-				Aliases: []string{"wait", "f"},
-				Usage:   "stream the daemon's live progress and block until done (default: dispatch and return)",
-			},
+			foregroundFlag(),
 		},
 		Action: func(ctx context.Context, c *cli.Command) error {
 			wtPath, repoRoot, err := resolveWtRepo(c.String("worktree"), c.String("repo"))
@@ -416,11 +412,7 @@ func DbCmd() *cli.Command {
 						Name:  "dry-run",
 						Usage: "list the branch_scoped namespaces that would be dropped + re-seeded; change nothing, connect nowhere",
 					},
-					&cli.BoolFlag{
-						Name:    "foreground",
-						Aliases: []string{"wait", "f"},
-						Usage:   "stream the daemon's live progress and block until done (default: dispatch and return)",
-					},
+					foregroundFlag(),
 				},
 				Action: func(ctx context.Context, c *cli.Command) error {
 					wtPath, repoRoot, err := resolveWtRepo(c.Args().First(), c.String("repo"))
@@ -455,11 +447,7 @@ func DbCmd() *cli.Command {
 						Usage: "restrict the save to one engine family (mysql, postgres, mongodb, redis, elasticsearch; aliases like mariadb/postgresql/valkey/dragonfly accepted)",
 					},
 					&cli.BoolFlag{Name: "json"},
-					&cli.BoolFlag{
-						Name:    "foreground",
-						Aliases: []string{"wait", "f"},
-						Usage:   "stream the daemon's live progress and block until done (default: dispatch and return)",
-					},
+					foregroundFlag(),
 				},
 				Action: func(ctx context.Context, c *cli.Command) error {
 					wtPath, repoRoot, err := resolveWtRepo(c.Args().First(), c.String("repo"))
@@ -563,11 +551,7 @@ func HookCmd() *cli.Command {
 			Flags: []cli.Flag{
 				&cli.StringFlag{Name: "worktree", Aliases: []string{"w"}},
 				&cli.BoolFlag{Name: "json"},
-				&cli.BoolFlag{
-					Name:    "foreground",
-					Aliases: []string{"wait", "f"},
-					Usage:   "stream the daemon's live progress and block until done (default: dispatch and return)",
-				},
+				foregroundFlag(),
 			},
 			Action: func(ctx context.Context, c *cli.Command) error {
 				if c.NArg() < 1 {

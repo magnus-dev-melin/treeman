@@ -52,6 +52,10 @@ const (
 	// CreatedNoFinalize — SkipHooks set, or no hooks/databases
 	// configured. Worktree exists, no tail dispatched.
 	CreatedNoFinalize CreateStatus = "no_finalize"
+	// CreatedReady — the hooks+prepare tail completed before the
+	// create returned: the caller asked to wait, or no daemon was
+	// reachable to run it detached.
+	CreatedReady CreateStatus = "ready"
 )
 
 // CreateResult is the structured outcome of a Create call. Status

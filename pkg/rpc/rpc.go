@@ -185,6 +185,7 @@ const (
 	ParamNoFetch      = "no_fetch"
 	ParamSkipHooks    = "skip_hooks"
 	ParamSkipPrepare  = "skip_prepare"
+	ParamWait         = "wait"
 	ParamLevels       = "levels"
 	ParamEventTypes   = "event_types"
 	ParamUntilMs      = "until_ms"
@@ -343,6 +344,9 @@ type WorktreeCreateArgs struct {
 	NoFetch     bool
 	SkipHooks   bool
 	SkipPrepare bool
+	// Wait runs the hooks + prepare tail before the task returns and
+	// fails the task when it fails, instead of detaching it.
+	Wait bool
 }
 
 // Task builds the TaskWorktreeCreate for a in repoPath, carrying the
@@ -354,6 +358,7 @@ func (a WorktreeCreateArgs) Task(repoPath string, inheritedEnv map[string]string
 	setFlagParam(params, ParamNoFetch, a.NoFetch)
 	setFlagParam(params, ParamSkipHooks, a.SkipHooks)
 	setFlagParam(params, ParamSkipPrepare, a.SkipPrepare)
+	setFlagParam(params, ParamWait, a.Wait)
 	return Task{Type: TaskWorktreeCreate, RepoPath: repoPath, Params: params, InheritedEnv: inheritedEnv}
 }
 
@@ -366,6 +371,7 @@ func WorktreeCreateArgsOf(t Task) WorktreeCreateArgs {
 		NoFetch:     FlagParam(t, ParamNoFetch),
 		SkipHooks:   FlagParam(t, ParamSkipHooks),
 		SkipPrepare: FlagParam(t, ParamSkipPrepare),
+		Wait:        FlagParam(t, ParamWait),
 	}
 }
 

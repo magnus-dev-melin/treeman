@@ -98,7 +98,15 @@ func validRef(ctx context.Context, repoRoot, name string) bool {
 // checkoutRoute (`git switch`, the zsh gcb — may check out in place)
 // and worktreeRoute (`worktree switch`, the zsh gwt — always a
 // worktree).
-type switchRoute func(ctx context.Context, repoRoot, branch, from string, noFetch bool) error
+type switchRoute func(ctx context.Context, repoRoot, branch string, opts spawnOpts) error
+
+// spawnOpts are the create knobs shared by every path that may spawn a
+// worktree for a branch.
+type spawnOpts struct {
+	from       string
+	noFetch    bool
+	foreground bool
+}
 
 // switchFlags is the flag set both switch commands share (runSwitch
 // reads exactly these).
@@ -107,14 +115,15 @@ func switchFlags() []cli.Flag {
 		&cli.StringFlag{Name: "repo", Aliases: []string{"r"}},
 		&cli.StringFlag{Name: "from", Usage: "base branch when creating"},
 		&cli.BoolFlag{Name: "no-fetch", Usage: "skip the pre-checkout fetch"},
+		&cli.BoolFlag{Name: "foreground", Aliases: []string{"wait"}, Usage: foregroundUsage},
 	}
 }
 
 // checkoutRoute — the `git switch` policy (was gcb): branch live in a
 // worktree → its path; main clean → checkout in main; main dirty →
 // new worktree; else checkout in place.
-func checkoutRoute(ctx context.Context, repoRoot, branch, from string, noFetch bool) error {
-	return goCheckout(ctx, repoRoot, branch, from, true, noFetch)
+func checkoutRoute(ctx context.Context, repoRoot, branch string, opts spawnOpts) error {
+	return goCheckout(ctx, repoRoot, branch, true, opts)
 }
 
 // worktreeRoute — the `worktree switch` policy (was gwt): the branch
@@ -123,18 +132,17 @@ func checkoutRoute(ctx context.Context, repoRoot, branch, from string, noFetch b
 // stderr; stdout stays the bare path for the cd shim). Never checks
 // out in the main repo — a local branch with no worktree gets a linked
 // worktree, not a `git checkout` that moves main off its branch.
-func worktreeRoute(ctx context.Context, repoRoot, branch, from string, noFetch bool) error {
+func worktreeRoute(ctx context.Context, repoRoot, branch string, opts spawnOpts) error {
 	if path, ok := liveWorktreeForBranch(ctx, repoRoot, branch); ok {
-		touchVisitedByPath(ctx, path)
-		fmt.Println(path)
+		landExisting(ctx, path)
 		return nil
 	}
 	// Remote-only branch: seed the worktree from its remote tip, not
 	// the repo default (create's pre-fetch resolves it to origin/<b>).
-	if from == "" && !wt.RefExistsLocal(ctx, repoRoot, branch) && wt.RefExistsRemote(ctx, repoRoot, branch) {
-		from = branch
+	if opts.from == "" && !wt.RefExistsLocal(ctx, repoRoot, branch) && wt.RefExistsRemote(ctx, repoRoot, branch) {
+		opts.from = branch
 	}
-	return goSpawnWorktree(ctx, repoRoot, branch, from, noFetch)
+	return goSpawnWorktree(ctx, repoRoot, branch, opts)
 }
 
 // liveWorktreeForBranch finds the worktree holding `branch`, preferring
@@ -278,9 +286,9 @@ func runSwitch(ctx context.Context, c *cli.Command, route switchRoute) error {
 		return err
 	}
 	branch := c.Args().First()
-	noFetch := c.Bool("no-fetch")
+	opts := spawnOpts{from: c.String("from"), noFetch: c.Bool("no-fetch"), foreground: c.Bool("foreground")}
 	if branch == "" {
-		return switchInteractive(ctx, repoRoot, c.String("from"), noFetch, route)
+		return switchInteractive(ctx, repoRoot, opts, route)
 	}
 	// zsh contract: an unknown BARE name goes through the branch wizard
 	// (prefix convention + handleize) instead of silently creating a
@@ -292,9 +300,9 @@ func runSwitch(ctx context.Context, c *cli.Command, route switchRoute) error {
 				"no branch %q — pass a prefixed name (feature/%s) to create it, or run interactively for the wizard",
 				branch, branch)
 		}
-		return wizardThenRoute(ctx, repoRoot, branch, noFetch, route)
+		return wizardThenRoute(ctx, repoRoot, branch, opts, route)
 	}
-	return route(ctx, repoRoot, branch, c.String("from"), noFetch)
+	return route(ctx, repoRoot, branch, opts)
 }
 
 // branchKnown reports whether `branch` resolves to anything switchable:
@@ -312,10 +320,10 @@ func branchKnown(ctx context.Context, repoRoot, branch string) bool {
 // markers and their path), then the unoccupied branches; or type a new
 // name / Ctrl+C to enter the branch wizard. The selection lands via
 // `route`, which prints the destination path for the shell `cd` shim.
-func switchInteractive(ctx context.Context, repoRoot, from string, noFetch bool, route switchRoute) error {
+func switchInteractive(ctx context.Context, repoRoot string, opts spawnOpts, route switchRoute) error {
 	items, targets := buildSwitchMenu(ctx, repoRoot)
 	if len(items) == 0 {
-		return wizardThenRoute(ctx, repoRoot, "", noFetch, route)
+		return wizardThenRoute(ctx, repoRoot, "", opts, route)
 	}
 	// Rows are decorated (markers, paths); the fuzzy filter matches the
 	// raw branch names in parallel Values.
@@ -324,11 +332,11 @@ func switchInteractive(ctx context.Context, repoRoot, from string, noFetch bool,
 	case errors.Is(err, tui.ErrAborted):
 		return nil // Esc — quit the whole command, no wizard
 	case errors.Is(err, tui.ErrCanceled), err == nil && res.Index < 0:
-		return wizardThenRoute(ctx, repoRoot, res.Query, noFetch, route)
+		return wizardThenRoute(ctx, repoRoot, res.Query, opts, route)
 	case err != nil:
 		return err
 	default:
-		return route(ctx, repoRoot, targets[res.Index], from, noFetch)
+		return route(ctx, repoRoot, targets[res.Index], opts)
 	}
 }
 
@@ -415,13 +423,15 @@ func worktreeMarkers(ctx context.Context, path string) string {
 }
 
 // wizardThenRoute runs the branch wizard and, if it yields a name,
-// lands it via `route`. A cancelled wizard is a silent no-op.
-func wizardThenRoute(ctx context.Context, repoRoot, initial string, noFetch bool, route switchRoute) error {
+// lands it via `route` off the wizard's base. A cancelled wizard is a
+// silent no-op.
+func wizardThenRoute(ctx context.Context, repoRoot, initial string, opts spawnOpts, route switchRoute) error {
 	name, base, err := branchWizard(ctx, repoRoot, initial)
 	if err != nil || name == "" {
 		return err
 	}
-	return route(ctx, repoRoot, name, base, noFetch)
+	opts.from = base
+	return route(ctx, repoRoot, name, opts)
 }
 
 // prefixChoices is the fixed branch-prefix menu.

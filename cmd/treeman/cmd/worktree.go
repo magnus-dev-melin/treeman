@@ -150,19 +150,14 @@ func worktreeActionPicker(ctx context.Context, c *cli.Command, repoRoot string) 
 		if werr != nil || name == "" {
 			return werr
 		}
-		cres, cerr := createWorktree(ctx, rpc.WorktreeCreateArgs{Branch: name, From: base}.Task(repoRoot, CaptureInheritedEnv()))
-		if cerr != nil {
-			return cerr
-		}
-		printCreateResult(cres)
-		return nil
+		_, cerr := spawnWorktree(ctx, repoRoot, rpc.WorktreeCreateArgs{Branch: name, From: base}, false)
+		return cerr
 	default:
 		if path == "" {
 			return nil
 		}
 		// cd-shim contract: stdout carries only the resolved path.
-		touchVisitedByPath(ctx, path)
-		fmt.Println(path)
+		landExisting(ctx, path)
 		return nil
 	}
 }
@@ -313,11 +308,7 @@ Examples:
 				Name:  "print-path",
 				Usage: "print only the new worktree path on stdout; status lines redirect to stderr (enables `cd \"$(treeman worktree create …)\"`)",
 			},
-			&cli.BoolFlag{
-				Name:    "foreground",
-				Aliases: []string{"wait", "f"},
-				Usage:   "stream live progress and block until finalize completes (default: dispatch and return)",
-			},
+			foregroundFlag(),
 		},
 		Action: func(ctx context.Context, c *cli.Command) error {
 			if c.NArg() < 1 {
@@ -349,39 +340,46 @@ Examples:
 				SkipHooks:   c.Bool("skip-hooks"),
 				SkipPrepare: c.Bool("skip-prepare"),
 			}
-			task := createArgs.Task(repoRoot, CaptureInheritedEnv())
-			if c.Bool("foreground") {
-				// Stream the run's events (subscribe before dispatch,
-				// daemon-less in-process fallback) — plain step lines,
-				// green ready line on success, non-zero on failure.
-				if ferr := foregroundTask(ctx, task, "worktree create"); ferr != nil {
-					return ferr
-				}
-				path, lok := wt.LookupWorktree(ctx, repoRoot, branch, cliSink{})
-				if !lok {
-					if createArgs.Path != "" {
-						path = createArgs.Path
-					} else {
-						return errors.New("create finished but the worktree row is not visible yet — check `worktree list`")
-					}
-				}
-				ui.Success("ready: %s", path)
-				if printPathOnly {
-					_, _ = fmt.Fprintln(os.Stdout, path)
-				}
-				return nil
-			}
-			res, err := createWorktree(ctx, task)
+			path, err := spawnWorktree(ctx, repoRoot, createArgs, c.Bool("foreground"))
 			if err != nil {
 				return err
 			}
-			printCreateResult(res)
 			if printPathOnly {
-				_, _ = fmt.Fprintln(os.Stdout, res.WtPath)
+				_, _ = fmt.Fprintln(os.Stdout, path)
 			}
 			return nil
 		},
 	}
+}
+
+// spawnWorktree creates the worktree and returns its path. In the
+// foreground it streams the daemon's progress and returns only once
+// setup hooks + prepare have finished, failing when they failed (the
+// checkout is kept); otherwise it reports the queued create and
+// returns at once.
+func spawnWorktree(ctx context.Context, repoRoot string, args rpc.WorktreeCreateArgs, foreground bool) (string, error) {
+	if !foreground {
+		res, err := createWorktree(ctx, args.Task(repoRoot, CaptureInheritedEnv()))
+		if err != nil {
+			return "", err
+		}
+		printCreateResult(res)
+		return res.WtPath, nil
+	}
+	args.Wait = true
+	if err := foregroundTask(ctx, args.Task(repoRoot, CaptureInheritedEnv()), "worktree create"); err != nil {
+		return "", err
+	}
+	path, ok := wt.LookupWorktree(ctx, repoRoot, args.Branch, cliSink{})
+	switch {
+	case ok:
+	case args.Path != "":
+		path = args.Path
+	default:
+		return "", errors.New("create finished but the worktree row is not visible yet — check `worktree list`")
+	}
+	ui.Success("ready: %s", path)
+	return path, nil
 }
 
 // printCreateResult renders the structured worktree_create outcome to
@@ -394,9 +392,12 @@ func printCreateResult(res wt.CreateResult) {
 		return
 	case wt.CreatedNoFinalize:
 		PrintOK("created worktree #%d slug=%s path=%s", res.WorktreeID, res.Slug, res.WtPath)
+	case wt.CreatedReady:
+		PrintOK("created worktree #%d slug=%s path=%s", res.WorktreeID, res.Slug, res.WtPath)
+		PrintOK("setup + prepare complete")
 	default:
 		PrintOK("created worktree #%d slug=%s path=%s", res.WorktreeID, res.Slug, res.WtPath)
-		PrintOK("queued: setup + prepare on daemon — follow with `treeman logs tail --follow`")
+		PrintOK("queued: setup + prepare on daemon — `treeman worktree wait %s` blocks until done and fails if setup fails", res.Slug)
 	}
 	if len(res.Ports) > 0 {
 		names := make([]string, 0, len(res.Ports))
@@ -1683,6 +1684,7 @@ which may check out in the main repo). To always land in a worktree, use
 			&cli.StringFlag{Name: "from", Usage: "base branch (with --create/--checkout)"},
 			&cli.StringFlag{Name: "repo", Aliases: []string{"r"}},
 			&cli.BoolFlag{Name: "no-fetch", Usage: "skip the pre-checkout `git fetch origin <base>`"},
+			foregroundFlag(),
 		},
 		Action: func(ctx context.Context, c *cli.Command) error {
 			if c.NArg() < 1 {
@@ -1693,20 +1695,19 @@ which may check out in the main repo). To always land in a worktree, use
 			if err != nil {
 				return err
 			}
+			opts := spawnOpts{from: c.String("from"), noFetch: c.Bool("no-fetch"), foreground: c.Bool("foreground")}
 
 			if c.Bool("checkout") {
-				return goCheckout(ctx, repoRoot, target, c.String("from"), c.Bool("create"), c.Bool("no-fetch"))
+				return goCheckout(ctx, repoRoot, target, c.Bool("create"), opts)
 			}
 
 			// Pure resolve: fuzzy worktree lookup, then exact branch.
 			if path, ok := wt.LookupWorktree(ctx, repoRoot, target, cliSink{}); ok {
-				touchVisitedByPath(ctx, path)
-				fmt.Println(path)
+				landExisting(ctx, path)
 				return nil
 			}
 			if path, ok := registryWorktreeForBranch(ctx, repoRoot, target); ok {
-				touchVisitedByPath(ctx, path)
-				fmt.Println(path)
+				landExisting(ctx, path)
 				return nil
 			}
 
@@ -1736,7 +1737,7 @@ which may check out in the main repo). To always land in a worktree, use
 			}
 
 			// --create → spawn the worktree, then print its path.
-			return goSpawnWorktree(ctx, repoRoot, target, c.String("from"), c.Bool("no-fetch"))
+			return goSpawnWorktree(ctx, repoRoot, target, opts)
 		},
 	}
 }
@@ -1744,20 +1745,19 @@ which may check out in the main repo). To always land in a worktree, use
 // goCheckout runs the branch-checkout auto-routing for `wt go --checkout`.
 // Prints exactly one line (the destination directory) on stdout; status
 // goes to stderr.
-func goCheckout(ctx context.Context, repoRoot, branch, from string, create, noFetch bool) error {
+func goCheckout(ctx context.Context, repoRoot, branch string, create bool, opts spawnOpts) error {
 	// (1) Already live in some worktree (other than cwd)? Registry
 	// first, then git's own view (worktrees added outside treeman).
 	if path, ok := liveWorktreeForBranch(ctx, repoRoot, branch); ok {
 		cwd, _ := os.Getwd()
 		cwdTop, _ := gitWorktreeRoot(cwd)
 		if path != cwdTop {
-			touchVisitedByPath(ctx, path)
-			fmt.Println(path)
+			landExisting(ctx, path)
 			return nil
 		}
 	}
 
-	mode, base := resolveGoMode(ctx, repoRoot, branch, from, create, noFetch)
+	mode, base := resolveGoMode(ctx, repoRoot, branch, opts.from, create, opts.noFetch)
 
 	cwd, _ := os.Getwd()
 	cwdTop, _ := gitWorktreeRoot(cwd)
@@ -1813,7 +1813,7 @@ func goCheckout(ctx context.Context, repoRoot, branch, from string, create, noFe
 	}
 
 	// (3) main dirty → spawn a fresh worktree.
-	return goSpawnWorktree(ctx, repoRoot, branch, from, noFetch)
+	return goSpawnWorktree(ctx, repoRoot, branch, opts)
 }
 
 // resolveGoMode decides whether `wt go` checks out an existing branch or
@@ -1844,26 +1844,50 @@ func resolveGoMode(ctx context.Context, repoRoot, branch, from string, create, n
 }
 
 // goSpawnWorktree creates a fresh worktree for <branch> and prints its
-// resolved path on stdout (create status/ports stream to stderr).
-func goSpawnWorktree(ctx context.Context, repoRoot, branch, from string, noFetch bool) error {
+// resolved path on stdout (create status/ports stream to stderr). A
+// foreground create whose setup fails prints no path and fails, so a
+// cd shim never lands in a half-provisioned worktree.
+func goSpawnWorktree(ctx context.Context, repoRoot, branch string, opts spawnOpts) error {
 	// Create's status lines go to stderr — stdout is reserved for the
 	// destination path (cd "$(treeman worktree go …)").
 	prevOut := ui.Out
 	ui.Out = os.Stderr
-	res, err := createWorktree(
-		ctx,
-		rpc.WorktreeCreateArgs{Branch: branch, From: from, NoFetch: noFetch}.Task(repoRoot, CaptureInheritedEnv()),
-	)
-	if err == nil {
-		printCreateResult(res)
-	}
+	path, err := spawnWorktree(ctx, repoRoot,
+		rpc.WorktreeCreateArgs{Branch: branch, From: opts.from, NoFetch: opts.noFetch}, opts.foreground)
 	ui.Out = prevOut
 	if err != nil {
 		return err
 	}
-	touchVisitedByPath(ctx, res.WtPath)
-	fmt.Println(res.WtPath)
+	touchVisitedByPath(ctx, path)
+	fmt.Println(path)
 	return nil
+}
+
+// landExisting prints an existing worktree's path for the cd shim and
+// warns on stderr when that worktree's last setup failed, so switching
+// into it doesn't hide the failure (#129).
+func landExisting(ctx context.Context, path string) {
+	touchVisitedByPath(ctx, path)
+	if msg, failed := failedSetup(ctx, path); failed {
+		PrintWarn("last setup of %s failed: %s", path, msg)
+		PrintHint("fix the cause, then run `treeman worktree finalize` in it")
+	}
+	fmt.Println(path)
+}
+
+// failedSetup reports whether the latest finalize of the worktree at
+// path failed, with its error message.
+func failedSetup(ctx context.Context, path string) (string, bool) {
+	st, err := openSharedStore(ctx)
+	if err != nil {
+		return "", false
+	}
+	row, err := st.LookupActiveWorktreeByPath(ctx, path)
+	if err != nil || row.ID == 0 {
+		return "", false
+	}
+	last := latestFinalizeEvent(ctx, st, row.ID)
+	return last.Message, finalizeFailed(last)
 }
 
 // registryWorktreeForBranch finds the live worktree on <branch> for

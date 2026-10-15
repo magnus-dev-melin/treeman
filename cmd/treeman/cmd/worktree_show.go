@@ -462,7 +462,7 @@ func pollFinalize(
 				}
 				return nil
 			}
-			if e.EventType == store.EvtWorktreeCreateError && e.Level == store.LevelError {
+			if finalizeFailed(e) {
 				finishSpinner()
 				return fmt.Errorf("finalize failed: %s", e.Message)
 			}
@@ -590,16 +590,30 @@ func finalizeStatusLine(ctx context.Context, st *store.Store, wtID int64) string
 // finalizeState splits the state derivation so both forms share one
 // query path. detail is "" when there's nothing extra worth showing.
 func finalizeState(ctx context.Context, st *store.Store, wtID int64) (state, detail string) {
+	last := latestFinalizeEvent(ctx, st, wtID)
+	if last.ID == 0 {
+		return ui.Status("ready"), ""
+	}
+	return finalizeStateLabel(last), finalizeStateDetail(last)
+}
+
+// latestFinalizeEvent returns the newest finalize-lifecycle event of
+// the worktree, or the zero Event when it has none.
+func latestFinalizeEvent(ctx context.Context, st *store.Store, wtID int64) store.Event {
 	rows, _ := st.QueryEvents(ctx, store.EventFilter{
 		WorktreeID: wtID,
 		EventTypes: finalizeStateEventTypes,
 		Limit:      1,
 	})
 	if len(rows) == 0 {
-		return ui.Status("ready"), ""
+		return store.Event{}
 	}
-	last := rows[0]
-	return finalizeStateLabel(last), finalizeStateDetail(last)
+	return rows[0]
+}
+
+// finalizeFailed reports whether ev is a failed finalize.
+func finalizeFailed(ev store.Event) bool {
+	return ev.EventType == store.EvtWorktreeCreateError && ev.Level == store.LevelError
 }
 
 // finalizeStateEventTypes is the finalize-lifecycle set behind the
@@ -628,7 +642,7 @@ func finalizeStateLabel(last store.Event) string {
 	case store.EvtWorktreeCreateDeferred:
 		return ui.Status("deferred")
 	case store.EvtWorktreeCreateError:
-		if last.Level == store.LevelError {
+		if finalizeFailed(last) {
 			return ui.Status("error")
 		}
 	}
@@ -648,7 +662,7 @@ func finalizeStateDetail(last store.Event) string {
 	case store.EvtWorktreeCreateDeferred:
 		return "— " + last.Message
 	case store.EvtWorktreeCreateError:
-		if last.Level == store.LevelError {
+		if finalizeFailed(last) {
 			return "— " + last.Message
 		}
 	}

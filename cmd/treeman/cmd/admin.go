@@ -261,11 +261,7 @@ func SnapshotsCmd() *cli.Command {
 				Flags: []cli.Flag{
 					&cli.StringFlag{Name: "repo", Aliases: []string{"r"}},
 					&cli.BoolFlag{Name: "json"},
-					&cli.BoolFlag{
-						Name:    "foreground",
-						Aliases: []string{"wait", "f"},
-						Usage:   "stream the daemon's live progress and block until done (default: dispatch and return)",
-					},
+					foregroundFlag(),
 				},
 				Action: func(ctx context.Context, c *cli.Command) error {
 					repoRoot, err := resolveRepo(c.String("repo"))
@@ -295,11 +291,7 @@ func snapshotsPruneCmd() *cli.Command {
 		Flags: []cli.Flag{
 			&cli.StringFlag{Name: "repo", Aliases: []string{"r"}},
 			&cli.BoolFlag{Name: "json"},
-			&cli.BoolFlag{
-				Name:    "foreground",
-				Aliases: []string{"wait", "f"},
-				Usage:   "stream the daemon's live progress and block until done (default: dispatch and return)",
-			},
+			foregroundFlag(),
 		},
 		Action: func(ctx context.Context, c *cli.Command) error {
 			repoRoot, err := resolveRepo(c.String("repo"))

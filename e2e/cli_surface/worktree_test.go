@@ -653,3 +653,59 @@ func TestWtCreateForegroundSurfacesFailure(t *testing.T) {
 		t.Errorf("worktree created despite the failed plan:\n%s", out)
 	}
 }
+
+// TestSwitchSurfacesSetupFailure pins issue #129: a create whose setup
+// hook fails must not look like a success. `switch --foreground` blocks
+// until setup ends and exits non-zero naming the hook, without handing
+// the cd shim a path; a later plain switch into that worktree warns on
+// stderr; and a foreground create only reports ready once its hooks ran.
+func TestSwitchSurfacesSetupFailure(t *testing.T) {
+	repo := newGitRepo(t)
+	e := newEnv(t)
+	t.Cleanup(func() { stopDaemon(t, e) })
+	gate := filepath.Join(repo, "setup-ok")
+	writeConfig(t, repo, `worktrees:
+  root: .worktrees
+hooks:
+  create-before-engines:
+    - run: "test -e `+gate+` || { echo setup-broke >&2; exit 3; }"
+    - run: "touch setup-ran"
+`)
+
+	failed := e.run(t, repo, "worktree", "switch", "feature/x", "--foreground")
+	if failed.err == nil {
+		t.Fatalf("switch --foreground with a failing hook exited 0\nstdout:\n%s\nstderr:\n%s", failed.stdout, failed.stderr)
+	}
+	if !strings.Contains(failed.stderr, "create-before-engines") {
+		t.Errorf("failure does not name the hook:\n%s", failed.stderr)
+	}
+	if strings.TrimSpace(failed.stdout) != "" {
+		t.Errorf("failed foreground switch printed a path for the cd shim: %q", failed.stdout)
+	}
+	wtX := filepath.Join(repo, ".worktrees", "feature", "x")
+	if _, err := os.Stat(wtX); err != nil {
+		t.Fatalf("checkout of the failed create is gone: %v", err)
+	}
+
+	again := e.run(t, repo, "worktree", "switch", "feature/x")
+	if again.err != nil {
+		t.Fatalf("switch into the existing worktree: %v\nstderr:\n%s", again.err, again.stderr)
+	}
+	if got := strings.TrimSpace(again.stdout); got != wtX {
+		t.Errorf("switch stdout = %q, want %q", got, wtX)
+	}
+	if !strings.Contains(again.stderr, "last setup of") || !strings.Contains(again.stderr, "create-before-engines") {
+		t.Errorf("switch into a failed worktree did not warn:\n%s", again.stderr)
+	}
+
+	if err := os.WriteFile(gate, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ok := e.run(t, repo, "worktree", "create", "feature/y", "--foreground")
+	if ok.err != nil {
+		t.Fatalf("create --foreground: %v\nstderr:\n%s", ok.err, ok.stderr)
+	}
+	if _, err := os.Stat(filepath.Join(repo, ".worktrees", "feature", "y", "setup-ran")); err != nil {
+		t.Errorf("create --foreground returned before its setup hooks ran: %v", err)
+	}
+}

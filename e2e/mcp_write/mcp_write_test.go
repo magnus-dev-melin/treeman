@@ -155,10 +155,11 @@ databases:
 		t.Errorf("missing slug in result: %+v", res)
 	}
 	status, _ := res["status"].(string)
-	// queued = daemon (or in-process plan runner) accepted the finalize
-	// dispatch. The detached-child spawn no longer exists.
-	if status != "queued" {
-		t.Errorf("unexpected status %q, want queued", status)
+	// queued = the daemon accepted the finalize dispatch; ready = daemon
+	// unreachable and the in-process plan runner ran setup + prepare
+	// before returning.
+	if status != "queued" && status != "ready" {
+		t.Errorf("unexpected status %q, want queued or ready", status)
 	}
 	if _, err := os.Stat(wtPath); err != nil {
 		t.Errorf("worktree path %q does not exist on disk: %v", wtPath, err)
