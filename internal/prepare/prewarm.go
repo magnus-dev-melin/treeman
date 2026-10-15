@@ -16,7 +16,6 @@ import (
 	"github.com/stubbedev/treeman/internal/engine"
 	"github.com/stubbedev/treeman/internal/snapshot"
 	"github.com/stubbedev/treeman/internal/store"
-	"github.com/stubbedev/treeman/pkg/safego"
 )
 
 // spareEngine bundles the spare-pool capabilities of one engine's
@@ -196,12 +195,15 @@ func spawnPrewarm(
 	if n == 0 {
 		return
 	}
+	if st == nil {
+		return
+	}
 	if _, busy := prewarmInFlight.LoadOrStore(fingerprint, struct{}{}); busy {
 		return
 	}
-	safego.Go("snapshot:prewarm", templateName, func() {
+	st.Go("snapshot:prewarm", templateName, func(bg context.Context) {
 		defer prewarmInFlight.Delete(fingerprint)
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		ctx, cancel := context.WithTimeout(bg, 5*time.Minute)
 		defer cancel()
 		unpin := snapshot.Pin(fingerprint)
 		defer unpin()
