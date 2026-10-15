@@ -12,7 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net/url"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -20,11 +20,7 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
-	// Registers the "mysql" driver with database/sql. Load-bearing: this
-	// package's Connect calls sql.Open("mysql", …), so the driver must be
-	// registered wherever the daemon imports this package — independent
-	// of any test file's own blank import.
-	_ "github.com/go-sql-driver/mysql"
+	gomysql "github.com/go-sql-driver/mysql"
 
 	"github.com/stubbedev/treeman/internal/config"
 	"github.com/stubbedev/treeman/internal/db/adapter"
@@ -112,21 +108,9 @@ func Connect(ctx context.Context, cfg config.MysqlConn) (*Driver, error) {
 			return nil, err
 		}
 	}
-	var dsn string
-	if socketMode {
-		dsn = fmt.Sprintf(
-			"%s:%s@unix(%s)/?charset=utf8mb4,utf8&parseTime=true&multiStatements=true",
-			url.QueryEscape(cfg.User),
-			url.QueryEscape(cfg.Password),
-			cfg.Host,
-		)
-	} else {
-		dsn = fmt.Sprintf(
-			"%s:%s@tcp(%s:%d)/?charset=utf8mb4,utf8&parseTime=true&multiStatements=true",
-			url.QueryEscape(cfg.User),
-			url.QueryEscape(cfg.Password),
-			cfg.Host, cfg.Port,
-		)
+	dsn, err := connDSN(cfg)
+	if err != nil {
+		return nil, err
 	}
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
@@ -138,6 +122,27 @@ func Connect(ctx context.Context, cfg config.MysqlConn) (*Driver, error) {
 		return nil, fmt.Errorf("ping mysql: %w", err)
 	}
 	return &Driver{DB: db, cfg: cfg}, nil
+}
+
+// connDSN renders cfg as a go-sql-driver DSN: a unix socket when Host
+// is a path, TCP otherwise. The driver reads the user and password of a
+// DSN verbatim, so they go in unescaped; URL-escaping them sent
+// `p%28w` for a `p(w` password and failed authentication.
+func connDSN(cfg config.MysqlConn) (string, error) {
+	mc := gomysql.NewConfig()
+	mc.User = cfg.User
+	mc.Passwd = cfg.Password
+	mc.ParseTime = true
+	mc.MultiStatements = true
+	if err := mc.Apply(gomysql.Charset("utf8mb4", "")); err != nil {
+		return "", fmt.Errorf("mysql dsn for %s@%s: %w", cfg.User, cfg.Host, err)
+	}
+	if strings.HasPrefix(cfg.Host, "/") {
+		mc.Net, mc.Addr = "unix", cfg.Host
+	} else {
+		mc.Net, mc.Addr = "tcp", net.JoinHostPort(cfg.Host, strconv.Itoa(int(cfg.Port)))
+	}
+	return mc.FormatDSN(), nil
 }
 
 // Close shuts down the pool.
