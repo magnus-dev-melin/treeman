@@ -15,9 +15,12 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -33,10 +36,20 @@ import (
 type Event struct {
 	RepoPath string
 	Path     string
-	// DBIndex is the index into cfg.Databases for the owning DB.
+	// Matches names every database whose inputs cover Path, one entry
+	// per database in config order; never empty. Two databases often
+	// share their inputs (a test template and the branch-scoped dev
+	// database both migrate from the same files), and each must
+	// re-prepare.
+	Matches []Match
+}
+
+// Match is one database whose inputs cover an event's path.
+type Match struct {
+	// DBIndex is the index into cfg.Databases.
 	DBIndex int
-	// Label is the optional label on the matched Input, referenced
-	// by `hooks.file-change[].match:` for filtered dispatch.
+	// Label is the optional label on the database's first matching
+	// Input, referenced by `hooks.file-change[].match:`.
 	Label string
 }
 
@@ -147,14 +160,12 @@ func (w *Watcher) Start(ctx context.Context) error {
 					}
 				}
 			}
-			dbIdx, label, matched := w.classify(ev.Name)
-			if !matched {
+			matches := w.classify(ev.Name)
+			if len(matches) == 0 {
 				continue
 			}
 			w.mu.Lock()
-			w.pending[ev.Name] = Event{
-				RepoPath: w.repoPath, Path: ev.Name, DBIndex: dbIdx, Label: label,
-			}
+			w.pending[ev.Name] = Event{RepoPath: w.repoPath, Path: ev.Name, Matches: matches}
 			w.mu.Unlock()
 			// Arm the debounce window on the first event of a burst.
 			// Subsequent events ride the same window (no reset) so a
@@ -253,23 +264,26 @@ func (w *Watcher) addAllDirs() {
 }
 
 // classify resolves an event path against the configured globs and
-// returns the first matching DB index + label. Unmatched paths
-// drop on the floor (the user explicitly listed which paths matter
-// via inputs:; everything else is noise).
-func (w *Watcher) classify(path string) (int, string, bool) {
+// returns one Match per database with a matching glob, in config
+// order, labelled by that database's first matching glob. Unmatched
+// paths drop on the floor (the user explicitly listed which paths
+// matter via inputs:; everything else is noise).
+func (w *Watcher) classify(path string) []Match {
 	rel, err := filepath.Rel(w.repoPath, path)
 	if err != nil {
-		return 0, "", false
+		return nil
 	}
 	rel = filepath.ToSlash(rel)
+	var matches []Match
 	for _, p := range w.paths {
-		match, _ := doublestar.PathMatch(p.Glob, rel)
-		if !match {
+		if slices.ContainsFunc(matches, func(m Match) bool { return m.DBIndex == p.DBIndex }) {
 			continue
 		}
-		return p.DBIndex, p.Label, true
+		if ok, _ := doublestar.PathMatch(p.Glob, rel); ok {
+			matches = append(matches, Match{DBIndex: p.DBIndex, Label: p.Label})
+		}
 	}
-	return 0, "", false
+	return matches
 }
 
 // flush dispatches every pending event then clears the buffer.
@@ -281,16 +295,13 @@ func (w *Watcher) flush(ctx context.Context) {
 		w.mu.Unlock()
 		return
 	}
-	events := make([]Event, 0, len(w.pending))
-	for _, e := range w.pending {
-		events = append(events, e)
-	}
+	events := slices.SortedFunc(maps.Values(w.pending), func(a, b Event) int { return strings.Compare(a.Path, b.Path) })
 	w.pending = map[string]Event{}
 	w.mu.Unlock()
 
 	for _, e := range events {
 		if err := w.dispatch(ctx, e); err != nil {
-			slog.Warn("watcher dispatch", "path", e.Path, "label", e.Label, "err", err)
+			slog.Warn("watcher dispatch", "path", e.Path, "err", err)
 		}
 	}
 }

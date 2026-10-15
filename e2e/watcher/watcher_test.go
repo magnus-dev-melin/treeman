@@ -81,7 +81,7 @@ func TestFileWatcherDispatchesOnInputEdit(t *testing.T) {
 	}
 	gotLabels := map[string]bool{}
 	for _, ev := range events {
-		gotLabels[ev.Label] = true
+		gotLabels[ev.Matches[0].Label] = true
 	}
 	for _, want := range []string{"migrations", "seeders"} {
 		if !gotLabels[want] {

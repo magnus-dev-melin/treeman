@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -176,5 +177,27 @@ func TestStaticPrefix(t *testing.T) {
 		if got != c.want {
 			t.Errorf("staticPrefix(%q)=%q want %q", c.in, got, c.want)
 		}
+	}
+}
+
+// TestClassifyMatchesEveryDatabase pins the main-checkout migration
+// gap: a test template and the branch-scoped dev database share their
+// migration inputs, and a change must reach both, not only the first
+// database whose glob matches.
+func TestClassifyMatchesEveryDatabase(t *testing.T) {
+	w := &Watcher{repoPath: "/repo", paths: []config.WatcherPath{
+		{Glob: "database/migrations/**/*.php", Label: "migrations", DBIndex: 0},
+		{Glob: "composer.lock", Label: "lockfile", DBIndex: 0},
+		{Glob: "database/**", Label: "schema", DBIndex: 0},
+		{Glob: "database/migrations/**/*.php", Label: "migrations", DBIndex: 3},
+		{Glob: "seeds/*.sql", Label: "seeds", DBIndex: 5},
+	}}
+	got := w.classify("/repo/database/migrations/2026_10_15_000000_x.php")
+	want := []Match{{DBIndex: 0, Label: "migrations"}, {DBIndex: 3, Label: "migrations"}}
+	if !slices.Equal(got, want) {
+		t.Fatalf("classify = %+v, want %+v", got, want)
+	}
+	if got := w.classify("/repo/README.md"); len(got) != 0 {
+		t.Fatalf("unmatched path classified as %+v", got)
 	}
 }

@@ -777,10 +777,11 @@ func aggregateWatches(cfg *config.Config) []config.WatcherPath {
 }
 
 // makeWtFSDispatcher builds a watcher.Dispatcher bound to a single
-// worktree. Each event re-runs finalize, scoped to one database via
-// the matched input's DBIndex. The cache-hit / cold-build decision
-// is derived purely from the input fingerprint — no force-rebuild
-// override.
+// worktree. Each event re-runs finalize once per database whose inputs
+// matched, scoped to that database. File-change actions fire once per
+// path, with the first matching database's context. The cache-hit /
+// cold-build decision is derived purely from the input fingerprint —
+// no force-rebuild override.
 func makeWtFSDispatcher(st *State, repoPath string, repoID int64, wtPath string) watcher.Dispatcher {
 	return func(ctx context.Context, ev watcher.Event) error {
 		// Drop events while a teardown is in flight — finalising a
@@ -796,24 +797,30 @@ func makeWtFSDispatcher(st *State, repoPath string, repoID int64, wtPath string)
 		// re-attach the id there too.
 		rid := runid.New()
 		evCtx := runid.With(ctx, rid)
+		idxs := make([]string, len(ev.Matches))
+		for i, m := range ev.Matches {
+			idxs[i] = strconv.Itoa(m.DBIndex)
+		}
+		first := ev.Matches[0]
 		_ = st.Store.WriteEvent(evCtx, store.LevelInfo, store.EvtWatchInput,
-			fmt.Sprintf("%s (db_idx=%d label=%s)", ev.Path, ev.DBIndex, ev.Label),
+			fmt.Sprintf("%s (db_idx=%s label=%s)", ev.Path, strings.Join(idxs, ","), first.Label),
 			repoID, 0, "", 0, map[string]string{
 				"path":   ev.Path,
-				"db_idx": strconv.Itoa(ev.DBIndex),
-				"label":  ev.Label,
+				"db_idx": strings.Join(idxs, ","),
+				"label":  first.Label,
 				"wt":     wtPath,
 			})
-		dbIdx, path, label := ev.DBIndex, ev.Path, ev.Label
 		env, _ := st.Store.LoadInheritedEnvByPath(st.BgCtx, wtPath)
 		// Fire the file-change actions in parallel with the
 		// re-prep — both react to the same event independently.
 		safeGo(lblWatchActions, wtPath, func() {
-			fireOnFileChange(runid.With(st.BgCtx, rid), st, repoPath, wtPath, dbIdx, path, label, env)
+			fireOnFileChange(runid.With(st.BgCtx, rid), st, repoPath, wtPath, first.DBIndex, ev.Path, first.Label, env)
 		})
 		safeGo(lblWatchFinalize, wtPath, func() {
-			if err := FinalizeWorktreeForWatch(runid.With(st.BgCtx, rid), st, repoPath, wtPath, dbIdx, env); err != nil {
-				slog.Warn("watcher-triggered finalize", "wt", wtPath, "err", err)
+			for _, m := range ev.Matches {
+				if err := FinalizeWorktreeForWatch(runid.With(st.BgCtx, rid), st, repoPath, wtPath, m.DBIndex, env); err != nil {
+					slog.Warn("watcher-triggered finalize", "wt", wtPath, "db_idx", m.DBIndex, "err", err)
+				}
 			}
 		})
 		return nil
