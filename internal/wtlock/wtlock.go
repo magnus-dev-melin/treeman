@@ -11,6 +11,9 @@
 //
 // Locks are advisory files under `<state dir>/locks/`, keyed by kind +
 // a hash of the worktree path, so two worktrees never contend.
+//
+// The same directory holds the store-wide daemon lock (AcquireDaemon):
+// at most one treemand serves a given store at a time.
 package wtlock
 
 import (
@@ -19,8 +22,11 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/stubbedev/treeman/internal/store"
@@ -42,9 +48,21 @@ var pollInterval = 200 * time.Millisecond
 // the lock.
 var errBusy = errors.New("lock busy")
 
+// ErrDaemonRunning is returned by AcquireDaemon when another treemand
+// already serves the store.
+var ErrDaemonRunning = errors.New("another treemand is already serving this store")
+
+func lockDir() (string, error) {
+	dbPath, err := store.DefaultDBPath()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(filepath.Dir(dbPath), "locks"), nil
+}
+
 // Path returns the lock file for (kind, wtPath).
 func Path(kind, wtPath string) (string, error) {
-	dbPath, err := store.DefaultDBPath()
+	dir, err := lockDir()
 	if err != nil {
 		return "", err
 	}
@@ -53,8 +71,53 @@ func Path(kind, wtPath string) (string, error) {
 		return "", err
 	}
 	sum := sha256.Sum256([]byte(filepath.Clean(abs)))
-	return filepath.Join(filepath.Dir(dbPath), "locks",
-		kind+"-"+hex.EncodeToString(sum[:8])+".lock"), nil
+	return filepath.Join(dir, kind+"-"+hex.EncodeToString(sum[:8])+".lock"), nil
+}
+
+func openLockFile(p string) (*os.File, error) {
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		return nil, err
+	}
+	return os.OpenFile(p, os.O_RDWR|os.O_CREATE, 0o644)
+}
+
+// AcquireDaemon takes the store-wide daemon lock without waiting and
+// records the caller's pid in it. It fails with ErrDaemonRunning while
+// another process holds it. The returned func releases the lock.
+func AcquireDaemon() (func(), error) {
+	dir, err := lockDir()
+	if err != nil {
+		return nil, err
+	}
+	p := filepath.Join(dir, "treemand.lock")
+	f, err := openLockFile(p)
+	if err != nil {
+		return nil, fmt.Errorf("open daemon lock %s: %w", p, err)
+	}
+	if err := tryLock(f); err != nil {
+		holder, readErr := io.ReadAll(f)
+		_ = f.Close()
+		if !errors.Is(err, errBusy) {
+			return nil, fmt.Errorf("lock %s: %w", p, err)
+		}
+		if readErr != nil || len(holder) == 0 {
+			return nil, fmt.Errorf("%w (lock %s)", ErrDaemonRunning, p)
+		}
+		return nil, fmt.Errorf("%w (pid %s, lock %s)", ErrDaemonRunning, strings.TrimSpace(string(holder)), p)
+	}
+	release := func() {
+		_ = unlock(f)
+		_ = f.Close()
+	}
+	if err := f.Truncate(0); err != nil {
+		release()
+		return nil, fmt.Errorf("record pid in %s: %w", p, err)
+	}
+	if _, err := f.WriteAt([]byte(strconv.Itoa(os.Getpid())+"\n"), 0); err != nil {
+		release()
+		return nil, fmt.Errorf("record pid in %s: %w", p, err)
+	}
+	return release, nil
 }
 
 // Acquire takes the exclusive (kind, wtPath) lock, blocking until it is
@@ -69,10 +132,7 @@ func Acquire(ctx context.Context, kind, wtPath string, onWait func()) (func(), e
 	if err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-		return nil, err
-	}
-	f, err := os.OpenFile(p, os.O_RDWR|os.O_CREATE, 0o644)
+	f, err := openLockFile(p)
 	if err != nil {
 		return nil, err
 	}

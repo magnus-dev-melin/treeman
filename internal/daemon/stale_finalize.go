@@ -34,7 +34,10 @@ const watchdogInterval = 2 * time.Minute
 
 // SweepStalePreparing fails-out any worktree row whose most recent
 // finalize event is `worktree:create:start` — by definition, no goroutine
-// owns that work anymore once the daemon has restarted. Without this
+// owns that work anymore once the daemon has restarted. That holds only
+// because treemand claims the store-wide daemon lock (wtlock.AcquireDaemon)
+// before this runs: a second daemon on the same store would otherwise
+// fail the first one's live creates (issue #127). Without this
 // sweep, `treeman worktree list` keeps reporting `state=preparing`
 // indefinitely (the state is derived from the latest finalize event
 // per worktree). See issue #9.

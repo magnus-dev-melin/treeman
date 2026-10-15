@@ -20,6 +20,7 @@ import (
 	"github.com/stubbedev/treeman/internal/daemon"
 	"github.com/stubbedev/treeman/internal/store"
 	"github.com/stubbedev/treeman/internal/version"
+	"github.com/stubbedev/treeman/internal/wtlock"
 	"github.com/stubbedev/treeman/pkg/rpc"
 	"github.com/stubbedev/treeman/pkg/safego"
 )
@@ -96,6 +97,11 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("db path: %w", err)
 	}
+	releaseDaemonLock, err := wtlock.AcquireDaemon()
+	if err != nil {
+		return fmt.Errorf("claim store %s: %w", dbPath, err)
+	}
+	defer releaseDaemonLock()
 	s, err := store.Open(ctx, dbPath)
 	if err != nil {
 		return fmt.Errorf("open store: %w", err)

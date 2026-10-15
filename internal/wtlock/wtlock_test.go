@@ -7,6 +7,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -122,4 +124,35 @@ func holdForParent() {
 	_, _ = bufio.NewReader(os.Stdin).ReadString('\n')
 	release()
 	os.Exit(0)
+}
+
+func TestAcquireDaemonIsExclusivePerStore(t *testing.T) {
+	store := filepath.Join(t.TempDir(), "treeman.db")
+	t.Setenv("TREEMAN_DB_PATH", store)
+	release, err := AcquireDaemon()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = AcquireDaemon()
+	if !errors.Is(err, ErrDaemonRunning) {
+		t.Fatalf("second AcquireDaemon while held: err = %v, want ErrDaemonRunning", err)
+	}
+	if want := "pid " + strconv.Itoa(os.Getpid()); !strings.Contains(err.Error(), want) {
+		t.Errorf("err = %q, want it to name the holder (%s)", err, want)
+	}
+
+	isolate(t)
+	other, err := AcquireDaemon()
+	if err != nil {
+		t.Fatalf("AcquireDaemon on a different store: %v", err)
+	}
+	other()
+
+	t.Setenv("TREEMAN_DB_PATH", store)
+	release()
+	again, err := AcquireDaemon()
+	if err != nil {
+		t.Fatalf("AcquireDaemon after release: %v", err)
+	}
+	again()
 }

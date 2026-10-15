@@ -12,6 +12,7 @@
 package cli_surface_e2e
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -22,6 +23,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/stubbedev/treeman/pkg/rpc"
 )
 
 var (
@@ -66,20 +69,101 @@ func sharedDaemonBinDir(t *testing.T) string {
 	return daemonBinDir
 }
 
+// shortSocketPath returns a socket path under a fresh short temp dir —
+// t.TempDir() embeds the (long) test name and can blow past the
+// ~104-byte sun_path limit when bind()ing.
+func shortSocketPath(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "tmd-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return filepath.Join(dir, "treeman.sock")
+}
+
+// daemonCommand builds a treemand process confined to e's store and
+// XDG dirs, serving sock.
+func daemonCommand(t *testing.T, e *env, sock string) *exec.Cmd {
+	t.Helper()
+	cmd := exec.Command(filepath.Join(sharedDaemonBinDir(t), "treemand"))
+	cmd.Env = append(os.Environ(), e.block()...)
+	cmd.Env = append(cmd.Env, "TREEMAN_SOCKET="+sock)
+	return cmd
+}
+
+// spawnDaemon starts an isolated treemand in the background and kills
+// it when the test ends.
+func spawnDaemon(t *testing.T, e *env, sock string) {
+	t.Helper()
+	cmd := daemonCommand(t, e, sock)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("treemand start: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+	})
+}
+
+// waitForPing polls $TREEMAN_SOCKET until the daemon answers ping.
+func waitForPing(t *testing.T) rpc.Response {
+	t.Helper()
+	ctx := context.Background()
+	for range 50 {
+		resp, err := rpc.Call(ctx, rpc.Request{Method: rpc.MethodPing})
+		if err == nil {
+			return resp
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatal("ping never succeeded against the live daemon")
+	return rpc.Response{}
+}
+
+// TestSecondDaemonRefusesSharedStore pins issue #127: a second treemand
+// pointed at a store another daemon serves must exit without touching
+// it — before the daemon lock it unlinked the live socket and its boot
+// sweep failed the first daemon's in-flight creates as "stale".
+func TestSecondDaemonRefusesSharedStore(t *testing.T) {
+	e := newEnv(t)
+	sock := shortSocketPath(t)
+	spawnDaemon(t, e, sock)
+	t.Setenv("TREEMAN_SOCKET", sock)
+	waitForPing(t)
+
+	second := daemonCommand(t, e, sock)
+	var stderr strings.Builder
+	second.Stderr = &stderr
+	done := make(chan error, 1)
+	if err := second.Start(); err != nil {
+		t.Fatalf("second treemand start: %v", err)
+	}
+	go func() { done <- second.Wait() }()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("second treemand exited 0 against a store another daemon serves")
+		}
+	case <-time.After(10 * time.Second):
+		_ = second.Process.Kill()
+		t.Fatal("second treemand kept running against a store another daemon serves")
+	}
+	if !strings.Contains(stderr.String(), "another treemand is already serving this store") {
+		t.Errorf("second treemand stderr = %q, want the already-serving error", stderr.String())
+	}
+	if _, err := rpc.Call(context.Background(), rpc.Request{Method: rpc.MethodPing}); err != nil {
+		t.Fatalf("first daemon unreachable after the second one exited: %v", err)
+	}
+}
+
 var pidRe = regexp.MustCompile(`pid (\d+)`)
 
 func TestDaemonStartStatusReloadStop(t *testing.T) {
 	binDir := sharedDaemonBinDir(t)
 	e := newEnv(t)
 
-	// A short socket path — t.TempDir() embeds the (long) test name and
-	// can blow past the ~104-byte sun_path limit when bind()ing.
-	sockDir, err := os.MkdirTemp("", "tmd-rt-*")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(sockDir) })
-	sock := filepath.Join(sockDir, "treeman.sock")
+	sock := shortSocketPath(t)
 
 	// run with treemand on PATH + the pinned socket. The daemon
 	// (spawned by `daemon start` via exec.Command with inherited env)
@@ -160,12 +244,7 @@ func TestDoctorFixStartsDaemon(t *testing.T) {
 	binDir := sharedDaemonBinDir(t)
 	e := newEnv(t)
 
-	sockDir, err := os.MkdirTemp("", "tmd-rt-*")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(sockDir) })
-	sock := filepath.Join(sockDir, "treeman.sock")
+	sock := shortSocketPath(t)
 
 	run := func(args ...string) cliResult {
 		cmd := exec.Command(sharedBin(t), args...)
