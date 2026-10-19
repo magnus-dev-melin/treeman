@@ -94,8 +94,12 @@ func rawConfigResource(ctx context.Context, req *mcpsdk.ReadResourceRequest) (*m
 	if err != nil {
 		return nil, mcpsdk.ResourceNotFoundError(req.Params.URI)
 	}
+	clean, err := redactYAML(b)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", p, err)
+	}
 	return &mcpsdk.ReadResourceResult{
-		Contents: []*mcpsdk.ResourceContents{{URI: req.Params.URI, MIMEType: "application/yaml", Text: string(b)}},
+		Contents: []*mcpsdk.ResourceContents{{URI: req.Params.URI, MIMEType: "application/yaml", Text: clean}},
 	}, nil
 }
 
@@ -108,18 +112,16 @@ func resolvedConfigResource(ctx context.Context, req *mcpsdk.ReadResourceRequest
 	if err != nil {
 		return nil, fmt.Errorf("load resolved: %w", err)
 	}
-	b, err := json.MarshalIndent(map[string]any{
+	b, err := redactedJSON(map[string]any{
 		"repo":     repoRoot,
 		"config":   cfg,
 		"resolved": resolve.Resolve(&cfg, repoRoot),
-	}, "", "  ")
+	}, true)
 	if err != nil {
 		return nil, err
 	}
-	// Scrub embedded credentials before exposing to LLM clients.
-	clean := redactSecrets(string(b))
 	return &mcpsdk.ReadResourceResult{
-		Contents: []*mcpsdk.ResourceContents{{URI: req.Params.URI, MIMEType: "application/json", Text: clean}},
+		Contents: []*mcpsdk.ResourceContents{{URI: req.Params.URI, MIMEType: "application/json", Text: string(b)}},
 	}, nil
 }
 

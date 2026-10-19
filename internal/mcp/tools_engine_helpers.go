@@ -19,6 +19,7 @@ import (
 	"github.com/stubbedev/treeman/internal/config"
 	"github.com/stubbedev/treeman/internal/db/engineconn"
 	dbes "github.com/stubbedev/treeman/internal/db/es"
+	dbmongo "github.com/stubbedev/treeman/internal/db/mongo"
 	"github.com/stubbedev/treeman/internal/engine"
 	"github.com/stubbedev/treeman/internal/snapshot"
 	"github.com/stubbedev/treeman/internal/store"
@@ -222,8 +223,13 @@ func runMongoDump(
 	if _, err := exec.LookPath("mongodump"); err != nil {
 		return nil, dbDumpOut{}, fmt.Errorf("mongodump not on PATH: %w", err)
 	}
+	cfgPath, removeCfg, err := dbmongo.ToolConfigFile(conn.URI)
+	if err != nil {
+		return nil, dbDumpOut{}, err
+	}
+	defer removeCfg()
 	args := []string{
-		"--uri=" + conn.URI,
+		"--config=" + cfgPath,
 		"--db=" + db,
 		"--archive=" + outPath,
 		"--quiet",

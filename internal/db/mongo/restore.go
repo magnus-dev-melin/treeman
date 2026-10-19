@@ -80,9 +80,14 @@ func tryDockerExecMongoRestore(ctx context.Context, conn *config.MongoConn, targ
 	if _, err := exec.LookPath(engineBin); err != nil {
 		return false, nil
 	}
+	cfgPath, removeCfg, err := containerToolConfig(ctx, engineBin, cid, conn.URI)
+	if err != nil {
+		return false, err
+	}
+	defer removeCfg()
 	args := []string{
 		"exec", "-i", cid, "mongorestore",
-		"--archive", "--drop", "--quiet", "--uri=" + conn.URI,
+		"--archive", "--drop", "--quiet", "--config=" + cfgPath,
 	}
 	if sourceDB != "" && sourceDB != targetDB {
 		args = append(args, "--nsFrom="+sourceDB+".*", "--nsTo="+targetDB+".*")
@@ -114,7 +119,12 @@ func tryNativeCLIMongoRestore(ctx context.Context, conn *config.MongoConn, targe
 	if _, err := exec.LookPath("mongorestore"); err != nil {
 		return false, nil
 	}
-	args := []string{"--uri=" + conn.URI, "--drop", "--quiet"}
+	cfgPath, removeCfg, err := ToolConfigFile(conn.URI)
+	if err != nil {
+		return false, err
+	}
+	defer removeCfg()
+	args := []string{"--config=" + cfgPath, "--drop", "--quiet"}
 	if sourceDB != "" && sourceDB != targetDB {
 		args = append(args, "--nsFrom="+sourceDB+".*", "--nsTo="+targetDB+".*")
 	}

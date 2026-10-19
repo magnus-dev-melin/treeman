@@ -183,7 +183,7 @@ func configUnsetTool(ctx context.Context, _ *mcpsdk.CallToolRequest, in configUn
 		Path:        in.Path,
 		Scope:       scopeLabel,
 		File:        target,
-		RemovedJSON: removedJSON,
+		RemovedJSON: redactJSONAt(in.Path, removedJSON),
 		Bytes:       len(body),
 	}, nil
 }

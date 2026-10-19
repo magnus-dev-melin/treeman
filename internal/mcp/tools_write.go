@@ -1205,23 +1205,24 @@ func configSetTool(ctx context.Context, _ *mcpsdk.CallToolRequest, in configSetI
 	if err := atomicWrite(histRoot, p, body); err != nil {
 		return nil, configSetOut{}, err
 	}
-	prevJSON := decodePrevJSON(prev)
-	newJSON, err := json.Marshal(in.Value)
+	prevJSON := redactJSONAt(in.Path, decodePrevJSON(prev))
+	rawNew, err := json.Marshal(in.Value)
 	if err != nil {
 		return nil, configSetOut{}, fmt.Errorf("marshal value: %w", err)
 	}
+	newJSON := redactJSONAt(in.Path, string(rawNew))
 	writeMCPEvent(context.Background(), store.EvtMCPConfigSet, "patched "+in.Path, 0, map[string]string{
 		"scope":    layer,
 		"file":     p,
 		"path":     in.Path,
-		"new_json": string(newJSON),
+		"new_json": newJSON,
 	})
 	return nil, configSetOut{
 		Path:         in.Path,
 		Scope:        layer,
 		File:         p,
 		PreviousJSON: prevJSON,
-		NewJSON:      string(newJSON),
+		NewJSON:      newJSON,
 		Bytes:        len(body),
 	}, nil
 }

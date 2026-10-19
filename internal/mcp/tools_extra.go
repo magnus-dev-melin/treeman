@@ -692,8 +692,17 @@ func configDiffTool(ctx context.Context, _ *mcpsdk.CallToolRequest, in configDif
 		return nil, configDiffOut{Repo: baseLabel}, fmt.Errorf("marshal proposed config: %w", err)
 	}
 	var curMap, newMap map[string]any
-	_ = json.Unmarshal(curJSON, &curMap)
-	_ = json.Unmarshal(newJSON, &newMap)
+	if err := json.Unmarshal(curJSON, &curMap); err != nil {
+		return nil, configDiffOut{Repo: baseLabel}, fmt.Errorf("decode current config: %w", err)
+	}
+	if err := json.Unmarshal(newJSON, &newMap); err != nil {
+		return nil, configDiffOut{Repo: baseLabel}, fmt.Errorf("decode proposed config: %w", err)
+	}
+	// The current side is the env-substituted resolved config, so it
+	// holds real credentials; redact both sides before they reach the
+	// client. A changed secret still shows up as a changed path.
+	curMap, _ = redactValue("", curMap).(map[string]any)
+	newMap, _ = redactValue("", newMap).(map[string]any)
 
 	changes := diffMaps("", curMap, newMap)
 	out := configDiffOut{Repo: baseLabel, Parsed: true, Changes: changes}

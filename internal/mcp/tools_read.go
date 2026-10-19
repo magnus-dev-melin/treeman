@@ -514,7 +514,8 @@ func configGetTool(ctx context.Context, _ *mcpsdk.CallToolRequest, in configGetI
 		if err != nil {
 			return nil, nil, err
 		}
-		return nil, redactMap(map[string]any{"scope": "global", "path": path, "config": cfg}), nil
+		out, err := redactMap(map[string]any{"scope": "global", "path": path, "config": cfg})
+		return nil, out, err
 	}
 	if in.Scope != "" && !strings.EqualFold(in.Scope, "repo") {
 		return nil, nil, fmt.Errorf("invalid scope %q (want repo|global)", in.Scope)
@@ -531,24 +532,24 @@ func configGetTool(ctx context.Context, _ *mcpsdk.CallToolRequest, in configGetI
 	if in.Resolved {
 		out["resolved"] = resolve.Resolve(&cfg, repoRoot)
 	}
-	return nil, redactMap(out), nil
+	redactedOut, err := redactMap(out)
+	return nil, redactedOut, err
 }
 
-// redactMap round-trips `m` through JSON + redactSecrets so any
-// embedded password / token / URL-userinfo strings are scrubbed
-// regardless of how deeply nested they sit. Cheap: configs are
-// small and this only runs on tool invocation.
-func redactMap(m map[string]any) map[string]any {
-	b, err := json.Marshal(m)
+// redactMap round-trips `m` through JSON and redacts it structurally:
+// values under secret-named keys go, and credentials are scrubbed from
+// every other string however deeply nested. Cheap: configs are small
+// and this only runs on tool invocation.
+func redactMap(m map[string]any) (map[string]any, error) {
+	b, err := redactedJSON(m, false)
 	if err != nil {
-		return m
+		return nil, fmt.Errorf("redact config: %w", err)
 	}
-	clean := redactSecrets(string(b))
 	var out map[string]any
-	if err := json.Unmarshal([]byte(clean), &out); err != nil {
-		return m
+	if err := json.Unmarshal(b, &out); err != nil {
+		return nil, fmt.Errorf("redact config: %w", err)
 	}
-	return out
+	return out, nil
 }
 
 type configHistoryIn struct {

@@ -78,10 +78,14 @@ func tryDockerExecMySQL(ctx context.Context, conn *config.MysqlConn, targetDB st
 		user = "root"
 	}
 	args := []string{
-		"exec", "-i", "-e", "MYSQL_PWD=" + conn.Password, cid,
+		"exec", "-i", "-e", "MYSQL_PWD", cid,
 		"mysql", "-u", user, targetDB,
 	}
 	cmd := exec.CommandContext(ctx, engineBin, args...)
+	// `-e MYSQL_PWD` with no value copies it from the client's own
+	// environment: a `-e MYSQL_PWD=<password>` argument is readable by
+	// every local user through ps.
+	cmd.Env = append(os.Environ(), "MYSQL_PWD="+conn.Password)
 	cmd.Stdin = io.MultiReader(bytes.NewReader(mysqlSessionPrefix), stdin)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -151,10 +155,13 @@ func tryDockerExecPostgres(ctx context.Context, conn *config.PostgresConn, targe
 		user = "postgres"
 	}
 	args := []string{
-		"exec", "-i", "-e", "PGPASSWORD=" + conn.Password, cid,
+		"exec", "-i", "-e", "PGPASSWORD", cid,
 		"psql", "-U", user, "-d", targetDB, "-v", "ON_ERROR_STOP=1",
 	}
 	cmd := exec.CommandContext(ctx, engineBin, args...)
+	// See tryDockerExecMySQL: the password travels in the environment,
+	// not the arguments.
+	cmd.Env = append(os.Environ(), "PGPASSWORD="+conn.Password)
 	cmd.Stdin = io.MultiReader(bytes.NewReader(postgresSessionPrefix), stdin)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
