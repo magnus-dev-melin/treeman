@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -71,10 +72,19 @@ func repoFlag() cli.Flag {
 	return &cli.StringFlag{Name: "repo", Aliases: []string{"r"}, Usage: "worktree/repo dir (default: cwd)"}
 }
 
-// currentBranch returns the checked-out branch of dir, or "" if
-// detached. Fork-free HEAD-file read.
-func currentBranch(ctx context.Context, dir string) string {
-	return gitenv.DetectBranch(ctx, dir)
+// currentBranch returns the branch checked out in the worktree that
+// contains dir — dir may be any subdirectory of it — or "" on a
+// detached HEAD. It asks git rather than reading <dir>/.git/HEAD,
+// which exists only at the worktree root.
+func currentBranch(ctx context.Context, dir string) (string, error) {
+	out, err := gitcmd.String(ctx, dir, "symbolic-ref", "--short", "-q", "HEAD")
+	if err == nil {
+		return out, nil
+	}
+	if ge, ok := errors.AsType[*gitcmd.Error](err); ok && ge.ExitCode == 1 {
+		return "", nil
+	}
+	return "", fmt.Errorf("read current branch in %s: %w", dir, err)
 }
 
 // std wires a git subprocess to the terminal.
@@ -96,7 +106,11 @@ func gitCommit() *cli.Command {
 			if err != nil {
 				return err
 			}
-			prefix := gitx.TicketPrefix(currentBranch(ctx, dir))
+			branch, err := currentBranch(ctx, dir)
+			if err != nil {
+				return err
+			}
+			prefix := gitx.TicketPrefix(branch)
 
 			// No terminal (script / agent): the args ARE the message —
 			// commit directly, same ticket-prefix treatment, no TUI.
@@ -155,7 +169,10 @@ func gitPush() *cli.Command {
 			if err != nil {
 				return err
 			}
-			branch := currentBranch(ctx, dir)
+			branch, err := currentBranch(ctx, dir)
+			if err != nil {
+				return err
+			}
 			if branch == "" {
 				return errors.New("detached HEAD; nothing to push")
 			}
@@ -347,7 +364,11 @@ func gitDiff() *cli.Command {
 				}
 				target = "origin/" + target
 			}
-			cur := currentBranch(ctx, dir)
+			cur, err := currentBranch(ctx, dir)
+			if err != nil {
+				return err
+			}
+			cur = cmp.Or(cur, "HEAD")
 			spec := cur + "..." + target
 			if c.Bool("patch") {
 				out, err := gitcmd.Output(ctx, dir, "diff", spec)
@@ -406,7 +427,11 @@ func gitPull() *cli.Command {
 				return runGit(ctx, dir, "pull", "origin", branch)
 			}
 			// Ensure an upstream so a bare `git pull` works on a fresh branch.
-			if branch := currentBranch(ctx, dir); branch != "" {
+			branch, err := currentBranch(ctx, dir)
+			if err != nil {
+				return err
+			}
+			if branch != "" {
 				if gitcmd.RunOptional(ctx, dir, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}") != nil {
 					_ = gitcmd.Run(ctx, dir, "branch", "--set-upstream-to=origin/"+branch)
 				}

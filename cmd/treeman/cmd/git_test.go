@@ -100,3 +100,28 @@ func TestStageRowsSeesEveryChange(t *testing.T) {
 		t.Errorf("stageRows = %+v, want %+v", rows, want)
 	}
 }
+
+// currentBranch used to read <dir>/.git/HEAD, so from any subdirectory
+// it saw no branch: push reported a detached HEAD and commit lost its
+// ticket prefix.
+func TestCurrentBranchFromSubdirectory(t *testing.T) {
+	repo, run := newGitRepo(t)
+	run("switch", "-q", "-c", "feature/KON-7-x")
+	sub := filepath.Join(repo, "src", "deep")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	for _, dir := range []string{repo, sub} {
+		if got, err := currentBranch(ctx, dir); err != nil || got != "feature/KON-7-x" {
+			t.Errorf("currentBranch(%s) = %q, %v", dir, got, err)
+		}
+	}
+	run("switch", "-q", "--detach")
+	if got, err := currentBranch(ctx, sub); err != nil || got != "" {
+		t.Errorf("detached: currentBranch = %q, %v; want \"\", nil", got, err)
+	}
+	if _, err := currentBranch(ctx, t.TempDir()); err == nil {
+		t.Error("outside a repo: want an error")
+	}
+}

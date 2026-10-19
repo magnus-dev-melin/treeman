@@ -143,7 +143,10 @@ func gitBranchDelete() *cli.Command {
 			if err != nil {
 				return err
 			}
-			current := currentBranch(ctx, dir)
+			current, err := currentBranch(ctx, dir)
+			if err != nil {
+				return err
+			}
 			merged := mergedBranches(ctx, dir)
 			var names, items []string
 			for _, b := range listGitBranches(dir, false) {
