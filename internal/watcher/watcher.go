@@ -11,6 +11,7 @@
 package watcher
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -146,27 +147,23 @@ func (w *Watcher) Start(ctx context.Context) error {
 			if !ok {
 				return nil
 			}
-			// If a new directory was created inside a tracked
-			// subtree, add it so we get events from inside it on
-			// Linux (Darwin's kqueue auto-recurses). Filter by
-			// basename exactly like addAllDirs — without this, an
-			// `npm ci` inside a watched subtree re-subscribes all of
-			// node_modules, defeating the initial skip list until the
-			// watcher restarts.
+			// A directory created where matches can live is subscribed
+			// with everything already inside it: `mkdir -p` or a
+			// checkout lands a whole subtree before its Create event
+			// is read, and fsnotify (non-recursive on Linux) would
+			// otherwise miss both the nested dirs and the files
+			// written into them.
+			queued := w.enqueue(ev.Name)
 			if ev.Op&fsnotify.Create != 0 {
 				if fi, err := os.Stat(ev.Name); err == nil && fi.IsDir() {
-					if _, noisy := noiseDirNames[fi.Name()]; !noisy {
-						_ = w.fsw.Add(ev.Name)
-					}
+					w.subscribe(ev.Name, func(file string) {
+						queued = w.enqueue(file) || queued
+					})
 				}
 			}
-			matches := w.classify(ev.Name)
-			if len(matches) == 0 {
+			if !queued {
 				continue
 			}
-			w.mu.Lock()
-			w.pending[ev.Name] = Event{RepoPath: w.repoPath, Path: ev.Name, Matches: matches}
-			w.mu.Unlock()
 			// Arm the debounce window on the first event of a burst.
 			// Subsequent events ride the same window (no reset) so a
 			// steady stream can't starve the flush past debounceMs.
@@ -192,6 +189,19 @@ func (w *Watcher) Start(ctx context.Context) error {
 
 // Stop closes the underlying fsnotify.Watcher; Start unblocks.
 func (w *Watcher) Stop() { _ = w.fsw.Close() }
+
+// enqueue records path as pending when it matches an input, reporting
+// whether it did.
+func (w *Watcher) enqueue(path string) bool {
+	matches := w.classify(path)
+	if len(matches) == 0 {
+		return false
+	}
+	w.mu.Lock()
+	w.pending[path] = Event{RepoPath: w.repoPath, Path: path, Matches: matches}
+	w.mu.Unlock()
+	return true
+}
 
 // noiseDirNames is the set of directory basenames we refuse to
 // recurse into during addAllDirs. fsnotify is non-recursive on Linux
@@ -223,44 +233,91 @@ var noiseDirNames = map[string]struct{}{
 	".venv":        {},
 }
 
-// addAllDirs walks each glob's longest static prefix and adds every
-// existing directory to fsnotify. Globs are matched lazily on
-// emit. We add the parent dirs only — fsnotify reports events on
-// files within an added dir without recursing.
-func (w *Watcher) addAllDirs() {
-	added := map[string]struct{}{}
+// watchRoot is where one input glob's matches can appear: dir
+// (repo-relative, "." for the repo root) and, for a glob with
+// wildcards, every directory below it. A literal path (composer.lock)
+// can only change inside its parent directory, so only that one
+// directory is watched — walking it would subscribe the whole repo.
+type watchRoot struct {
+	dir       string
+	recursive bool
+}
+
+func rootOf(glob string) watchRoot {
+	if !strings.ContainsAny(glob, "*?[{") {
+		return watchRoot{dir: filepath.Dir(filepath.Clean(glob))}
+	}
+	return watchRoot{dir: filepath.Clean(cmp.Or(staticPrefix(glob), ".")), recursive: true}
+}
+
+// relevant reports whether the repo-relative directory rel can hold a
+// match, or lies on the way to a root that does not exist yet.
+func (w *Watcher) relevant(rel string) bool {
 	for _, p := range w.paths {
-		// Take the longest path prefix without a glob meta-character
-		// so we anchor on something concrete (e.g.
-		// `database/migrations/**` → `database/migrations`).
-		base := filepath.Join(w.repoPath, staticPrefix(p.Glob))
-		_ = filepath.WalkDir(base, func(path string, d os.DirEntry, err error) error {
-			if err != nil {
-				return nil //nolint:nilerr // skip unreadable entries and keep walking
+		r := rootOf(p.Glob)
+		if rel == r.dir || isUnder(r.dir, rel) || (r.recursive && isUnder(rel, r.dir)) {
+			return true
+		}
+	}
+	return false
+}
+
+// isUnder reports whether path lies strictly inside dir (both
+// repo-relative, cleaned).
+func isUnder(path, dir string) bool {
+	return dir == "." && path != "." || strings.HasPrefix(path, dir+string(filepath.Separator))
+}
+
+// addAllDirs subscribes every input glob's watch root. A root that does
+// not exist yet is covered by watching its nearest existing ancestor,
+// whose Create event then subscribes the root once it appears.
+func (w *Watcher) addAllDirs() {
+	for _, p := range w.paths {
+		dir := filepath.Join(w.repoPath, rootOf(p.Glob).dir)
+		for {
+			if fi, err := os.Stat(dir); err == nil && fi.IsDir() {
+				break
 			}
-			if !d.IsDir() {
-				return nil
+			parent := filepath.Dir(dir)
+			if parent == dir || !strings.HasPrefix(parent, w.repoPath) {
+				break
 			}
-			// Skip noise dirs entirely — never subscribe inside them.
-			// Check by basename so the filter works regardless of how
-			// deep the static prefix nested. The base of the walk
-			// itself is always added (a user who points a glob
-			// directly at `node_modules/**` knows what they want).
-			if path != base {
-				if _, noisy := noiseDirNames[d.Name()]; noisy {
-					return filepath.SkipDir
-				}
-			}
-			if _, seen := added[path]; seen {
-				return nil
-			}
-			added[path] = struct{}{}
-			if err := w.fsw.Add(path); err != nil {
-				slog.Debug("fsnotify add skipped", "path", path, "err", err)
+			dir = parent
+		}
+		w.subscribe(dir, nil)
+	}
+}
+
+// subscribe adds dir and every relevant directory below it to fsnotify
+// (fsnotify reports events for a directory's entries without
+// recursing), skipping noise trees below dir. onFile, when set, sees
+// every regular file found on the way.
+func (w *Watcher) subscribe(dir string, onFile func(string)) {
+	_ = filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil //nolint:nilerr // skip unreadable entries and keep walking
+		}
+		if !d.IsDir() {
+			if onFile != nil {
+				onFile(path)
 			}
 			return nil
-		})
-	}
+		}
+		rel, rerr := filepath.Rel(w.repoPath, path)
+		if rerr != nil || !w.relevant(rel) {
+			return filepath.SkipDir
+		}
+		// Skip noise dirs entirely — never subscribe inside them. The
+		// subscribed dir itself is always added (a glob pointed at
+		// `node_modules/**` means it).
+		if _, noisy := noiseDirNames[d.Name()]; noisy && path != dir {
+			return filepath.SkipDir
+		}
+		if err := w.fsw.Add(path); err != nil {
+			slog.Debug("fsnotify add skipped", "path", path, "err", err)
+		}
+		return nil
+	})
 }
 
 // classify resolves an event path against the configured globs and
