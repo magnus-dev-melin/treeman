@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/stubbedev/treeman/internal/config"
+	"github.com/stubbedev/treeman/internal/slug"
 	"github.com/stubbedev/treeman/internal/store"
 )
 
@@ -112,15 +113,16 @@ func TestResolveIdentityMainWtNoOverlay(t *testing.T) {
 	if !id.IsMain {
 		t.Fatal("expected isMain=true")
 	}
-	if id.Slug.Value != "main_develop" {
-		t.Errorf("slug=%q want main_develop", id.Slug.Value)
+	wantSlug := slug.ForMain(repo, "develop").Value
+	if id.Slug.Value != wantSlug {
+		t.Errorf("slug=%q want %q", id.Slug.Value, wantSlug)
 	}
 	if cfg.Databases[0].NameTemplate != "app_{slug}" {
 		t.Errorf("base template should be untouched without overlay, got %q",
 			cfg.Databases[0].NameTemplate)
 	}
 	row, _ := s.LookupMainWorktree(ctx, repoID)
-	if row.ID != id.WtID || !row.IsMain || row.Slug != "main_develop" {
+	if row.ID != id.WtID || !row.IsMain || row.Slug != wantSlug {
 		t.Errorf("main row mismatch: %+v", row)
 	}
 }
@@ -263,12 +265,13 @@ func TestResolveIdentityRowFallback(t *testing.T) {
 	if !id.IsMain {
 		t.Fatal("expected isMain=true via row fallback")
 	}
-	if id.Slug.Value != "main_main" {
-		t.Errorf("slug=%q want main_main", id.Slug.Value)
+	wantSlug := slug.ForMain(repo, "main").Value
+	if id.Slug.Value != wantSlug {
+		t.Errorf("slug=%q want %q", id.Slug.Value, wantSlug)
 	}
 	row, _ := s.LookupMainWorktree(ctx, repoID)
-	if row.Slug != "main_main" {
-		t.Errorf("row slug = %q, want main_main (path-hash leaked through)", row.Slug)
+	if row.Slug != wantSlug {
+		t.Errorf("row slug = %q, want %q (path-hash leaked through)", row.Slug, wantSlug)
 	}
 }
 

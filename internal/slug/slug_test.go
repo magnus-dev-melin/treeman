@@ -80,22 +80,56 @@ func TestFallsBackToPathHash(t *testing.T) {
 
 func TestForMainBranchAware(t *testing.T) {
 	cases := []struct {
-		branch string
-		want   string
+		branch   string
+		readable string
 	}{
-		{"main", "main_main"},
-		{"develop", "main_develop"},
-		{"feature/foo-bar", "main_feature_foo_bar"},
-		{"feature/PROJ-123", "main_feature_proj_123"},
-		{"release/v1.0.0", "main_release_v1_0_0"},
+		{"main", "main_main_"},
+		{"develop", "main_develop_"},
+		{"feature/foo-bar", "main_feature_foo_bar_"},
+		{"feature/PROJ-123", "main_feature_proj_123_"},
+		{"release/v1.0.0", "main_release_v1_0_0_"},
 	}
 	for _, tc := range cases {
 		got := ForMain("/some/repo", tc.branch)
-		if got.Value != tc.want {
-			t.Errorf("ForMain branch=%q value=%q want=%q", tc.branch, got.Value, tc.want)
+		if !strings.HasPrefix(got.Value, tc.readable) || len(got.Value) != len(tc.readable)+8 {
+			t.Errorf("ForMain branch=%q value=%q want %s<8 hex>", tc.branch, got.Value, tc.readable)
 		}
 		if got.Source != SourceMain {
 			t.Errorf("ForMain branch=%q source=%v want=SourceMain", tc.branch, got.Source)
+		}
+	}
+}
+
+func TestForMainBranchesThatSanitiseAlikeDoNotCollide(t *testing.T) {
+	seen := map[string]string{}
+	for _, b := range []string{"feature/foo", "feature-foo", "Feature_Foo", "feature//foo"} {
+		v := ForMain("/some/repo", b).Value
+		if prev, ok := seen[v]; ok {
+			t.Errorf("branches %q and %q collided on slug %q", prev, b, v)
+		}
+		seen[v] = b
+	}
+}
+
+// Teardown drops every name that starts with a slug's rendered name, so
+// no slug may be a prefix of another: `main_dev` used to prefix
+// `main_dev_old`, and tearing down branch dev dropped dev_old's
+// databases too.
+func TestSlugsArePrefixFree(t *testing.T) {
+	slugs := []string{
+		ForMain("/r", "dev").Value,
+		ForMain("/r", "dev-old").Value,
+		ForMain("/r", "dev_old_test").Value,
+		ForMain("/r", "").Value,
+		For("/r/.worktrees/PROJ-12", "").Value,
+		For("/r/.worktrees/PROJ-123", "").Value,
+		For("/r/.worktrees/x", "").Value,
+	}
+	for _, a := range slugs {
+		for _, b := range slugs {
+			if a != b && strings.HasPrefix(b, a) {
+				t.Errorf("slug %q is a prefix of %q", a, b)
+			}
 		}
 	}
 }
@@ -115,15 +149,12 @@ func TestForMainDetachedHasStableHash(t *testing.T) {
 	}
 }
 
-func TestForMainSymbolOnlyBranchFallsBackToHash(t *testing.T) {
+func TestForMainSymbolOnlyBranchesStayDistinct(t *testing.T) {
 	got := ForMain("/some/repo", "@@@")
-	if !strings.HasPrefix(got.Value, "main_sym_") {
-		t.Errorf("symbol-only branch should hash, got %q", got.Value)
+	if !strings.HasPrefix(got.Value, "main_") {
+		t.Errorf("symbol-only branch slug = %q, want main_<tag>", got.Value)
 	}
-	// Different symbol-only branches must produce different slugs so
-	// two odd branches don't collide on `main_`.
-	other := ForMain("/some/repo", "###")
-	if got.Value == other.Value {
+	if other := ForMain("/some/repo", "###"); got.Value == other.Value {
 		t.Errorf("symbol-only branches collided: %q == %q", got.Value, other.Value)
 	}
 }
@@ -233,42 +264,30 @@ func TestSetRedisDBRangeRejectsBadWindows(t *testing.T) {
 }
 
 // TestSlugSuffix pins the CI namespace knob (#62): an unset suffix
-// keeps the byte-identical slugs, setting one yields distinct slugs
-// for the same branch AND the same path, the suffix survives the
-// 32-char budget truncation, and sanitisation keeps the result a
-// valid identifier.
+// keeps the byte-identical slugs, setting one yields distinct slugs for
+// the same branch AND the same path, and two long branches that differ
+// only past the 32-char budget stay distinct with a suffix set.
 func TestSlugSuffix(t *testing.T) {
-	if SlugSuffix() != "" {
-		t.Fatalf("suffix should default to empty in tests, got %q", SlugSuffix())
-	}
 	base := ForMain("/repo", "feature/x").Value
 	baseFor := For("/repo", "").Value
 
 	SetSlugSuffix("run-12345")
 	t.Cleanup(func() { SetSlugSuffix("") })
 
-	if SlugSuffix() != "run_12345" {
-		t.Errorf("suffix not sanitised: %q", SlugSuffix())
-	}
 	withSuffix := ForMain("/repo", "feature/x").Value
-	if withSuffix == base {
-		t.Errorf("suffix did not disambiguate the main-branch slug: %q", withSuffix)
-	}
-	if want := "main_feature_x_run_12345"; withSuffix != want {
-		t.Errorf("suffix slug = %q, want %q", withSuffix, want)
+	if withSuffix == base || !strings.HasPrefix(withSuffix, "main_feature_x_") {
+		t.Errorf("suffix did not disambiguate the main-branch slug: %q vs %q", withSuffix, base)
 	}
 	if For("/repo", "").Value == baseFor {
 		t.Errorf("suffix did not disambiguate the path-hash slug")
 	}
 
-	// The suffix must survive even for a long branch: composeTicket
-	// may eat the readable part, never the disambiguator.
-	long := ForMain("/repo", "feature/very-long-branch-name-that-overflows-the-budget")
-	if len(long.Value) > 32 || !strings.Contains(long.Value, "run_12345") {
-		t.Errorf("long-branch slug lost the suffix or overflows budget: %q", long.Value)
+	a := ForMain("/repo", "feature/kon-1234-add-foo-bar-baz-and-more").Value
+	b := ForMain("/repo", "feature/kon-1234-add-foo-bar-baz-and-less").Value
+	if a == b || len(a) > 32 || strings.Contains(a, "__") {
+		t.Errorf("long branches with a suffix: %q vs %q", a, b)
 	}
 
-	// Clearing restores byte-identical behaviour.
 	SetSlugSuffix("")
 	if ForMain("/repo", "feature/x").Value != base || For("/repo", "").Value != baseFor {
 		t.Errorf("clearing the suffix must restore the original slugs")

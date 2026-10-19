@@ -329,7 +329,7 @@ unconditionally:
 | ------------------ | ---------------------------------------------------------------------- |
 | `TREEMAN_MAIN_ROOT`| Absolute path of the repo root (`git rev-parse --show-toplevel`).      |
 | `TREEMAN_WORKTREE` | Absolute path of the worktree firing the hook.                         |
-| `TREEMAN_SLUG`     | The slug used to name resources for this run (e.g. `feature_x`, `main_develop`). |
+| `TREEMAN_SLUG`     | The slug used to name resources for this run (e.g. `kon_1234_1a2b3c4d`, `main_develop_5e6f7a8b`). |
 | `TREEMAN_IS_MAIN`  | `"1"` when the firing worktree is the repo root with main-wt enabled, else `"0"`. Branch on this to skip dev-only setup on linked worktrees, or vice versa. |
 
 `file-change` hooks additionally receive `TREEMAN_WATCH_PATH`,
@@ -356,7 +356,8 @@ checkout doesn't get its own per-branch databases.
 
 `main_worktree:` opts the repo root into the same lifecycle. Once
 enabled, flipping a branch at the repo root produces per-branch
-databases keyed by `main_<branch>` (instead of every non-ticket
+databases keyed by `main_<branch>_<tag>`, where the tag is a hash of
+the exact branch name (instead of every non-ticket
 branch collapsing to one path-hash slug), and the checkout /
 file-change / create-* hooks fire against the repo root the
 same way they do for linked worktrees.

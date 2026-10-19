@@ -30,6 +30,7 @@ import (
 
 	"github.com/stubbedev/treeman/e2e/harness"
 	"github.com/stubbedev/treeman/internal/daemon"
+	"github.com/stubbedev/treeman/internal/slug"
 	"github.com/stubbedev/treeman/internal/store"
 )
 
@@ -99,8 +100,7 @@ databases:
 		t.Fatalf("finalize main: %v", err)
 	}
 
-	// Main slug is main_<branch> → overlay renders tmmwmain_main_develop.
-	const mainDB = "tmmwmain_main_develop"
+	mainDB := "tmmwmain_" + slug.ForMain(repoRoot, "develop").Value
 	if !dbExists(t, mainDB) {
 		t.Errorf("main source DB %s missing — overlay name_template did not reach the real DB (have: %v)",
 			mainDB, listLike(t, "tmmwmain_%"))
