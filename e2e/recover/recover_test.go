@@ -90,11 +90,11 @@ hooks:
 	env := map[string]string{"PATH": os.Getenv("PATH"), "MYSQL_PW": "rootpw"}
 
 	// ── 1. Finalize fails in the after-engines hook ──
-	// FinalizeWorktree records the failure as a terminal event and then
-	// deliberately returns nil (so dispatch doesn't double-log), so the
-	// failure is asserted via the event log below, not the return value.
-	if err := daemon.FinalizeWorktree(ctx, state, repoRoot, repoRoot, env, false); err != nil {
-		t.Fatalf("finalize returned a hard error: %v", err)
+	// FinalizeWorktree records the failure as a terminal event AND
+	// returns it, so a caller waiting on the run fails with it (#129).
+	if err := daemon.FinalizeWorktree(ctx, state, repoRoot, repoRoot, env, false); err == nil ||
+		!strings.Contains(err.Error(), "create-after-engines") {
+		t.Fatalf("finalize must return the after-engines hook failure, got %v", err)
 	}
 
 	// The source DB built by prepare must have been dropped by recovery.

@@ -96,7 +96,7 @@ test-e2e batch="all" parallel="4":
     BATCHES[fw2]="fw_drizzle fw_golang_migrate fw_knex fw_mikro fw_prisma fw_sequelize fw_typeorm"
     BATCHES[matrix]="matrix_es matrix_mongo matrix_postgres matrix_redis containerref containerref-all conn_forms engine_aliases named_conns"
     BATCHES[watcher]="autofetch branchscoped deltawatch headwatcher hook_cwd lifecycle main_worktree main_worktree_db oncheckout onfilechange onfilechange_redis watcher"
-    BATCHES[features]="clones_auto coldbuild_siblings compression ctrrestart extras fanout log_level logs misc patches poolmax race retention sighup snapshot_gc switchback teardown worktrees_root"
+    BATCHES[features]="clones_auto coldbuild_siblings compression ctrrestart extras fanout log_level logs misc patches poolmax race recover retention sighup snapshot_gc switchback teardown worktrees_root"
     BATCHES[cli]="cli cli_engine cli_surface db_query mcp mcp_write mongo_dump"
     BATCHES[lite]="cli_surface logs notifications file_engine"
 
@@ -168,7 +168,7 @@ e2e-prepull batch:
     BATCHES[fw2]="fw_drizzle fw_golang_migrate fw_knex fw_mikro fw_prisma fw_sequelize fw_typeorm"
     BATCHES[matrix]="matrix_es matrix_mongo matrix_postgres matrix_redis containerref containerref-all conn_forms engine_aliases named_conns"
     BATCHES[watcher]="autofetch branchscoped deltawatch headwatcher hook_cwd lifecycle main_worktree main_worktree_db oncheckout onfilechange onfilechange_redis watcher"
-    BATCHES[features]="clones_auto coldbuild_siblings compression ctrrestart extras fanout log_level logs misc patches poolmax race retention sighup snapshot_gc switchback teardown worktrees_root"
+    BATCHES[features]="clones_auto coldbuild_siblings compression ctrrestart extras fanout log_level logs misc patches poolmax race recover retention sighup snapshot_gc switchback teardown worktrees_root"
     BATCHES[cli]="cli cli_engine cli_surface db_query mcp mcp_write mongo_dump"
     BATCHES[lite]="cli_surface logs notifications file_engine"
 
@@ -205,7 +205,7 @@ test-e2e-list:
     echo "fw2      : fw_drizzle fw_golang_migrate fw_knex fw_mikro fw_prisma fw_sequelize fw_typeorm"
     echo "matrix   : matrix_es matrix_mongo matrix_postgres matrix_redis containerref containerref-all conn_forms engine_aliases named_conns"
     echo "watcher  : autofetch branchscoped deltawatch headwatcher hook_cwd lifecycle main_worktree main_worktree_db oncheckout onfilechange onfilechange_redis watcher"
-    echo "features : clones_auto coldbuild_siblings compression ctrrestart extras fanout log_level logs misc patches poolmax race retention sighup snapshot_gc switchback teardown worktrees_root"
+    echo "features : clones_auto coldbuild_siblings compression ctrrestart extras fanout log_level logs misc patches poolmax race recover retention sighup snapshot_gc switchback teardown worktrees_root"
     echo "cli      : cli cli_engine cli_surface db_query mcp mcp_write mongo_dump"
     echo "lite     : cli_surface logs notifications file_engine (container-free)"
 
