@@ -518,21 +518,60 @@ func gitWipe() *cli.Command {
 				if !c.Bool("yes") && !ui.ConfirmYes("Wipe working changes + entire stash stack?") {
 					return nil
 				}
-				_ = gitcmd.Run(ctx, dir, "stash", "push", "-u")
+				if err := gitcmd.Run(ctx, dir, "stash", "push", "-u"); err != nil {
+					return err
+				}
 				return gitcmd.Run(ctx, dir, "stash", "clear")
 			}
-			if dirty, _ := gitenv.HasWorkingTreeChanges(ctx, dir); !dirty {
+			dirty, err := gitenv.HasWorkingTreeChanges(ctx, dir)
+			if err != nil {
+				return err
+			}
+			if !dirty {
 				return nil
 			}
 			if !c.Bool("yes") && !ui.ConfirmYes("Wipe non-pushed changes on local branch?") {
 				return nil
 			}
-			if err := gitcmd.Run(ctx, dir, "stash", "push", "-u"); err != nil {
+			wiped, err := wipeChanges(ctx, dir)
+			if err != nil {
 				return err
 			}
-			return gitcmd.Run(ctx, dir, "stash", "drop")
+			if !wiped {
+				ui.Info("Nothing git stash can wipe (e.g. only submodule changes).")
+			}
+			return nil
 		},
 	}
+}
+
+func wipeChanges(ctx context.Context, dir string) (bool, error) {
+	before, err := stashTip(ctx, dir)
+	if err != nil {
+		return false, err
+	}
+	if err := gitcmd.Run(ctx, dir, "stash", "push", "-u"); err != nil {
+		return false, err
+	}
+	after, err := stashTip(ctx, dir)
+	if err != nil {
+		return false, err
+	}
+	if after == before {
+		return false, nil
+	}
+	return true, gitcmd.Run(ctx, dir, "stash", "drop", "--quiet", "stash@{0}")
+}
+
+func stashTip(ctx context.Context, dir string) (string, error) {
+	out, err := gitcmd.String(ctx, dir, "rev-parse", "--verify", "--quiet", "refs/stash")
+	if err == nil {
+		return out, nil
+	}
+	if ge, ok := errors.AsType[*gitcmd.Error](err); ok && ge.ExitCode == 1 {
+		return "", nil
+	}
+	return "", fmt.Errorf("read stash tip in %s: %w", dir, err)
 }
 
 // gitLog — `treeman git log` (was gl). Interactive multi-select log;
