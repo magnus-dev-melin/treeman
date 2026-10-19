@@ -243,11 +243,13 @@ func runTaskPrepare(ctx context.Context, st *State, task rpc.Task) (json.RawMess
 // finalize pipeline, a watcher re-prepare, or another prepare task
 // building the same source databases (issue #28).
 func lockedPrepare(ctx context.Context, st *State, id taskIdentity, task rpc.Task) ([]prepare.Outcome, error) {
-	prepLk := st.LockWorktreePrepare(task.WorktreePath)
-	prepLk.Lock()
-	defer prepLk.Unlock()
 	opts := prepare.RunOptions{Fresh: rpc.PrepareArgsOf(task).Fresh}
-	return prepare.RunFiltered(ctx, &id.cfg, task.WorktreePath, id.sl, st.Store, id.repoID, id.wtID, task.InheritedEnv, opts)
+	var outs []prepare.Outcome
+	var err error
+	st.withWorktreePrepare(task.WorktreePath, func() {
+		outs, err = prepare.RunFiltered(ctx, &id.cfg, task.WorktreePath, id.sl, st.Store, id.repoID, id.wtID, task.InheritedEnv, opts)
+	})
+	return outs, err
 }
 
 func runTaskDBReset(ctx context.Context, st *State, task rpc.Task) (json.RawMessage, error) {
@@ -259,14 +261,14 @@ func runTaskDBReset(ctx context.Context, st *State, task rpc.Task) (json.RawMess
 	// Reset + rebuild are one unit: dropping the branch-scoped state and
 	// then racing a concurrent build against the same databases is the
 	// collision issue #28 describes, so both run under the lock.
-	prepLk := st.LockWorktreePrepare(task.WorktreePath)
-	prepLk.Lock()
-	resetErr := prepare.ResetBranchScoped(ctx, &id.cfg, task.WorktreePath, id.repoID, id.wtID, st.Store, engineFilter)
 	var outs []prepare.Outcome
-	if resetErr == nil {
-		outs, resetErr = prepare.Run(ctx, &id.cfg, task.WorktreePath, id.sl, st.Store, id.repoID, id.wtID, task.InheritedEnv)
-	}
-	prepLk.Unlock()
+	var resetErr error
+	st.withWorktreePrepare(task.WorktreePath, func() {
+		resetErr = prepare.ResetBranchScoped(ctx, &id.cfg, task.WorktreePath, id.repoID, id.wtID, st.Store, engineFilter)
+		if resetErr == nil {
+			outs, resetErr = prepare.Run(ctx, &id.cfg, task.WorktreePath, id.sl, st.Store, id.repoID, id.wtID, task.InheritedEnv)
+		}
+	})
 	if resetErr != nil {
 		return nil, resetErr
 	}

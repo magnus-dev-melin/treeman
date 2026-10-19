@@ -1,7 +1,7 @@
 // Package wtlock serialises per-worktree work ACROSS processes.
 //
 // The daemon's per-worktree guards (MarkFinalizeInFlight,
-// LockWorktreePrepare) are in-process mutexes, but prepare.Run is also
+// withWorktreePrepare) are in-process mutexes, but prepare.Run is also
 // reached from other processes: `treeman worktree finalize --local`
 // and the MCP server both run it inline. Issue #123: a `finalize
 // --local` issued while the daemon's detached create tail was still

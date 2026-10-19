@@ -632,7 +632,7 @@ func RunFiltered(
 	}
 	// Serialise against any other prepare of this worktree — including
 	// ones in other processes (`finalize --local`, the MCP server) that
-	// the daemon's in-process LockWorktreePrepare cannot see (#123).
+	// the daemon's in-process withWorktreePrepare cannot see (#123).
 	// Two builds of the same source database drop and reload it under
 	// each other and leave it half-migrated.
 	unlock, err := wtlock.Acquire(ctx, wtlock.Prepare, worktreePath, func() {
