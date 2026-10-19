@@ -29,6 +29,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/stubbedev/treeman/internal/atomicfile"
 	"github.com/stubbedev/treeman/internal/yamlpatch"
 )
 
@@ -78,8 +79,8 @@ func PatchEnvFile(path string, pairs []Pair) (Outcome, error) {
 	if content == original {
 		return Unchanged, nil
 	}
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-		return Updated, fmt.Errorf("write %s: %w", path, err)
+	if err := atomicfile.Write(path, []byte(content), 0o644); err != nil {
+		return Updated, err
 	}
 	return Updated, nil
 }
@@ -119,8 +120,8 @@ func PatchPhpunitFile(path string, pairs []Pair) (Outcome, error) {
 	if content == original {
 		return Unchanged, nil
 	}
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-		return Updated, fmt.Errorf("write %s: %w", path, err)
+	if err := atomicfile.Write(path, []byte(content), 0o644); err != nil {
+		return Updated, err
 	}
 	return Updated, nil
 }
@@ -178,8 +179,8 @@ func PatchYAMLFile(path string, pairs map[string]string) (Outcome, error) {
 	if err != nil {
 		return Updated, fmt.Errorf("yaml driver: marshal %s: %w", path, err)
 	}
-	if err := os.WriteFile(path, out, 0o644); err != nil {
-		return Updated, fmt.Errorf("write %s: %w", path, err)
+	if err := atomicfile.Write(path, out, 0o644); err != nil {
+		return Updated, err
 	}
 	return Updated, nil
 }
@@ -209,8 +210,8 @@ func PatchJSONFile(path string, pairs map[string]string) (Outcome, error) {
 	if !changed {
 		return Unchanged, nil
 	}
-	if err := os.WriteFile(path, []byte(out), 0o644); err != nil {
-		return Updated, fmt.Errorf("write %s: %w", path, err)
+	if err := atomicfile.Write(path, []byte(out), 0o644); err != nil {
+		return Updated, err
 	}
 	return Updated, nil
 }

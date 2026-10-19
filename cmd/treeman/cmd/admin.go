@@ -14,6 +14,7 @@ import (
 	"github.com/urfave/cli/v3"
 	"gopkg.in/yaml.v3"
 
+	"github.com/stubbedev/treeman/internal/atomicfile"
 	"github.com/stubbedev/treeman/internal/config"
 	"github.com/stubbedev/treeman/internal/resolve"
 	"github.com/stubbedev/treeman/internal/snapshot"
@@ -541,7 +542,7 @@ func persistConfigBody(ctx context.Context, histRoot, path string, body []byte, 
 			_ = st.Close()
 		}
 	}
-	return yamlpatch.AtomicWrite(path, body)
+	return atomicfile.Write(path, body, 0o600)
 }
 
 // openDefaultStore opens the default SQLite event store.

@@ -14,6 +14,7 @@ import (
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"gopkg.in/yaml.v3"
 
+	"github.com/stubbedev/treeman/internal/atomicfile"
 	"github.com/stubbedev/treeman/internal/config"
 	"github.com/stubbedev/treeman/internal/daemonctl"
 	"github.com/stubbedev/treeman/internal/hooks"
@@ -345,7 +346,7 @@ func atomicWrite(repoRoot, path string, data []byte) error {
 			_ = st.Close()
 		}
 	}
-	return yamlpatch.AtomicWrite(path, data)
+	return atomicfile.Write(path, data, 0o600)
 }
 
 // ─── init_repo / schema_install ───────────────────────────────────

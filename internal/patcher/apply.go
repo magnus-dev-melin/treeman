@@ -8,7 +8,9 @@
 package patcher
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"path/filepath"
 	"strings"
 
@@ -44,6 +46,9 @@ func Apply(p config.Patch, worktreePath string, tplCtx template.Context) (ApplyR
 		return ApplyResult{}, err
 	}
 	abs := filepath.Join(worktreePath, p.File)
+	if err := insideWorktree(worktreePath, abs); err != nil {
+		return ApplyResult{}, fmt.Errorf("patch %s: %w", p.File, err)
+	}
 	var outcome Outcome
 	switch driver {
 	case DriverDotenv:
@@ -65,6 +70,34 @@ func Apply(p config.Patch, worktreePath string, tplCtx template.Context) (ApplyR
 		return ApplyResult{}, fmt.Errorf("patch %s: %w", p.File, err)
 	}
 	return ApplyResult{File: p.File, Outcome: outcome, Driver: driver}, nil
+}
+
+// insideWorktree refuses a patch target that resolves outside the
+// worktree — through a worktrees.links entry or any other symlink —
+// since patching it would write this worktree's values into another
+// checkout's file. A missing target passes; the driver reports it.
+func insideWorktree(worktreePath, target string) error {
+	root, err := filepath.EvalSymlinks(worktreePath)
+	if err != nil {
+		return fmt.Errorf("resolve worktree %s: %w", worktreePath, err)
+	}
+	resolved, err := filepath.EvalSymlinks(target)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("resolve %s: %w", target, err)
+	}
+	rel, err := filepath.Rel(root, resolved)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return fmt.Errorf(
+			"%s resolves to %s, outside the worktree %s (through a symlink or worktrees.links entry); refusing to patch another checkout's file",
+			target,
+			resolved,
+			root,
+		)
+	}
+	return nil
 }
 
 // detectFormat picks a driver from a file path. Returns "" when the

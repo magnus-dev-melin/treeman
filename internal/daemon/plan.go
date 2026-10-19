@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/stubbedev/treeman/internal/atomicfile"
 	"github.com/stubbedev/treeman/internal/config"
 	"github.com/stubbedev/treeman/internal/engine"
 	"github.com/stubbedev/treeman/internal/gitcmd"
@@ -26,7 +27,6 @@ import (
 	"github.com/stubbedev/treeman/internal/store"
 	"github.com/stubbedev/treeman/internal/wt"
 	"github.com/stubbedev/treeman/internal/wtreg"
-	"github.com/stubbedev/treeman/internal/yamlpatch"
 	"github.com/stubbedev/treeman/pkg/rpc"
 )
 
@@ -536,7 +536,7 @@ func runTaskConfigWrite(ctx context.Context, st *State, task rpc.Task) (json.Raw
 	if prev, err := os.ReadFile(path); err == nil {
 		_, _ = st.Store.SnapshotConfig(ctx, task.RepoPath, path, prev)
 	}
-	if err := yamlpatch.AtomicWrite(path, body); err != nil {
+	if err := atomicfile.Write(path, body, 0o600); err != nil {
 		return nil, err
 	}
 	if st.ConfigReloader != nil && task.RepoPath != "" {

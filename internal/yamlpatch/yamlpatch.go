@@ -8,7 +8,6 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"os"
 	"strconv"
 	"strings"
 
@@ -213,22 +212,6 @@ func Marshal(doc *yaml.Node) ([]byte, error) {
 		return nil, err
 	}
 	return buf.Bytes(), nil
-}
-
-// AtomicWrite writes `data` to `path` via the standard tmp+rename
-// dance. History of the previous content is no longer stashed beside
-// the file — callers that want a recoverable trail snapshot the prior
-// bytes into SQLite (store.SnapshotConfig) before calling this.
-func AtomicWrite(path string, data []byte) error {
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return err
-	}
-	return nil
 }
 
 // KindName returns a human-readable label for a yaml.Kind.
