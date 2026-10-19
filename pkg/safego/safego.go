@@ -29,12 +29,30 @@ func Go(label, detail string, fn func()) {
 //	go func() { defer wg.Done(); defer safego.Recover(label, detail); ... }()
 func Recover(label, detail string) {
 	if r := recover(); r != nil {
-		// The stack is the whole point of the log line: recovery keeps
-		// the daemon alive, so this record is the ONLY trace the panic
-		// leaves. Without it a "assignment to entry in nil map" names
-		// no file, and the only symptom downstream is whatever work the
-		// goroutine silently stopped doing.
-		slog.Error("goroutine panic", "label", label, "detail", detail,
-			"panic", fmt.Sprint(r), "stack", string(debug.Stack()))
+		logPanic(label, detail, r)
 	}
+}
+
+// Run calls fn on the current goroutine and turns a panic into an
+// error, logged with its stack like Recover does. For work whose
+// caller must learn that it failed: a recovered goroutine alone keeps
+// the process alive but leaves the caller believing it succeeded.
+func Run[T any](label, detail string, fn func() (T, error)) (v T, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			logPanic(label, detail, r)
+			err = fmt.Errorf("%s panicked: %v", label, r)
+		}
+	}()
+	return fn()
+}
+
+func logPanic(label, detail string, r any) {
+	// The stack is the whole point of the log line: recovery keeps the
+	// daemon alive, so this record is the ONLY trace the panic leaves.
+	// Without it a "assignment to entry in nil map" names no file, and
+	// the only symptom downstream is whatever work the goroutine
+	// silently stopped doing.
+	slog.Error("goroutine panic", "label", label, "detail", detail,
+		"panic", fmt.Sprint(r), "stack", string(debug.Stack()))
 }

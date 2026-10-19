@@ -172,3 +172,29 @@ func waitForEvent(t *testing.T, st *State, eventType string) {
 	}
 	t.Fatalf("event %q never arrived", eventType)
 }
+
+// A panicking task used to be recovered at the lane goroutine with no
+// result recorded, so firstFailure saw nothing and the plan reported
+// success. It must be a failed result that stops its lane.
+func TestExecutePlanReportsPanickingTaskAsFailure(t *testing.T) {
+	ran := false
+	register(t, "__t_panic", func(context.Context, *State, rpc.Task) (json.RawMessage, error) {
+		panic("boom")
+	})
+	register(t, "__t_after", func(context.Context, *State, rpc.Task) (json.RawMessage, error) {
+		ran = true
+		return nil, nil
+	})
+
+	results := ExecutePlan(context.Background(), &State{}, [][]rpc.Task{{{Type: "__t_panic"}, {Type: "__t_after"}}})
+
+	if len(results) != 1 || results[0].OK || results[0].Type != "__t_panic" {
+		t.Fatalf("results = %+v, want one failed __t_panic result", results)
+	}
+	if msg := firstFailure(results); msg == "" {
+		t.Error("firstFailure missed the panic")
+	}
+	if ran {
+		t.Error("the lane kept running after the panic")
+	}
+}

@@ -518,6 +518,7 @@ const (
 	lblDBDropDrain       = "db:drop:drain"
 	lblNotify            = "notify:dispatch"
 	lblPlanLane          = "plan:lane"
+	lblPlanTask          = "plan:task"
 )
 
 // safeGo runs fn in a daemon goroutine with panic recovery (delegates

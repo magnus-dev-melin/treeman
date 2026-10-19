@@ -28,6 +28,7 @@ import (
 	"github.com/stubbedev/treeman/internal/wt"
 	"github.com/stubbedev/treeman/internal/wtreg"
 	"github.com/stubbedev/treeman/pkg/rpc"
+	"github.com/stubbedev/treeman/pkg/safego"
 )
 
 // handleRunPlan executes a submitted plan. The daemon is the sole
@@ -175,7 +176,12 @@ func runOneTask(ctx context.Context, st *State, task rpc.Task) (json.RawMessage,
 		return nil, fmt.Errorf("run_plan: unknown task %q", task.Type)
 	}
 	ctx = gitcmd.WithPath(ctx, task.InheritedEnv["PATH"])
-	return run(ctx, st, task)
+	// A panicking task must surface as a failed result: recovered only
+	// at the lane goroutine it produced no result at all, and the plan
+	// reported success.
+	return safego.Run(lblPlanTask, task.Type, func() (json.RawMessage, error) {
+		return run(ctx, st, task)
+	})
 }
 
 func runTaskWorktreeFinalize(ctx context.Context, st *State, task rpc.Task) (json.RawMessage, error) {
