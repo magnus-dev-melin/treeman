@@ -5,7 +5,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -370,31 +369,7 @@ func acceptLoop(ctx context.Context, ln net.Listener, st *daemon.State, shutdown
 			_ = conn.Close()
 			continue
 		}
-		safego.Go(lblConn, "", func() { handleConn(ctx, conn, st, shutdown) })
-	}
-}
-
-func handleConn(ctx context.Context, conn net.Conn, st *daemon.State, shutdown chan struct{}) {
-	defer func() { _ = conn.Close() }()
-	dec := json.NewDecoder(conn)
-	enc := json.NewEncoder(conn)
-	for {
-		var req rpc.Request
-		if err := dec.Decode(&req); err != nil {
-			return
-		}
-		if daemon.IsStreamingMethod(req.Method) {
-			// Streaming methods own the connection for the duration of
-			// the subscription. Caller closing the socket (or our ctx
-			// cancelling) ends the stream; we don't loop for more
-			// requests on the same conn.
-			daemon.DispatchStreaming(ctx, st, conn, req)
-			return
-		}
-		resp := daemon.Dispatch(ctx, st, shutdown, req)
-		if err := enc.Encode(&resp); err != nil {
-			return
-		}
+		safego.Go(lblConn, "", func() { daemon.ServeConn(ctx, conn, st, shutdown) })
 	}
 }
 

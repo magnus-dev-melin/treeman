@@ -38,9 +38,8 @@ func shortSocketPath(t *testing.T) string {
 
 // startStreamServer binds a unix socket at a short path, points
 // TREEMAN_SOCKET at it, and serves every accepted connection through
-// DispatchStreaming — the streaming half of cmd/treemand's handleConn,
-// inline to avoid importing the cmd package. Returns the daemon store
-// events are written to.
+// ServeConn, as treemand does. Returns the daemon store events are
+// written to.
 func startStreamServer(ctx context.Context, t *testing.T) *store.Store {
 	t.Helper()
 	sockPath := shortSocketPath(t)
@@ -62,16 +61,7 @@ func startStreamServer(ctx context.Context, t *testing.T) *store.Store {
 			if err != nil {
 				return
 			}
-			go func() {
-				defer func() { _ = conn.Close() }()
-				var req rpc.Request
-				if err := json.NewDecoder(conn).Decode(&req); err != nil {
-					return
-				}
-				if IsStreamingMethod(req.Method) {
-					DispatchStreaming(ctx, st, conn, req)
-				}
-			}()
+			go ServeConn(ctx, conn, st, make(chan struct{}, 1))
 		}
 	}()
 	return s
