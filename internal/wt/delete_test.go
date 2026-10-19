@@ -95,3 +95,39 @@ func TestDeleteRefusesTeardownInFlight(t *testing.T) {
 		t.Fatalf("path of tearing-down worktree must be refused, got %v", err)
 	}
 }
+
+// A dirty worktree whose delete was already confirmed used to lose its
+// databases and registry row, then have git refuse the removal — the
+// worktree stayed on disk, unregistered, and every retry failed the
+// same way. The inline path must finish the removal.
+func TestInlineDeleteOfDirtyWorktreeRemovesIt(t *testing.T) {
+	ctx := context.Background()
+	st := withTempStore(t)
+	repo := t.TempDir()
+	mkRepoOnBranch(t, repo, "main")
+	wtPath := filepath.Join(repo, ".worktrees", "feature-x")
+	addLinkedWorktree(t, repo, wtPath, "feature/x")
+	if err := os.WriteFile(filepath.Join(wtPath, "scratch.txt"), []byte("uncommitted"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := Delete(ctx, DeleteRequest{RepoRoot: repo, Target: wtPath, Detached: true}, NoopSink{})
+	if err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if res.Status != DeleteInline {
+		t.Fatalf("status = %v, want inline", res.Status)
+	}
+	if _, err := os.Stat(wtPath); !os.IsNotExist(err) {
+		t.Errorf("worktree still on disk: %v", err)
+	}
+	repoID, _ := st.LookupRepoID(ctx, repo)
+	var deleted bool
+	if err := st.DB.QueryRowContext(ctx,
+		`SELECT deleted_at IS NOT NULL FROM worktrees WHERE repo_id = ? AND path = ?`, repoID, wtPath).Scan(&deleted); err != nil {
+		t.Fatal(err)
+	}
+	if !deleted {
+		t.Error("registry row not marked deleted")
+	}
+}
