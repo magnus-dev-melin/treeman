@@ -18,7 +18,7 @@ import (
 // / tidb / postgresql; cached templates for the missing engines
 // looped forever in the eviction sweeps emitting WARN spam.
 //
-// Drives dropTemplate with a Config whose ConnectionsConfig has
+// Drives DropTemplate with a Config whose ConnectionsConfig has
 // every block nil. A handled engine either returns
 // "connections.<x> not configured" (proves the arm fired and tried
 // to connect) or — for the file family, which needs no connection
@@ -31,7 +31,7 @@ func TestDropTemplateCoversEveryKnownEngine(t *testing.T) {
 	for _, eng := range engine.Known {
 		t.Run(eng, func(t *testing.T) {
 			c := store.SnapshotEvictionCandidate{Engine: eng, TemplateName: "_tm_x"}
-			err := dropTemplate(context.Background(), cfg, c)
+			err := DropTemplate(context.Background(), cfg, c)
 			if err == nil {
 				t.Fatalf("nil cfg: expected an error, got none")
 			}
@@ -52,7 +52,7 @@ func TestDropTemplateCoversEveryKnownEngine(t *testing.T) {
 func TestDropTemplateRejectsUnknownEngine(t *testing.T) {
 	cfg := &config.Config{}
 	c := store.SnapshotEvictionCandidate{Engine: "notanengine", TemplateName: "_tm_x"}
-	err := dropTemplate(context.Background(), cfg, c)
+	err := DropTemplate(context.Background(), cfg, c)
 	if err == nil || !strings.Contains(err.Error(), "unsupported engine") {
 		t.Fatalf("unknown engine: want 'unsupported engine' error, got %v", err)
 	}

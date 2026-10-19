@@ -1094,12 +1094,29 @@ func snapshotDropTool(
 		return ask, out, nil
 	}
 
-	cfg, cfgErr := loadCfgForRepo(ctx, in.Repo)
+	// The template lives on the server the snapshot's own repo config
+	// names, which need not be the caller's repo.
+	repo := in.Repo
+	if rec.RepoID != 0 {
+		p, err := st.RepoPath(ctx, rec.RepoID)
+		if err != nil {
+			return nil, out, fmt.Errorf("resolve repo of snapshot %s: %w", in.Fingerprint, err)
+		}
+		if p == "" {
+			return nil, out, fmt.Errorf("snapshot %s belongs to repo id %d, which is no longer registered", in.Fingerprint, rec.RepoID)
+		}
+		repo = p
+	}
+	cfg, cfgErr := loadCfgForRepo(ctx, repo)
 	if cfgErr != nil {
 		out.EngineDropErr = "load config: " + cfgErr.Error()
 		return nil, out, fmt.Errorf("load config: %w", cfgErr)
 	}
-	if dropErr := dropTemplate(ctx, cfg, rec.Engine, rec.Connection, rec.TemplateName); dropErr != nil {
+	candidate := store.SnapshotEvictionCandidate{
+		Fingerprint: rec.Fingerprint, Engine: rec.Engine, TemplateName: rec.TemplateName,
+		SourceDB: rec.SourceDB, Connection: rec.Connection,
+	}
+	if dropErr := dropTemplate(ctx, cfg, candidate); dropErr != nil {
 		// Don't proceed to the SQLite delete: leaving the row in
 		// place AND the orphan template means the next snapshots_inspect
 		// will surface the orphan correctly. Deleting the row here

@@ -57,13 +57,14 @@ func (s *Store) LookupSnapshot(ctx context.Context, fingerprint string) (*Snapsh
 	row := s.DB.QueryRowContext(ctx, `
 		SELECT fingerprint, engine, engine_version, source_db, template_name,
 		       migrations_hash, COALESCE(dump_hash,''), COALESCE(lockfile_hashes_json,'{}'),
-		       COALESCE(inputs_json,'{}'),
+		       COALESCE(inputs_json,'{}'), connection, COALESCE(repo_id,0),
 		       COALESCE(size_bytes,0), created_at, last_used_at, use_count
 		FROM snapshots WHERE fingerprint = ?`, fingerprint)
 	var r SnapshotRecord
 	var lockJSON, inputsJSON string
 	err := row.Scan(&r.Fingerprint, &r.Engine, &r.EngineVersion, &r.SourceDB,
 		&r.TemplateName, &r.MigrationsHash, &r.DumpHash, &lockJSON, &inputsJSON,
+		&r.Connection, &r.RepoID,
 		&r.SizeBytes, &r.CreatedAt, &r.LastUsedAt, &r.UseCount)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil

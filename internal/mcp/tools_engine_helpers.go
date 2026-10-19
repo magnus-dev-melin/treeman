@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -19,6 +20,7 @@ import (
 	"github.com/stubbedev/treeman/internal/db/engineconn"
 	dbes "github.com/stubbedev/treeman/internal/db/es"
 	"github.com/stubbedev/treeman/internal/engine"
+	"github.com/stubbedev/treeman/internal/snapshot"
 	"github.com/stubbedev/treeman/internal/store"
 )
 
@@ -89,53 +91,38 @@ func probeTemplate(ctx context.Context, cfg *config.Config, eng, connName, templ
 }
 
 // reservedTemplatePrefixes are the namespace markers treeman owns:
-// cache templates (`_tm_<hex>` / `tm_<hex>` for ES) and branch-scoped
-// durable copies (`_tmbs_<hex>` / `tmbs_<hex>` for ES). MCP
-// snapshots_drop must refuse anything else so a hand-crafted or
-// typo'd template arg can't reach DropMatching's prefix LIKE and
-// reap unrelated app databases.
-var reservedTemplatePrefixes = []string{"_tm_", "_tmbs_", "tm_", "tmbs_"}
+// cache templates (`_tm_<hex>`, `_tm:<hex>:` for Redis, `tm_<hex>` for
+// ES, `_tm_<hex><ext>` file names for the file engines) and
+// branch-scoped durable copies (`_tmbs_<hex>` / `tmbs_<hex>` for ES).
+// MCP snapshots_drop refuses anything else, so a hand-crafted SQLite
+// row can't point the drop at an app database.
+var reservedTemplatePrefixes = []string{"_tm_", "_tm:", "_tmbs_", "tm_", "tmbs_"}
 
+// isReservedTemplateName checks the name's last path element, so a
+// file-engine template's absolute path qualifies by its file name.
 func isReservedTemplateName(name string) bool {
+	base := filepath.Base(name)
 	for _, p := range reservedTemplatePrefixes {
-		if strings.HasPrefix(name, p) {
+		if strings.HasPrefix(base, p) {
 			return true
 		}
 	}
 	return false
 }
 
-// dropTemplate removes the engine-side template for one fingerprint.
-// Mirrors the per-engine teardown in internal/prepare but keyed by
-// the cached template name rather than a worktree slug.
-//
-// Refuses to act on names that don't carry a treeman-reserved prefix
-// (`_tm_`, `_tmbs_`, `tm_`, `tmbs_`). DropMatching/DropPrefix do a
-// prefix LIKE/scan; an MCP caller passing a non-reserved string
-// would otherwise reap whatever app namespaces happen to share that
-// prefix.
-func dropTemplate(ctx context.Context, cfg *config.Config, eng, connName, template string) error {
-	if !isReservedTemplateName(template) {
+// dropTemplate removes the engine-side template for one snapshot row
+// through snapshot.DropTemplate — the same drop GC uses, on the server
+// the row names — after refusing any name that doesn't carry a
+// treeman-reserved prefix.
+func dropTemplate(ctx context.Context, cfg *config.Config, c store.SnapshotEvictionCandidate) error {
+	if !isReservedTemplateName(c.TemplateName) {
 		return fmt.Errorf(
 			"refusing to drop %q: not a treeman-reserved template name (expected one of %v)",
-			template,
+			c.TemplateName,
 			reservedTemplatePrefixes,
 		)
 	}
-	fam, ok := engine.Canonical(eng)
-	if !ok {
-		return fmt.Errorf("unknown engine %q (allowed: %s)", eng, engine.KnownList())
-	}
-	conn, configured, err := engineconn.Connect(ctx, cfg, fam, connName)
-	if !configured {
-		return fmt.Errorf("connections.%s not configured", fam)
-	}
-	if err != nil {
-		return err
-	}
-	defer func() { _ = conn.Close() }()
-	_, err = conn.DropMatching(ctx, template)
-	return err
+	return snapshot.DropTemplate(ctx, cfg, c)
 }
 
 // ─── dump generators ────────────────────────────────────────────────

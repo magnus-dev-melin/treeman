@@ -127,3 +127,32 @@ func itoaTest(i int) string {
 	}
 	return out
 }
+
+// LookupSnapshot never read the connection or repo, so snapshots_drop
+// always dropped through the default connection of the caller's repo
+// and left a named-connection template behind for good.
+func TestLookupSnapshotReturnsConnectionAndRepo(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(ctx, filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+	repoID, err := st.EnsureRepo(ctx, "/repo", "repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RecordSnapshot(ctx, SnapshotRecord{
+		Fingerprint: "fp1", Engine: "mysql", TemplateName: "_tm_fp1", SourceDB: "app",
+		Connection: "reporting", RepoID: repoID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rec, err := st.LookupSnapshot(ctx, "fp1")
+	if err != nil || rec == nil {
+		t.Fatalf("lookup: %v, %v", rec, err)
+	}
+	if rec.Connection != "reporting" || rec.RepoID != repoID {
+		t.Errorf("connection=%q repo=%d, want reporting / %d", rec.Connection, rec.RepoID, repoID)
+	}
+}
