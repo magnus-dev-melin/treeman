@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 )
@@ -595,37 +596,66 @@ func (s *Store) PruneStaleHashCaches(ctx context.Context, cutoffMs int64) (int64
 	return total, nil
 }
 
-// placeholders returns "?, ?, ?" repeated n times.
+// ErrUnscopedPurge is returned when a purge filter selects no repo,
+// worktree, time range, level or event type: it would delete every
+// event row.
+var ErrUnscopedPurge = errors.New("refusing to purge every event: the filter selects no repo, worktree, time range, level or event type")
+
+// ParseLevels normalises user-supplied level names. An unknown name is
+// an error rather than being dropped: dropping it would widen the
+// filter, and for a purge that deletes rows the caller never selected.
+func ParseLevels(in []string) ([]string, error) {
+	out := make([]string, 0, len(in))
+	for _, v := range in {
+		l := strings.ToLower(v)
+		switch l {
+		case LevelDebug, LevelInfo, LevelWarn, LevelError:
+			out = append(out, l)
+		default:
+			return nil, fmt.Errorf("unknown level %q (allowed: %s, %s, %s, %s)", v, LevelDebug, LevelInfo, LevelWarn, LevelError)
+		}
+	}
+	return out, nil
+}
+
 // PurgeEvents deletes events matching the filter and returns the row
 // count removed. Only SinceMs / UntilMs / RepoID / WorktreeID /
 // EventTypes / Levels are honored — every other field on the filter
-// is ignored. SQLite's DELETE is sufficient for the table sizes we
-// expect (events accumulate, but a single repo rarely tops 100k rows).
+// is ignored. A filter that sets none of them is refused with
+// ErrUnscopedPurge.
 func (s *Store) PurgeEvents(ctx context.Context, f EventFilter) (int64, error) {
-	q := "DELETE FROM events"
-	where, args := purgeEventsWhere(f)
-	q = appendWhere(q, where)
-	res, err := s.DB.ExecContext(ctx, q, args...)
+	where, args, err := scopedPurgeWhere(f)
 	if err != nil {
 		return 0, err
+	}
+	res, err := s.DB.ExecContext(ctx, appendWhere("DELETE FROM events", where), args...)
+	if err != nil {
+		return 0, fmt.Errorf("purge events: %w", err)
 	}
 	return res.RowsAffected()
 }
 
-// CountEvents reports how many event rows currently match f. Shares
-// the predicate set with PurgeEvents so a dry-run preview ("how many
-// rows would the same filter purge?") matches the destructive call
-// exactly. Returns 0 + nil on no-rows; the caller distinguishes via
-// the err return.
+// CountEvents reports how many event rows PurgeEvents would delete for
+// f, so a dry-run preview matches the destructive call exactly,
+// including its refusal of an unscoped filter.
 func (s *Store) CountEvents(ctx context.Context, f EventFilter) (int64, error) {
-	q := "SELECT COUNT(*) FROM events"
-	where, args := purgeEventsWhere(f)
-	q = appendWhere(q, where)
-	var n int64
-	if err := s.DB.QueryRowContext(ctx, q, args...).Scan(&n); err != nil {
+	where, args, err := scopedPurgeWhere(f)
+	if err != nil {
 		return 0, err
 	}
+	var n int64
+	if err := s.DB.QueryRowContext(ctx, appendWhere("SELECT COUNT(*) FROM events", where), args...).Scan(&n); err != nil {
+		return 0, fmt.Errorf("count events: %w", err)
+	}
 	return n, nil
+}
+
+func scopedPurgeWhere(f EventFilter) ([]string, []any, error) {
+	where, args := purgeEventsWhere(f)
+	if len(where) == 0 {
+		return nil, nil, ErrUnscopedPurge
+	}
+	return where, args, nil
 }
 
 // purgeEventsWhere is the shared WHERE-clause builder for PurgeEvents
@@ -675,6 +705,7 @@ func appendWhere(q string, fragments []string) string {
 	return q + " WHERE " + strings.Join(fragments, " AND ")
 }
 
+// placeholders returns "?, ?, ?" repeated n times.
 func placeholders(n int) string {
 	if n <= 0 {
 		return ""

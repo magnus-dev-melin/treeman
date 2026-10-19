@@ -347,11 +347,11 @@ func TestLogsCLI(t *testing.T) {
 			notStdout:  []string{"wt1a info hit alpha", "wt1b info bravo"},
 		},
 		{
-			name:       "tail/invalid --level is dropped (validateLevels), valid one survives",
-			cwd:        outsideDir,
-			args:       []string{"logs", "tail", "-n", "50", "--all", "--level", "bogus", "--level", "error"},
-			wantStdout: []string{"wt1a recent error needle"},
-			notStdout:  []string{"wt1a info hit alpha"},
+			name:        "tail/invalid --level is rejected, not dropped",
+			cwd:         outsideDir,
+			args:        []string{"logs", "tail", "-n", "50", "--all", "--level", "bogus", "--level", "error"},
+			wantStderr:  []string{`unknown level "bogus"`},
+			wantExitErr: true,
 		},
 		{
 			name: "tail/--event-type repeats",
@@ -536,7 +536,7 @@ func TestLogsCLI(t *testing.T) {
 			name:        "purge/refuses unfiltered call",
 			cwd:         outsideDir,
 			args:        []string{"logs", "purge"},
-			wantStderr:  []string{"at least one filter"},
+			wantStderr:  []string{"refusing to purge every event"},
 			wantExitErr: true,
 		},
 	}

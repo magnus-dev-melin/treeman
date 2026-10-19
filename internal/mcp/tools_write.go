@@ -853,15 +853,11 @@ type logsPurgeOut struct {
 }
 
 func logsPurgeTool(ctx context.Context, req *mcpsdk.CallToolRequest, in logsPurgeIn) (*mcpsdk.CallToolResult, logsPurgeOut, error) {
-	// At least one filter required so an empty input can never wipe
-	// the entire events table.
-	if in.Repo == "" && in.Worktree == "" && in.OlderThan == "" && len(in.Levels) == 0 && len(in.EventTypes) == 0 {
-		return nil, logsPurgeOut{}, errors.New("at least one filter (repo, worktree, older_than, levels, event_types) is required")
+	levels, err := store.ParseLevels(in.Levels)
+	if err != nil {
+		return nil, logsPurgeOut{}, err
 	}
-	f := store.EventFilter{
-		Levels:     validateLevels(in.Levels),
-		EventTypes: in.EventTypes,
-	}
+	f := store.EventFilter{Levels: levels, EventTypes: in.EventTypes}
 	if in.OlderThan != "" {
 		t, err := parsePurgeCutoff(in.OlderThan)
 		if err != nil {
@@ -886,7 +882,10 @@ func logsPurgeTool(ctx context.Context, req *mcpsdk.CallToolRequest, in logsPurg
 	}
 	// Quote the matched count in the confirmation so the user sees
 	// the blast radius before approving.
-	matched, _ := st.CountEvents(ctx, f)
+	matched, err := st.CountEvents(ctx, f)
+	if err != nil {
+		return nil, logsPurgeOut{}, err
+	}
 	if ask, refused := confirmDestructive(req, in.Ack,
 		fmt.Sprintf("Purge %d event-log row(s) matching the filter?", matched)); ask != nil || refused != "" {
 		return ask, logsPurgeOut{Refused: refused}, nil

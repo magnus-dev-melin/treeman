@@ -469,20 +469,33 @@ func runTaskWorktreeUnregister(ctx context.Context, st *State, task rpc.Task) (j
 func runTaskLogsPurge(ctx context.Context, st *State, task rpc.Task) (json.RawMessage, error) {
 	f := store.EventFilter{}
 	if v := task.Params[rpc.ParamLevels]; v != "" {
-		f.Levels = strings.Split(v, ",")
+		levels, err := store.ParseLevels(strings.Split(v, ","))
+		if err != nil {
+			return nil, err
+		}
+		f.Levels = levels
 	}
 	if v := task.Params[rpc.ParamEventTypes]; v != "" {
 		f.EventTypes = strings.Split(v, ",")
 	}
 	if v := task.Params[rpc.ParamUntilMs]; v != "" {
-		f.UntilMs, _ = strconv.ParseInt(v, 10, 64)
+		until, err := strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("parse %s %q: %w", rpc.ParamUntilMs, v, err)
+		}
+		f.UntilMs = until
 	}
 	// Scope to a repo / worktree by resolving the (CLI-absolutized) paths
 	// to row ids — mirrors the CLI's applyPurgeScope.
 	if repo := task.Params[rpc.ParamRepo]; repo != "" {
-		if rid, err := st.Store.LookupRepoID(ctx, repo); err == nil {
-			f.RepoID = rid
+		rid, err := st.Store.LookupRepoID(ctx, repo)
+		if err != nil {
+			return nil, fmt.Errorf("look up repo %s: %w", repo, err)
 		}
+		if rid == 0 {
+			return nil, fmt.Errorf("repo %s is not enrolled", repo)
+		}
+		f.RepoID = rid
 	}
 	if wtArg := task.Params[rpc.ParamWorktree]; wtArg != "" {
 		wid, err := st.Store.LookupWorktreeID(ctx, f.RepoID, wtArg)

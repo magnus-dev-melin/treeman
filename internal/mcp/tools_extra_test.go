@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -136,14 +137,15 @@ func TestLogsWaitTool_TimesOutWhenNoMatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	repoID, _ := s.EnsureRepo(ctx, "/r/foo", "foo")
-	_, _ = s.EnsureWorktree(ctx, repoID, "/r/foo/.wt/x", "x", "main")
+	repo := enrolledRepoDir(t)
+	repoID, _ := s.EnsureRepo(ctx, repo, "foo")
+	_, _ = s.EnsureWorktree(ctx, repoID, filepath.Join(repo, ".wt", "x"), "x", "main")
 	_ = s.Close()
 	t.Setenv("TREEMAN_DB_PATH", dbFile)
 
 	t0 := time.Now()
 	_, out, err := logsWaitTool(ctx, nil, logsWaitIn{
-		Repo:           "/r/foo",
+		Repo:           repo,
 		EventTypes:     []string{"never_emitted"},
 		TimeoutSeconds: 1,
 	})
@@ -170,14 +172,15 @@ func TestLogsWaitTool_RunIDFilterPlumbed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	repoID, _ := s.EnsureRepo(ctx, "/r/foo", "foo")
+	repo := enrolledRepoDir(t)
+	repoID, _ := s.EnsureRepo(ctx, repo, "foo")
 	// Two events; only one carries the matching run_id (via ctx).
 	_ = s.WriteEvent(ctx, store.LevelInfo, "phase_a", "hit", repoID, 0, "", 0, nil)
 	_ = s.WriteEvent(context.Background(), store.LevelInfo, "phase_b", "miss", repoID, 0, "", 0, nil)
 	_ = s.Close()
 
 	_, out, err := logsWaitTool(context.Background(), nil, logsWaitIn{
-		Repo:           "/r/foo",
+		Repo:           repo,
 		RunID:          "abc12345",
 		TimeoutSeconds: 1,
 		MinCount:       1,
@@ -240,4 +243,15 @@ func TestEventFilter_RunIDMatchesOnlyTaggedRows(t *testing.T) {
 	if p["run_id"] != "feedface" {
 		t.Errorf("payload run_id = %q, want feedface", p["run_id"])
 	}
+}
+
+// enrolledRepoDir returns a directory resolveRepo accepts as a repo
+// root (it holds a .treeman.yaml).
+func enrolledRepoDir(t *testing.T) string {
+	t.Helper()
+	repo := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repo, ".treeman.yaml"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return repo
 }
