@@ -519,6 +519,7 @@ const (
 	lblNotify            = "notify:dispatch"
 	lblPlanLane          = "plan:lane"
 	lblPlanTask          = "plan:task"
+	lblSubscribeHangup   = "subscribe:hangup"
 )
 
 // safeGo runs fn in a daemon goroutine with panic recovery (delegates

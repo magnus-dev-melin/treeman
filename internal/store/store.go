@@ -222,6 +222,15 @@ func (s *Store) RegisterEventHook(id string, fn EventHook) {
 	s.hookMu.Unlock()
 }
 
+// EventHookCount reports how many event hooks are registered.
+// Introspection seam for the subscription lifecycle: a closed
+// subscriber must leave none behind.
+func (s *Store) EventHookCount() int {
+	s.hookMu.RLock()
+	defer s.hookMu.RUnlock()
+	return len(s.hooks)
+}
+
 // UnregisterEventHook removes the named hook. No-op when the id was
 // never registered. Idempotent.
 func (s *Store) UnregisterEventHook(id string) {

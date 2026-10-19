@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"maps"
 	"net"
@@ -248,6 +249,18 @@ func DispatchStreaming(ctx context.Context, st *State, conn net.Conn, req rpc.Re
 // wire bytes are identical to one-Encode-per-event — newline-
 // delimited JSON frames.
 func streamEvents(ctx context.Context, st *State, conn net.Conn, req rpc.Request) {
+	// The client never writes after its subscribe request, so a read
+	// returning means it hung up. Without this, a subscription whose
+	// filter stops matching (a foreground command's run ended) never
+	// writes again, never sees the closed socket, and leaks its
+	// goroutine and event hook for the daemon's lifetime.
+	ctx, hangup := context.WithCancel(ctx)
+	defer hangup()
+	safeGo(lblSubscribeHangup, "", func() {
+		_, _ = io.Copy(io.Discard, conn)
+		hangup()
+	})
+
 	args := rpc.EventSubscribeArgs{}
 	if req.EventSubscribe != nil {
 		args = *req.EventSubscribe
@@ -255,8 +268,9 @@ func streamEvents(ctx context.Context, st *State, conn net.Conn, req rpc.Request
 	repoID, worktreeID := resolveSubscribeIDs(ctx, st, args)
 
 	// Buffered channel keeps the hook fast even when the socket peer
-	// is slow. On overflow, oldest events are dropped (the agent gets
-	// "we missed some events" via the run_id gap, not a stall).
+	// is slow. On overflow the oldest queued event is dropped, so the
+	// newest — a run's terminal plan:end, which `worktree wait` blocks
+	// on — always gets through (the agent sees the gap, not a stall).
 	const bufSize = 256
 	ch := make(chan rpc.EventEnvelope, bufSize)
 	// Hook id combines a channel-pointer fingerprint (already unique
@@ -272,12 +286,7 @@ func streamEvents(ctx context.Context, st *State, conn net.Conn, req rpc.Request
 		if !filter(ev) {
 			return
 		}
-		select {
-		case ch <- toEnvelope(ev):
-		default:
-			// Buffer full — drop. Subscriber-side gap detection is on
-			// the user; we never block WriteEvent.
-		}
+		offerNewest(ch, toEnvelope(ev))
 	})
 	defer st.Store.UnregisterEventHook(hookID)
 
@@ -308,6 +317,23 @@ func streamEvents(ctx context.Context, st *State, conn net.Conn, req rpc.Request
 			if _, err := conn.Write(buf.Bytes()); err != nil {
 				return
 			}
+		}
+	}
+}
+
+// offerNewest queues env without ever blocking the event writer: on a
+// full buffer it drops the oldest queued envelope and retries, so the
+// newest event always lands.
+func offerNewest(ch chan rpc.EventEnvelope, env rpc.EventEnvelope) {
+	for {
+		select {
+		case ch <- env:
+			return
+		default:
+		}
+		select {
+		case <-ch:
+		default:
 		}
 	}
 }
