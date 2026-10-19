@@ -119,3 +119,22 @@ func TestMongoCommand_WriteVerbGate(t *testing.T) {
 		t.Fatalf("expected write-verb gate error, got %v", err)
 	}
 }
+
+// db_query / db_dump dereferenced an absent connections block and
+// panicked, killing the MCP server (shared by every client over HTTP).
+func TestEngineToolsRefuseUnconfiguredEngine(t *testing.T) {
+	repo := enrolledRepoDir(t)
+	ctx := context.Background()
+	if _, _, err := dbQueryTool(ctx, nil, dbQueryIn{Repo: repo, Engine: "redis", Query: "PING"}); err == nil ||
+		!strings.Contains(err.Error(), "connections.redis is not configured") {
+		t.Errorf("db_query: err = %v", err)
+	}
+	if _, _, err := dbDumpTool(ctx, nil, dbDumpIn{Repo: repo, Engine: "mysql", DB: "app", OutputDir: t.TempDir()}); err == nil ||
+		!strings.Contains(err.Error(), "connections.mysql is not configured") {
+		t.Errorf("db_dump: err = %v", err)
+	}
+	if _, _, err := dbSchemaDumpTool(ctx, nil, dbSchemaIn{Repo: repo, Engine: "postgres", DB: "app"}); err == nil ||
+		!strings.Contains(err.Error(), "connections.postgres is not configured") {
+		t.Errorf("db_schema_dump: err = %v", err)
+	}
+}

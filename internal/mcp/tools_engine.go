@@ -27,6 +27,7 @@ import (
 
 	"github.com/stubbedev/treeman/internal/config"
 	"github.com/stubbedev/treeman/internal/db/containerip"
+	"github.com/stubbedev/treeman/internal/db/engineconn"
 	dbes "github.com/stubbedev/treeman/internal/db/es"
 	"github.com/stubbedev/treeman/internal/db/ident"
 	dbmongo "github.com/stubbedev/treeman/internal/db/mongo"
@@ -347,6 +348,9 @@ func dbSchemaDumpTool(ctx context.Context, _ *mcpsdk.CallToolRequest, in dbSchem
 	if !ok {
 		return nil, out, fmt.Errorf("unsupported engine: %s", in.Engine)
 	}
+	if err := requireConnection(cfg, fam); err != nil {
+		return nil, out, err
+	}
 	switch fam {
 	case engine.FamilyMySQL:
 		schema, err = dbSchemaMySQL(ctx, cfg, in.DB)
@@ -415,10 +419,22 @@ func capSchemaTables(schema map[string]any, maxTables int) bool {
 	return truncated
 }
 
-func dbSchemaMySQL(ctx context.Context, cfg *config.Config, db string) (map[string]any, error) {
-	if cfg.Connections.Mysql == nil {
-		return nil, errors.New("connections.mysql not configured")
+// requireConnection refuses a server engine whose singular
+// connections block is absent, before a per-engine path dereferences
+// it — a nil dereference panicked the MCP server (over HTTP, the one
+// every client shares). The object store and file families have no
+// such block and report their own unsupported-operation errors.
+func requireConnection(cfg *config.Config, fam engine.Family) error {
+	if fam == engine.FamilyS3 || fam == engine.FamilyFile {
+		return nil
 	}
+	if !engineconn.Configured(cfg, fam, "") {
+		return fmt.Errorf("connections.%s is not configured for this repo", fam)
+	}
+	return nil
+}
+
+func dbSchemaMySQL(ctx context.Context, cfg *config.Config, db string) (map[string]any, error) {
 	drv, err := dbmysql.Connect(ctx, *cfg.Connections.Mysql)
 	if err != nil {
 		return nil, err
@@ -428,9 +444,6 @@ func dbSchemaMySQL(ctx context.Context, cfg *config.Config, db string) (map[stri
 }
 
 func dbSchemaPostgres(ctx context.Context, cfg *config.Config, db string) (map[string]any, error) {
-	if cfg.Connections.Postgres == nil {
-		return nil, errors.New("connections.postgres not configured")
-	}
 	drv, err := dbpostgres.Connect(ctx, *cfg.Connections.Postgres)
 	if err != nil {
 		return nil, err
@@ -440,9 +453,6 @@ func dbSchemaPostgres(ctx context.Context, cfg *config.Config, db string) (map[s
 }
 
 func dbSchemaMongo(ctx context.Context, cfg *config.Config, db string) (map[string]any, error) {
-	if cfg.Connections.Mongodb == nil {
-		return nil, errors.New("connections.mongodb not configured")
-	}
 	drv, err := dbmongo.Connect(ctx, *cfg.Connections.Mongodb)
 	if err != nil {
 		return nil, err
@@ -452,9 +462,6 @@ func dbSchemaMongo(ctx context.Context, cfg *config.Config, db string) (map[stri
 }
 
 func dbSchemaES(ctx context.Context, cfg *config.Config, db string) (map[string]any, error) {
-	if cfg.Connections.Elasticsearch == nil {
-		return nil, errors.New("connections.elasticsearch not configured")
-	}
 	drv, err := dbes.Connect(ctx, *cfg.Connections.Elasticsearch)
 	if err != nil {
 		return nil, err
@@ -463,9 +470,6 @@ func dbSchemaES(ctx context.Context, cfg *config.Config, db string) (map[string]
 }
 
 func dbSchemaRedis(ctx context.Context, cfg *config.Config, db string) (map[string]any, error) {
-	if cfg.Connections.Redis == nil {
-		return nil, errors.New("connections.redis not configured")
-	}
 	drv, err := dbredis.Connect(ctx, *cfg.Connections.Redis)
 	if err != nil {
 		return nil, err
@@ -520,6 +524,9 @@ func dbQueryTool(ctx context.Context, _ *mcpsdk.CallToolRequest, in dbQueryIn) (
 	fam, ok := engine.Canonical(in.Engine)
 	if !ok {
 		return nil, out, fmt.Errorf("unsupported engine: %s", in.Engine)
+	}
+	if err := requireConnection(cfg, fam); err != nil {
+		return nil, out, err
 	}
 	switch fam {
 	case engine.FamilyMySQL:
@@ -1209,6 +1216,9 @@ func dbDumpTool(ctx context.Context, _ *mcpsdk.CallToolRequest, in dbDumpIn) (*m
 	fam, ok := engine.Canonical(in.Engine)
 	if !ok {
 		return nil, dbDumpOut{}, fmt.Errorf("db_dump: unknown engine %q (allowed: %s)", in.Engine, engine.KnownList())
+	}
+	if err := requireConnection(cfg, fam); err != nil {
+		return nil, dbDumpOut{}, err
 	}
 	switch fam {
 	case engine.FamilyMySQL:
