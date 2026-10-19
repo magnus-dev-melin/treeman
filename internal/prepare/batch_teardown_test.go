@@ -16,7 +16,7 @@ import (
 
 // countingConn is a fake engineconn.Conn that counts dials at the
 // connect-func level (the pool, not the conn, is under test) and
-// records every DropMatching target.
+// records every dropped name.
 type countingConn struct {
 	dropped *[]string
 }
@@ -29,6 +29,11 @@ func (c countingConn) DropMatching(_ context.Context, n string) (int, error) {
 	return 1, nil
 }
 func (c countingConn) DropSnapshot(context.Context, string) error { return nil }
+func (c countingConn) DropDatabase(_ context.Context, n string) error {
+	*c.dropped = append(*c.dropped, n)
+	return nil
+}
+
 func (c countingConn) ListMatching(context.Context, string) ([]string, error) {
 	return nil, nil
 }

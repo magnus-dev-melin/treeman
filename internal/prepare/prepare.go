@@ -3983,26 +3983,11 @@ func teardownSlugsVia(
 			if !ok || !engineconn.Configured(cfg, fam, d.Connection) {
 				continue
 			}
-			tmpl := d.NameTemplate
-			if fam.Scope() == engine.ScopePrefix {
-				if d.KeyPrefix == "" {
-					continue
-				}
-				tmpl = d.KeyPrefix
-			}
-			target, err := template.Render(tmpl, tplCtx)
+			target, err := teardownTarget(ctx, cfg, st, worktreeID, d, fam, tplCtx)
 			if err != nil {
 				slog.Warn("batch teardown", "slug", sl, "engine", d.Engine, "err", err)
 				failed = true
 				continue
-			}
-			if fam == engine.FamilyFile {
-				target, err = fileTeardownTarget(ctx, cfg, st, worktreeID, d.Connection, target)
-				if err != nil {
-					slog.Warn("batch teardown", "slug", sl, "engine", d.Engine, "err", err)
-					failed = true
-					continue
-				}
 			}
 			conn, err := pool.get(ctx, cfg, fam, d.Connection, connect)
 			if err != nil {
@@ -4010,7 +3995,10 @@ func teardownSlugsVia(
 				failed = true
 				continue
 			}
-			if err := teardownGeneric(ctx, string(fam), target, sl, repoID, worktreeID, st, conn.DropMatching); err != nil {
+			drop := func(ctx context.Context, t string) (int, error) {
+				return dropOwned(ctx, conn, fam, t, d.TestClones, tplCtx)
+			}
+			if err := teardownGeneric(ctx, string(fam), target, sl, repoID, worktreeID, st, drop); err != nil {
 				slog.Warn("batch teardown", "slug", sl, "engine", d.Engine, "err", err)
 				failed = true
 			}
@@ -4055,35 +4043,19 @@ func teardownOne(
 	if !engineconn.Configured(cfg, fam, d.Connection) {
 		return nil
 	}
-	// Name-scoped engines (mysql/postgres/mongo) reap the rendered
-	// name_template family; prefix-scoped engines (redis/es) reap the
-	// rendered key_prefix, which is required.
-	tmpl := d.NameTemplate
-	if fam.Scope() == engine.ScopePrefix {
-		if d.KeyPrefix == "" {
-			return fmt.Errorf("%s: missing key_prefix", fam)
-		}
-		tmpl = d.KeyPrefix
-	}
-	target, err := template.Render(tmpl, tplCtx)
+	target, err := teardownTarget(ctx, cfg, st, worktreeID, d, fam, tplCtx)
 	if err != nil {
 		return err
-	}
-	if fam == engine.FamilyFile {
-		// The file family's "name" is a rendered relative path; resolve
-		// it onto the same base prepare used, so teardown reaps the
-		// file that was actually built.
-		target, err = fileTeardownTarget(ctx, cfg, st, worktreeID, d.Connection, target)
-		if err != nil {
-			return err
-		}
 	}
 	conn, _, err := engineconn.Connect(ctx, cfg, fam, d.Connection)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = conn.Close() }()
-	return teardownGeneric(ctx, string(fam), target, sl, repoID, worktreeID, st, conn.DropMatching)
+	return teardownGeneric(ctx, string(fam), target, sl, repoID, worktreeID, st,
+		func(ctx context.Context, t string) (int, error) {
+			return dropOwned(ctx, conn, fam, t, d.TestClones, tplCtx)
+		})
 }
 
 // fileTeardownTarget resolves a rendered file-family name_template

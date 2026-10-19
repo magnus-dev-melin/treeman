@@ -154,6 +154,15 @@ worktree's slug:
 | `{target_db}` | the rendered per-run DB name (only in `migrate.env` / `seed.env`) |
 | `{n}` | test-clone index, 1-based (only in `test_clones.name_template`) |
 
+A `databases[]` entry's `name_template` (or `key_prefix` for Redis,
+Elasticsearch and S3) must contain `{slug}` or `{slug_dash}`, so each
+worktree gets its own namespace. The file engines are exempt, because
+their path resolves inside the worktree. A `test_clones.name_template`
+must contain `{n}` exactly once. The `main_worktree.databases[]` overlay
+may bind bare names (`app_dev`), since the main checkout is a single
+worktree. Teardown drops exactly the names it owns: the source database,
+plus the databases whose names match the test-clone pattern.
+
 ## Fully declarative — no hidden defaults
 
 treeman runs against what `.treeman.yaml` says, not what it

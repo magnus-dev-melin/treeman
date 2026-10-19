@@ -126,6 +126,17 @@ func RenderMap(tmpl string, vals map[string]string) (string, error) {
 	})
 }
 
+// Keys returns every `{key}` tmpl references, in order of appearance
+// and with repeats. Errors on an unmatched `{`.
+func Keys(tmpl string) ([]string, error) {
+	var keys []string
+	_, err := renderWith(tmpl, func(key string) (string, bool) {
+		keys = append(keys, key)
+		return "", true
+	})
+	return keys, err
+}
+
 // renderWith is the shared `{key}` scanner. lookup resolves a key to
 // its replacement; returning ok=false triggers RenderError.UnknownKey.
 // A `${...}` sequence is PASSED THROUGH untouched — dollar-braced

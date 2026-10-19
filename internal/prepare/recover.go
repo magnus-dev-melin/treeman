@@ -109,11 +109,12 @@ func RecoverDatabases(
 	}
 }
 
-// recoverTestClone drops the per-worktree source DB (and its
-// fingerprint-keyed test-clone family) so the next prepare cold-builds
-// it fresh. Goes through engineconn.Connect + Conn.DropMatching — one
-// registry-driven path for every family (#47): a driver registered in
-// the engineconn registry gets recovery for free.
+// recoverTestClone drops the per-worktree namespace (and its test-clone
+// family) so the next prepare cold-builds it fresh. It renders and
+// drops exactly what teardown would, through engineconn — one
+// registry-driven path for every family (#47). S3 is skipped: object
+// stores have no migrations to half-apply and their contents are
+// unrebuildable (#22).
 func recoverTestClone(
 	ctx context.Context,
 	cfg *config.Config,
@@ -122,21 +123,26 @@ func recoverTestClone(
 	repoID, worktreeID int64,
 	st *store.Store,
 ) (string, error) {
-	fam, _ := engine.Canonical(d.Engine)
+	fam, ok := engine.Canonical(d.Engine)
+	if !ok {
+		return "", fmt.Errorf("unknown engine %q", d.Engine)
+	}
+	if fam == engine.FamilyS3 {
+		return "", nil
+	}
 	conn, configured, err := engineconn.Connect(ctx, cfg, fam, d.Connection)
 	if err != nil {
 		return "", err
 	}
 	if !configured {
-		// No connection block: nothing to drop, same as before.
 		return "", nil
 	}
 	defer func() { _ = conn.Close() }()
-	name, err := template.Render(d.NameTemplate, tplCtx)
+	name, err := teardownTarget(ctx, cfg, st, worktreeID, d, fam, tplCtx)
 	if err != nil {
 		return "", err
 	}
-	dropped, err := conn.DropMatching(ctx, name)
+	dropped, err := dropOwned(ctx, conn, fam, name, d.TestClones, tplCtx)
 	if err != nil {
 		return name, err
 	}
