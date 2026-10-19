@@ -9,6 +9,7 @@ package mysql
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -628,11 +629,11 @@ func (d *Driver) listTablesAndViews(ctx context.Context, source string) (tables,
 // data copy. Returns the per-table jobs in source order.
 func (d *Driver) cloneTablesDDL(ctx context.Context, source, qsource, qtemplate string, tables []schemaObject) ([]tableJob, error) {
 	jobs := make([]tableJob, 0, len(tables))
-	conn, err := d.DB.Conn(ctx)
+	conn, releaseConn, err := sessionConn(ctx, d.DB)
 	if err != nil {
 		return nil, fmt.Errorf("acquire DDL connection: %w", err)
 	}
-	defer func() { _ = conn.Close() }()
+	defer releaseConn()
 	if err := applyCloneSession(ctx, conn); err != nil {
 		return nil, err
 	}
@@ -722,11 +723,11 @@ func (d *Driver) cloneViews(ctx context.Context, source, template string) error 
 	if err != nil {
 		return err
 	}
-	conn, err := d.DB.Conn(ctx)
+	conn, releaseConn, err := sessionConn(ctx, d.DB)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = conn.Close() }()
+	defer releaseConn()
 	if err := applyCloneSession(ctx, conn); err != nil {
 		return err
 	}
@@ -841,11 +842,11 @@ func (d *Driver) cloneTriggers(ctx context.Context, source, template string) err
 		return nil
 	}
 
-	conn, err := d.DB.Conn(ctx)
+	conn, releaseConn, err := sessionConn(ctx, d.DB)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = conn.Close() }()
+	defer releaseConn()
 	if _, err := conn.ExecContext(ctx, "USE "+qtemplate); err != nil {
 		return fmt.Errorf("USE %s: %w", qtemplate, err)
 	}
@@ -924,6 +925,26 @@ func rawString(v any) string {
 // small tables.
 const mysqlCloneFanout = 6
 
+// sessionConn pins one pooled connection for work that changes its
+// session state — USE, SET SESSION (foreign_key_checks, unique_checks,
+// sql_log_bin, sql_mode, client charset) or table locks. The returned
+// release discards the connection rather than handing it back to the
+// pool, so no later query on db inherits disabled FK checks, a skipped
+// binlog or a stale default database.
+func sessionConn(ctx context.Context, db *sql.DB) (*sql.Conn, func(), error) {
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("pin mysql connection: %w", err)
+	}
+	release := func() {
+		// ErrBadConn from Raw makes database/sql close the connection
+		// instead of pooling it; the Close that follows is then a no-op.
+		_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+		_ = conn.Close()
+	}
+	return conn, release, nil
+}
+
 // applyCloneSession enables the session flags needed to skip
 // constraint enforcement and binlog overhead during the bulk copy.
 // `sql_log_bin=0` is load-bearing: without it MySQL falls back to
@@ -974,11 +995,11 @@ func copyOneTableData(ctx context.Context, db *sql.DB, source, template, name st
 	if err != nil {
 		return err
 	}
-	conn, err := db.Conn(ctx)
+	conn, releaseConn, err := sessionConn(ctx, db)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = conn.Close() }()
+	defer releaseConn()
 	if err := applyCloneSession(ctx, conn); err != nil {
 		return err
 	}
