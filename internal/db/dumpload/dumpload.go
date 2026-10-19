@@ -1,17 +1,17 @@
-// Package dumpload streams a `.sql` dump into a target database
-// over the wire. Statement-by-statement so we don't buffer the
-// whole file in memory; quotes / backticks / `--` line comments /
-// `/* */` block comments respected so an embedded `;` inside a
-// string literal doesn't trigger a fake split.
+// Package dumpload streams a `.sql` dump into a target database. The
+// native client (in the container or on PATH) is preferred; the wire
+// fallback splits the dump statement by statement (see split.go) so
+// the whole file is never buffered, following each dialect's lexing
+// rules: MySQL's backslash escapes, DELIMITER directives and executable
+// comments, Postgres's dollar quoting and COPY … FROM stdin blocks.
 //
-// We use `database/sql`'s default ExecContext, which speaks MySQL's
-// text protocol. That's enough for every statement mysqldump emits
-// — including LOCK TABLES / SET PASSWORD / DELIMITER, which the
-// prepared-statement protocol refuses to handle.
+// Statements go through `database/sql`'s ExecContext, which speaks
+// MySQL's text protocol — enough for LOCK TABLES and the other
+// statements the prepared-statement protocol refuses. COPY data
+// streams through pgx's CopyFrom.
 package dumpload
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -22,6 +22,7 @@ import (
 	"time"
 
 	gomysql "github.com/go-sql-driver/mysql"
+	"github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/stubbedev/treeman/internal/config"
 	"github.com/stubbedev/treeman/internal/db/ident"
@@ -243,11 +244,10 @@ func loadMySQLViaWire(ctx context.Context, db *sql.DB, targetDB, dumpPath string
 	} {
 		_, _ = conn.ExecContext(ctx, s) // best-effort; some flags need SUPER
 	}
-	_, err = streamStatements(ctx, f, retryingExec(ctx, func(stmt string) error {
+	return streamStatements(ctx, f, dialectMySQL, statementSink{onStmt: retryingExec(ctx, func(stmt string) error {
 		_, err := conn.ExecContext(ctx, stmt)
 		return err
-	}))
-	return err
+	})})
 }
 
 // ensureMySQLDB creates `targetDB` when it is missing, so a dump load
@@ -352,186 +352,20 @@ func loadPostgresViaWire(ctx context.Context, db *sql.DB, dumpPath string) error
 		return err
 	}
 	defer func() { _ = conn.Close() }()
-	_, err = streamStatements(ctx, f, func(stmt string) error {
-		_, err := conn.ExecContext(ctx, stmt)
-		return err
-	})
-	return err
-}
-
-// streamStatements walks `r` and invokes onStmt for each `;`-
-// terminated statement found at top level. Handles `--` line
-// comments, `/* */` block comments, and `' " \“ quoting so an
-// embedded `;` inside a string literal doesn't trigger a false
-// split. Blank/whitespace-only statements are skipped.
-//
-// Memory ceiling is the largest single statement size — typically
-// the extended INSERT chunk mysqldump emits (default 64MB). The
-// file is consumed in 1MB chunks so even a 10GB dump never lives in
-// RAM all at once.
-//
-// Scanning runs over each chunk slice with index access (no
-// per-byte reader call), and the two-character `--` / `/*` / `*/`
-// lookaheads are tracked as carry-over state (dashSeen / slashSeen /
-// starSeen) so they survive chunk boundaries. This is a faithful,
-// allocation-free replacement for the previous bufio.ReadByte +
-// Peek/Discard loop — FuzzStreamStatementsParity pins the output to
-// that reference implementation byte-for-byte.
-func streamStatements(ctx context.Context, r io.Reader, onStmt func(stmt string) error) (uint64, error) {
-	chunk := make([]byte, 1<<20)
-	s := &stmtScanner{onStmt: onStmt}
-	for {
-		if err := ctx.Err(); err != nil {
-			return s.applied, err
-		}
-		n, rerr := r.Read(chunk)
-		for i := range n {
-			if err := s.feed(chunk[i]); err != nil {
-				return s.applied, err
-			}
-		}
-		if rerr != nil {
-			if rerr == io.EOF {
-				break
-			}
-			return s.applied, rerr
-		}
-	}
-	// A `-` or `/` pending at EOF was a literal trailing byte, not a
-	// comment opener — write it before the final flush (mirrors the
-	// byte-by-byte path, which wrote it once Peek returned empty).
-	if s.dashSeen {
-		s.buf.WriteByte('-')
-	}
-	if s.slashSeen {
-		s.buf.WriteByte('/')
-	}
-	// Trailing statement without a closing `;` (rare but tolerated).
-	if err := s.flush(); err != nil {
-		return s.applied, err
-	}
-	return s.applied, nil
-}
-
-// stmtScanner carries the SQL-splitting state machine across the 1MB
-// read chunks so the two-character `--` / `/*` / `*/` lookaheads and
-// quote/comment context survive chunk boundaries.
-type stmtScanner struct {
-	onStmt func(stmt string) error
-	buf    bytes.Buffer
-
-	inSingle, inDouble, inBacktick bool
-	inLineComment, inBlockComment  bool
-	starSeen, dashSeen, slashSeen  bool
-	applied                        uint64
-}
-
-func (s *stmtScanner) flush() error {
-	stmt := s.buf.String()
-	s.buf.Reset()
-	if isBlank(stmt) {
-		return nil
-	}
-	if err := s.onStmt(stmt); err != nil {
-		return fmt.Errorf("apply dump stmt #%d: %w", s.applied, err)
-	}
-	s.applied++
-	return nil
-}
-
-// feed advances the scanner by one byte. Returns the error from flush
-// only when a `;` terminator (or trailing-statement) callback fails.
-func (s *stmtScanner) feed(b byte) error {
-	if s.feedInContext(b) {
-		return nil
-	}
-	// Top-level (not in a quote or comment). Resolve a pending
-	// `-` / `/` from the previous byte first: it either forms a
-	// comment opener or gets written verbatim before we handle b.
-	if s.dashSeen {
-		s.dashSeen = false
-		if b == '-' {
-			s.inLineComment = true
-			return nil
-		}
-		s.buf.WriteByte('-')
-	} else if s.slashSeen {
-		s.slashSeen = false
-		if b == '*' {
-			s.inBlockComment = true
-			return nil
-		}
-		s.buf.WriteByte('/')
-	}
-	switch b {
-	case '-':
-		s.dashSeen = true
-	case '/':
-		s.slashSeen = true
-	case '\'':
-		s.inSingle = true
-		s.buf.WriteByte(b)
-	case '"':
-		s.inDouble = true
-		s.buf.WriteByte(b)
-	case '`':
-		s.inBacktick = true
-		s.buf.WriteByte(b)
-	case ';':
-		if err := s.flush(); err != nil {
+	return streamStatements(ctx, f, dialectPostgres, statementSink{
+		onStmt: func(stmt string) error {
+			_, err := conn.ExecContext(ctx, stmt)
 			return err
-		}
-	default:
-		s.buf.WriteByte(b)
-	}
-	return nil
-}
-
-// feedInContext handles a byte while inside a comment or quoted string,
-// reporting true when b was consumed in such a context (so the caller
-// skips top-level handling) and false when at top level.
-func (s *stmtScanner) feedInContext(b byte) bool {
-	switch {
-	case s.inLineComment:
-		if b == '\n' {
-			s.inLineComment = false
-		}
-		return true
-	case s.inBlockComment:
-		if s.starSeen && b == '/' {
-			s.inBlockComment = false
-			s.starSeen = false
-			return true
-		}
-		s.starSeen = b == '*'
-		return true
-	case s.inSingle:
-		s.buf.WriteByte(b)
-		if b == '\'' {
-			s.inSingle = false
-		}
-		return true
-	case s.inDouble:
-		s.buf.WriteByte(b)
-		if b == '"' {
-			s.inDouble = false
-		}
-		return true
-	case s.inBacktick:
-		s.buf.WriteByte(b)
-		if b == '`' {
-			s.inBacktick = false
-		}
-		return true
-	}
-	return false
-}
-
-func isBlank(s string) bool {
-	for _, c := range s {
-		if c != ' ' && c != '\t' && c != '\n' && c != '\r' {
-			return false
-		}
-	}
-	return true
+		},
+		onCopy: func(stmt string, data io.Reader) error {
+			return conn.Raw(func(dc any) error {
+				pc, ok := dc.(*stdlib.Conn)
+				if !ok {
+					return fmt.Errorf("COPY needs a pgx connection, got %T", dc)
+				}
+				_, err := pc.Conn().PgConn().CopyFrom(ctx, data, stmt)
+				return err
+			})
+		},
+	})
 }
