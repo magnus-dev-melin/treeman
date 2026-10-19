@@ -1,6 +1,9 @@
 package gitx
 
-import "testing"
+import (
+	"slices"
+	"testing"
+)
 
 func TestTicketPrefix(t *testing.T) {
 	cases := map[string]string{
@@ -81,31 +84,18 @@ func TestPatchFilename(t *testing.T) {
 }
 
 func TestStageRows(t *testing.T) {
-	porcelain := " M tracked.go\n?? new.txt\n?? subdir/\n D gone.go\nR  old.go -> renamed.go\nM  staged-only.go"
-	rows := StageRows(porcelain)
-	// Expect: M tracked.go, A new.txt, A subdir/(expand), D gone.go.
-	// "R " (staged rename) and "M " (staged-only) have a space in the
-	// worktree column → skipped.
-	if len(rows) != 4 {
-		t.Fatalf("got %d rows, want 4: %+v", len(rows), rows)
-	}
+	// The first entry's leading space is significant: trimming the
+	// output used to turn " M tracked.go" into an unparsable line.
+	porcelain := " M tracked.go\x00?? new file.txt\x00?? subdir/\x00 D gone.go\x00" +
+		"R  renamed.go\x00old.go\x00RM moved.go\x00was.go\x00M  staged-only.go\x00"
 	want := []StageRow{
 		{Kind: StageModified, Path: "tracked.go"},
-		{Kind: StageAdded, Path: "new.txt"},
+		{Kind: StageAdded, Path: "new file.txt"},
 		{Kind: StageAdded, Path: "subdir/", ExpandDir: true},
 		{Kind: StageDeleted, Path: "gone.go"},
+		{Kind: StageModified, Path: "moved.go"},
 	}
-	for i, w := range want {
-		if rows[i] != w {
-			t.Errorf("row %d = %+v, want %+v", i, rows[i], w)
-		}
-	}
-}
-
-func TestStageRowsRenameWorktree(t *testing.T) {
-	// A worktree-modified line carrying a rename arrow keeps the new name.
-	rows := StageRows(" M a.go -> b.go")
-	if len(rows) != 1 || rows[0].Path != "b.go" || rows[0].Kind != StageModified {
-		t.Errorf("rename parse = %+v", rows)
+	if got := StageRows(porcelain); !slices.Equal(got, want) {
+		t.Errorf("StageRows = %+v\nwant %+v", got, want)
 	}
 }

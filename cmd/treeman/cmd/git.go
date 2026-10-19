@@ -216,8 +216,10 @@ func gitAdd() *cli.Command {
 					return err
 				}
 			}
-			porcelain, _ := gitcmd.String(ctx, dir, "status", "--porcelain")
-			rows := expandStageRows(dir, gitx.StageRows(porcelain))
+			rows, err := stageRows(ctx, dir)
+			if err != nil {
+				return err
+			}
 			if len(rows) == 0 {
 				ui.Info("Nothing to stage.")
 				return nil
@@ -264,6 +266,16 @@ func sortStageRows(rows []gitx.StageRow) {
 		}
 		return rows[i].Path < rows[j].Path
 	})
+}
+
+// stageRows lists the worktree's stageable changes, untracked
+// directories expanded into their files.
+func stageRows(ctx context.Context, dir string) ([]gitx.StageRow, error) {
+	out, err := gitcmd.Output(ctx, dir, "status", "--porcelain", "-z")
+	if err != nil {
+		return nil, err
+	}
+	return expandStageRows(dir, gitx.StageRows(string(out))), nil
 }
 
 // expandStageRows walks untracked directories into their contained

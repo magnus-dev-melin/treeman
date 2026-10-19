@@ -5,8 +5,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/stubbedev/treeman/internal/gitx"
 )
 
 func newGitRepo(t *testing.T) (string, func(args ...string) string) {
@@ -74,5 +77,26 @@ func TestWipeChangesDiscardsWorkAndLeavesStashStack(t *testing.T) {
 	}
 	if got := run("stash", "list"); strings.Count(got, "\n") != 0 || !strings.Contains(got, "precious") {
 		t.Fatalf("stash stack changed; stash list = %q", got)
+	}
+}
+
+// With one modified file the porcelain's leading space was trimmed off
+// and the row lost ("Nothing to stage"); a path with a space came back
+// C-quoted and could not be staged or discarded.
+func TestStageRowsSeesEveryChange(t *testing.T) {
+	repo, _ := newGitRepo(t)
+	writeFile(t, filepath.Join(repo, "f"), "modified")
+	writeFile(t, filepath.Join(repo, "a b.txt"), "new")
+
+	rows, err := stageRows(context.Background(), repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []gitx.StageRow{
+		{Kind: gitx.StageModified, Path: "f"},
+		{Kind: gitx.StageAdded, Path: "a b.txt"},
+	}
+	if !slices.Equal(rows, want) {
+		t.Errorf("stageRows = %+v, want %+v", rows, want)
 	}
 }

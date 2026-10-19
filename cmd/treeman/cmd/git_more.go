@@ -86,8 +86,10 @@ func gitDiscard() *cli.Command {
 			if err != nil {
 				return err
 			}
-			porcelain, _ := gitcmd.String(ctx, dir, "status", "--porcelain")
-			rows := expandStageRows(dir, gitx.StageRows(porcelain))
+			rows, err := stageRows(ctx, dir)
+			if err != nil {
+				return err
+			}
 			if len(rows) == 0 {
 				ui.Info("Nothing to discard.")
 				return nil
