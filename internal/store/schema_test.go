@@ -56,6 +56,7 @@ func TestFreshDBHasExpectedSchema(t *testing.T) {
 		"idx_branch_durables_branch",
 		"idx_branch_durables_repo",
 		"idx_config_generations_repo",
+		"idx_events_repo",
 		"idx_events_ts",
 		"idx_events_type",
 		"idx_events_worktree",
