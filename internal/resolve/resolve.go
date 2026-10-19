@@ -540,10 +540,7 @@ func resolveRedis(cfg *config.Config, env envfile.EnvFile) *resolvedConn[config.
 	if host := firstEnv(env, "SPRING_DATA_REDIS_HOST", "SPRING_REDIS_HOST"); host != "" {
 		port := firstEnvOr(env, "6379", "SPRING_DATA_REDIS_PORT", "SPRING_REDIS_PORT")
 		pass := firstEnv(env, "SPRING_DATA_REDIS_PASSWORD", "SPRING_REDIS_PASSWORD")
-		userinfo := ""
-		if nonEmpty(pass) {
-			userinfo = ":" + url.QueryEscape(pass) + "@"
-		}
+		userinfo := passwordOnlyUserInfo(pass)
 		return &resolvedConn[config.RedisConn]{
 			Conn:   config.RedisConn{URL: "redis://" + userinfo + host + ":" + port},
 			Source: repoSrc(env),
@@ -553,10 +550,7 @@ func resolveRedis(cfg *config.Config, env envfile.EnvFile) *resolvedConn[config.
 	if host, ok := env.Get("REDIS_HOST"); ok {
 		port := envOr(env, "REDIS_PORT", "6379")
 		pass, _ := env.Get("REDIS_PASSWORD")
-		userinfo := ""
-		if nonEmpty(pass) {
-			userinfo = ":" + url.QueryEscape(pass) + "@"
-		}
+		userinfo := passwordOnlyUserInfo(pass)
 		return &resolvedConn[config.RedisConn]{
 			Conn:   config.RedisConn{URL: "redis://" + userinfo + host + ":" + port},
 			Source: repoSrc(env),
@@ -710,14 +704,26 @@ func postgresFromURL(u *url.URL) config.PostgresConn {
 	return config.PostgresConn{Host: host, Port: port, User: user, PoolMax: 8}
 }
 
+// buildUserInfo renders `user:pass@` for a connection URL. url.User /
+// url.UserPassword escape for the userinfo position; QueryEscape writes
+// a space as '+', which userinfo decoding keeps literally.
 func buildUserInfo(user, pass string) string {
 	if nonEmpty(pass) && user != "" {
-		return url.QueryEscape(user) + ":" + url.QueryEscape(pass) + "@"
+		return url.UserPassword(user, pass).String() + "@"
 	}
 	if user != "" {
-		return url.QueryEscape(user) + "@"
+		return url.User(user).String() + "@"
 	}
 	return ""
+}
+
+// passwordOnlyUserInfo renders `:pass@` (Redis AUTH without a user), or
+// "" when pass is empty.
+func passwordOnlyUserInfo(pass string) string {
+	if !nonEmpty(pass) {
+		return ""
+	}
+	return url.UserPassword("", pass).String() + "@"
 }
 
 // ─────────────────────────── misc helpers ───────────────────────────

@@ -59,23 +59,7 @@ func Connect(ctx context.Context, cfg config.PostgresConn) (*Driver, error) {
 			return nil, err
 		}
 	}
-	var dsn string
-	if socketMode {
-		dsn = fmt.Sprintf(
-			"postgres://%s:%s@/postgres?sslmode=disable&host=%s",
-			url.QueryEscape(cfg.User),
-			url.QueryEscape(cfg.Password),
-			url.QueryEscape(cfg.Host),
-		)
-	} else {
-		dsn = fmt.Sprintf(
-			"postgres://%s:%s@%s/postgres?sslmode=disable",
-			url.QueryEscape(cfg.User),
-			url.QueryEscape(cfg.Password),
-			net.JoinHostPort(cfg.Host, strconv.Itoa(int(cfg.Port))),
-		)
-	}
-	db, err := sql.Open("pgx", dsn)
+	db, err := sql.Open("pgx", dsn(cfg, "postgres"))
 	if err != nil {
 		return nil, fmt.Errorf("open postgres: %w", err)
 	}
@@ -89,30 +73,29 @@ func Connect(ctx context.Context, cfg config.PostgresConn) (*Driver, error) {
 
 func (d *Driver) Close() error { return d.DB.Close() }
 
+// dsn builds the pgx URL for dbName: a unix socket when cfg.Host is a
+// directory path, TCP otherwise. url.URL escapes each part for its own
+// position; QueryEscape, used before, writes a space as '+', which
+// userinfo and path decoding keep literally, so a password or database
+// name containing a space never matched.
+func dsn(cfg config.PostgresConn, dbName string) string {
+	u := url.URL{Scheme: "postgres", User: url.UserPassword(cfg.User, cfg.Password), Path: "/" + dbName}
+	q := url.Values{"sslmode": {"disable"}}
+	if strings.HasPrefix(cfg.Host, "/") {
+		q.Set("host", cfg.Host)
+	} else {
+		u.Host = net.JoinHostPort(cfg.Host, strconv.Itoa(int(cfg.Port)))
+	}
+	u.RawQuery = q.Encode()
+	return u.String()
+}
+
 // OpenScoped returns a fresh *sql.DB scoped to `dbName`. Use when
 // you need to execute SQL that hits a specific database — Postgres
 // has no `USE`, so each target DB needs its own connection. The
 // returned DB owns its pool; the caller MUST Close it.
 func (d *Driver) OpenScoped(ctx context.Context, dbName string) (*sql.DB, error) {
-	var dsn string
-	if strings.HasPrefix(d.cfg.Host, "/") {
-		dsn = fmt.Sprintf(
-			"postgres://%s:%s@/%s?sslmode=disable&host=%s",
-			url.QueryEscape(d.cfg.User),
-			url.QueryEscape(d.cfg.Password),
-			url.QueryEscape(dbName),
-			url.QueryEscape(d.cfg.Host),
-		)
-	} else {
-		dsn = fmt.Sprintf(
-			"postgres://%s:%s@%s/%s?sslmode=disable",
-			url.QueryEscape(d.cfg.User),
-			url.QueryEscape(d.cfg.Password),
-			net.JoinHostPort(d.cfg.Host, strconv.Itoa(int(d.cfg.Port))),
-			url.QueryEscape(dbName),
-		)
-	}
-	db, err := sql.Open("pgx", dsn)
+	db, err := sql.Open("pgx", dsn(d.cfg, dbName))
 	if err != nil {
 		return nil, fmt.Errorf("open postgres %s: %w", dbName, err)
 	}
