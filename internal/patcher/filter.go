@@ -211,7 +211,7 @@ func restorePhpunitFromHead(content, headContent string, keys []string) string {
 // as permanently modified.
 func restoreDotenvFromHead(content, headContent string, keys []string) string {
 	for _, k := range keys {
-		re := regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(k) + `\s*=.*$`)
+		re := dotenvLine(k)
 		headLine := re.FindString(headContent)
 		if headLine == "" {
 			continue
@@ -239,12 +239,11 @@ func restoreINIFromHead(content, headContent string, dottedKeys []string) string
 		if headSec == "" || curSec == "" {
 			continue
 		}
-		// Allow leading indentation so an indented `  k = v` key — which
-		// go-ini (extractINI) happily reports as present — is matched here
-		// too. Without the `[ \t]*` prefix the splice would silently miss
-		// it, leaving the smudged value in place and the file permanently
-		// git-dirty. Mirrors spliceAssignValue's `^\s*key` on the apply side.
-		lineRe := regexp.MustCompile(`(?m)^[ \t]*` + regexp.QuoteMeta(key) + `\s*=.*$`)
+		// assignLine tolerates indentation, so an indented `  k = v` key —
+		// which go-ini (extractINI) reports as present — is matched too;
+		// otherwise the smudged value would stay and the file would be
+		// permanently git-dirty.
+		lineRe := assignLine(key)
 		headLine := lineRe.FindString(headSec)
 		if headLine == "" {
 			continue
@@ -307,7 +306,7 @@ func restoreTOMLFromHead(content, headContent string, dottedKeys []string) strin
 		}
 		// Indentation-tolerant for the same reason as restoreINIFromHead:
 		// TOML permits indented keys and go-toml (extractTOML) accepts them.
-		lineRe := regexp.MustCompile(`(?m)^[ \t]*` + regexp.QuoteMeta(key) + `\s*=.*$`)
+		lineRe := assignLine(key)
 		headLine := lineRe.FindString(headSec)
 		if headLine == "" {
 			continue
@@ -788,8 +787,7 @@ func applyDotenvContent(content string, pairs map[string]string) string {
 func extractDotenv(content string, keys []string) map[string]string {
 	out := make(map[string]string, len(keys))
 	for _, k := range keys {
-		re := regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(k) + `\s*=(.*)$`)
-		m := re.FindStringSubmatch(content)
+		m := dotenvLine(k).FindStringSubmatch(content)
 		if len(m) == 2 {
 			out[k] = m[1]
 		}
@@ -1136,12 +1134,7 @@ func extractINI(content string, keys []string) (map[string]string, error) {
 
 func removeDotenvContent(content string, keys []string) string {
 	for _, k := range keys {
-		// `(?m)^KEY\s*=.*\n?` — match a whole line including its
-		// trailing newline if present. Trailing-newline optional so
-		// the last line of a file without final \n still strips
-		// cleanly.
-		re := regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(k) + `\s*=.*\n?`)
-		content = re.ReplaceAllString(content, "")
+		content = dotenvLineWithNewline(k).ReplaceAllString(content, "")
 	}
 	return content
 }

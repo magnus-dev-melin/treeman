@@ -17,7 +17,6 @@ package patcher
 
 import (
 	"encoding/json"
-	"regexp"
 	"strconv"
 	"strings"
 
@@ -158,8 +157,7 @@ func iniMarshalFallback(content string, pairs map[string]string) (string, bool, 
 // around `=`, and the rest of the section. Returns (newSection, found).
 // Used for both TOML and INI — same line grammar.
 func spliceAssignValue(section, key, literal string) (string, bool) {
-	re := regexp.MustCompile(`(?m)^(\s*` + regexp.QuoteMeta(key) + `\s*=\s*).*$`)
-	loc := re.FindStringSubmatchIndex(section)
+	loc := assignLine(key).FindStringSubmatchIndex(section)
 	if loc == nil {
 		return section, false
 	}

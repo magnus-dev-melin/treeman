@@ -86,7 +86,7 @@ func PatchEnvFile(path string, pairs []Pair) (Outcome, error) {
 }
 
 func patchEnvOne(content, key, value string) string {
-	re := regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(key) + `\s*=.*$`)
+	re := dotenvLine(key)
 	// regexp's Replace expands `$1`, `${name}`, `$$`, etc. in the
 	// replacement string. Use ReplaceAllLiteralString so a slug or
 	// value containing `$` doesn't accidentally pull in match groups.

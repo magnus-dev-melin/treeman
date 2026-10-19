@@ -150,3 +150,22 @@ func TestApply_AutoDetectsTOMLAndINI(t *testing.T) {
 		}
 	}
 }
+
+// An empty `key =` used to let the `\s*` after `=` run across the
+// newline, so the patched value replaced the following line instead.
+func TestInPlacePatchOfEmptyValueKeepsNextLine(t *testing.T) {
+	ini, _, err := setINIInPlace("[db]\npassword =\nname = keep\n", map[string]string{"db.password": "secret"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "[db]\npassword =secret\nname = keep\n"; ini != want {
+		t.Errorf("ini = %q, want %q", ini, want)
+	}
+	toml, _, err := setTOMLInPlace("[db]\npassword =\nname = \"keep\"\n", map[string]string{"db.password": "secret"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(toml, "name = \"keep\"\n") || !strings.Contains(toml, "password =\"secret\"") {
+		t.Errorf("toml = %q, want the value spliced in and the next line kept", toml)
+	}
+}
