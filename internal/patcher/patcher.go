@@ -23,7 +23,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -127,7 +126,7 @@ func PatchPhpunitFile(path string, pairs []Pair) (Outcome, error) {
 }
 
 func patchPhpunitOne(content, key, value string) string {
-	re := regexp.MustCompile(`<env name="` + regexp.QuoteMeta(key) + `"[^/]*/>`)
+	re := phpunitEnv(key)
 	replacement := fmt.Sprintf(`<env name="%s" value="%s" force="true"/>`,
 		xmlAttrEscape(key), xmlAttrEscape(value))
 	if re.MatchString(content) {

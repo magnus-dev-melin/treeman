@@ -76,3 +76,24 @@ func TestPhpunitInjectNewEnv(t *testing.T) {
 		t.Errorf("missing injected env: %s", string(b))
 	}
 }
+
+// `[^/]*` could not match an element whose value holds a `/`, so every
+// run appended another <env> for a URL-valued key.
+func TestPatchPhpunitIsIdempotentForURLValues(t *testing.T) {
+	content := "<phpunit>\n\t<php>\n\t\t<env name=\"APP_URL\" value=\"http://old.test\"/>\n\t</php>\n</phpunit>\n"
+	for range 3 {
+		content = patchPhpunitOne(content, "APP_URL", "http://wt.test/a")
+	}
+	if n := strings.Count(content, `name="APP_URL"`); n != 1 {
+		t.Fatalf("APP_URL appears %d times, want 1:\n%s", n, content)
+	}
+	if !strings.Contains(content, `value="http://wt.test/a"`) {
+		t.Fatalf("value not replaced:\n%s", content)
+	}
+	if got := extractPhpunit(content, []string{"APP_URL"})["APP_URL"]; got != "http://wt.test/a" {
+		t.Errorf("extractPhpunit = %q", got)
+	}
+	if removed := removePhpunitContent(content, []string{"APP_URL"}); strings.Contains(removed, "APP_URL") {
+		t.Errorf("removePhpunitContent left the element:\n%s", removed)
+	}
+}

@@ -29,3 +29,23 @@ func dotenvLine(key string) *regexp.Regexp {
 func dotenvLineWithNewline(key string) *regexp.Regexp {
 	return regexp.MustCompile(dotenvLinePattern(key) + `\n?`)
 }
+
+// phpunitEnvPattern matches a self-closing `<env name="KEY" …/>`
+// element as a run of double-quoted attributes, so a value holding `/`
+// or `>` (a URL) still matches.
+func phpunitEnvPattern(key string) string {
+	return `<env\s+name="` + regexp.QuoteMeta(xmlAttrEscape(key)) + `"(?:\s+[\w:.-]+="[^"]*")*\s*/>`
+}
+
+// phpunitEnv matches the `<env name="KEY" …/>` element.
+func phpunitEnv(key string) *regexp.Regexp {
+	return regexp.MustCompile(phpunitEnvPattern(key))
+}
+
+// phpunitEnvLine is phpunitEnv with the line's leading indent and
+// trailing newline, for removing the element outright.
+func phpunitEnvLine(key string) *regexp.Regexp {
+	return regexp.MustCompile(`(?m)^[ \t]*` + phpunitEnvPattern(key) + `\n?`)
+}
+
+var phpunitValueAttr = regexp.MustCompile(`\svalue="([^"]*)"`)

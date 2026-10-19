@@ -192,7 +192,7 @@ func restoreContent(driver, content, headContent string, headVals map[string]str
 // carry the attribute.
 func restorePhpunitFromHead(content, headContent string, keys []string) string {
 	for _, k := range keys {
-		re := regexp.MustCompile(`<env name="` + regexp.QuoteMeta(k) + `"[^/]*/>`)
+		re := phpunitEnv(k)
 		headElem := re.FindString(headContent)
 		if headElem == "" {
 			continue
@@ -807,8 +807,7 @@ func applyPhpunitContent(content string, pairs map[string]string) string {
 func extractPhpunit(content string, keys []string) map[string]string {
 	out := make(map[string]string, len(keys))
 	for _, k := range keys {
-		re := regexp.MustCompile(`<env name="` + regexp.QuoteMeta(k) + `"\s+value="([^"]*)"`)
-		m := re.FindStringSubmatch(content)
+		m := phpunitValueAttr.FindStringSubmatch(phpunitEnv(k).FindString(content))
 		if len(m) == 2 {
 			// Round-trip XML attribute escaping so the value we hand
 			// back to applyContent comes out matching the canonical
@@ -1141,15 +1140,7 @@ func removeDotenvContent(content string, keys []string) string {
 
 func removePhpunitContent(content string, keys []string) string {
 	for _, k := range keys {
-		// Match `<env name="KEY" .../>` together with all leading
-		// horizontal whitespace on the line and the trailing newline
-		// Apply uses when injecting (`\t<env .../>\n`). `[ \t]*`
-		// (greedy) absorbs hand-edited indent depth — using `\t?`
-		// strips only one tab and leaves a dangling indent on the
-		// next line. Trailing `\n?` is optional so the last line of
-		// a file with no final newline strips cleanly too.
-		re := regexp.MustCompile(`(?m)^[ \t]*<env name="` + regexp.QuoteMeta(k) + `"[^/]*/>\n?`)
-		content = re.ReplaceAllString(content, "")
+		content = phpunitEnvLine(k).ReplaceAllString(content, "")
 	}
 	return content
 }
