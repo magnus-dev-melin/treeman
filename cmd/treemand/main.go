@@ -193,9 +193,9 @@ func run() error {
 
 	// Reap port reservations orphaned by an interrupted teardown or a
 	// pre-release binary that soft-deleted a worktree without releasing
-	// its ports. Leaked rows are invisible to ListUsedPorts but still
-	// blocked by the (repo_id, name, port) unique index, so without this
-	// the allocator climbs out of the configured range over time.
+	// its ports. Leaked rows still hold their port (one row per port), so
+	// without this the allocator climbs out of the configured range over
+	// time.
 	daemon.SweepOrphanWorktreePorts(ctx, st)
 
 	// Enroll opt-in main worktrees BEFORE listing active worktrees so

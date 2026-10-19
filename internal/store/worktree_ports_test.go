@@ -84,34 +84,41 @@ func TestAllocateSameSlotReturnsErrSlotHeld(t *testing.T) {
 	}
 }
 
-func TestListUsedPortsExcludesDeletedWorktree(t *testing.T) {
+// A port is host-global: a reservation for another slot or another
+// repo must block it too. Uniqueness used to be per (repo, slot), so
+// overlapping ranges handed the same port to two servers.
+func TestPortReservationsAreHostWide(t *testing.T) {
 	ctx := context.Background()
 	st, repoID, wtID := openTestStoreWithWt(t)
 	if err := st.AllocateWorktreePort(ctx, repoID, wtID, "octane", 8042); err != nil {
 		t.Fatal(err)
 	}
-	used, err := st.ListUsedPorts(ctx, repoID, "octane")
+	otherRepo, err := st.EnsureRepo(ctx, "/repos/other", "other")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := used[8042]; !ok {
-		t.Fatalf("expected 8042 in used set, got %v", used)
-	}
-	if err := st.MarkWorktreeDeleted(ctx, wtID); err != nil {
-		t.Fatal(err)
-	}
-	used, err = st.ListUsedPorts(ctx, repoID, "octane")
+	otherWt, err := st.EnsureWorktree(ctx, otherRepo, "/repos/other/.worktrees/x", "x", "x")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := used[8042]; ok {
-		t.Errorf("deleted worktree's port should not appear in used set: %v", used)
+	if err := st.AllocateWorktreePort(ctx, repoID, wtID, "vite", 8042); !errors.Is(err, ErrPortInUse) {
+		t.Errorf("same port for another slot: want ErrPortInUse, got %v", err)
+	}
+	if err := st.AllocateWorktreePort(ctx, otherRepo, otherWt, "octane", 8042); !errors.Is(err, ErrPortInUse) {
+		t.Errorf("same port for another repo: want ErrPortInUse, got %v", err)
+	}
+	held, err := st.ListHeldPorts(ctx, 8000, 8100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := held[8042]; !ok || len(held) != 1 {
+		t.Errorf("ListHeldPorts = %v, want {8042}", held)
 	}
 }
 
 // TestSoftDeleteAloneDoesNotFreePortForReuse pins the invariant the
-// teardown paths rely on: marking a worktree deleted hides its port
-// from ListUsedPorts but does NOT free the (repo, slot, port) tuple —
+// teardown paths rely on: marking a worktree deleted does NOT free its
+// port —
 // the non-partial unique index still rejects a re-insert. Only a
 // physical ReleaseWorktreePorts makes the port reusable. Regression
 // guard for the leak where daemon/lifecycle teardown soft-deleted but
@@ -199,5 +206,44 @@ func TestReleaseWorktreePorts(t *testing.T) {
 	}
 	if len(ports) != 0 {
 		t.Errorf("expected empty map after release, got %v", ports)
+	}
+}
+
+// A database that already holds duplicate ports (from the old per-slot
+// index) must migrate: the oldest reservation per port stays, the rest
+// go, and the new index then refuses the duplicate.
+func TestHostUniquePortMigrationDedupes(t *testing.T) {
+	ctx := context.Background()
+	st, repoID, wtID := openTestStoreWithWt(t)
+	wt2, err := st.EnsureWorktree(ctx, repoID, "/repos/test/.worktrees/feature-y", "feature_y", "feature/y")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{
+		`DROP INDEX idx_worktree_ports_one_per_port`,
+		`CREATE UNIQUE INDEX idx_worktree_ports_one_per_port ON worktree_ports(repo_id, name, port)`,
+	} {
+		if _, err := st.DB.ExecContext(ctx, q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := st.AllocateWorktreePort(ctx, repoID, wtID, "octane", 8042); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.AllocateWorktreePort(ctx, repoID, wt2, "vite", 8042); err != nil {
+		t.Fatal(err)
+	}
+	body, err := migrationsFS.ReadFile("migrations/0016_ports_host_unique.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.DB.ExecContext(ctx, string(body)); err != nil {
+		t.Fatalf("migration over duplicates: %v", err)
+	}
+	if p, _ := st.LookupWorktreePort(ctx, wtID, "octane"); p != 8042 {
+		t.Errorf("oldest reservation lost: octane = %d", p)
+	}
+	if p, _ := st.LookupWorktreePort(ctx, wt2, "vite"); p != 0 {
+		t.Errorf("duplicate kept: vite = %d", p)
 	}
 }

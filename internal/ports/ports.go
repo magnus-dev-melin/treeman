@@ -123,7 +123,8 @@ func (defaultAllocator) Allocate(
 
 // allocateOne reserves one free port for (repoID, worktreeID, name)
 // from spec.Range. Returns ErrExhausted when every port in the range
-// is taken by another live worktree or by a foreign process.
+// is reserved — by any worktree of any repo, for any slot — or bound
+// by a foreign process.
 //
 // The reused return is true when a concurrent allocate pass for the
 // same worktree already claimed the slot: instead of failing, the port
@@ -136,7 +137,7 @@ func allocateOne(
 	name string,
 	spec config.PortSpec,
 ) (uint16, bool, error) {
-	used, err := st.ListUsedPorts(ctx, repoID, name)
+	used, err := st.ListHeldPorts(ctx, spec.Range.Min, spec.Range.Max)
 	if err != nil {
 		return 0, false, err
 	}
@@ -169,7 +170,7 @@ func allocateOne(
 			continue
 		case errors.Is(err, store.ErrPortInUse):
 			// Race: another worktree create grabbed this port between
-			// ListUsedPorts and AllocateWorktreePort. Try the next.
+			// ListHeldPorts and AllocateWorktreePort. Try the next.
 			continue
 		default:
 			return 0, false, err

@@ -917,9 +917,9 @@ func TeardownWorktree(
 
 	// Physically drop the port reservations so the freed ports can be
 	// re-used by the next allocation. Soft-deleting the worktree row is
-	// not enough: ListUsedPorts skips them, but the unique index on
-	// (repo_id, name, port) still rejects the re-insert, so the freed
-	// port silently climbs out of the range. Mirror the CLI inline path.
+	// not enough: the row still holds its port (one row per port), so
+	// the freed port silently climbs out of the range. Mirror the CLI
+	// inline path.
 	if err := st.Store.ReleaseWorktreePorts(ctx, wtID); err != nil {
 		slog.Warn("release worktree ports (freed ports stay blocked for reallocation)", "wt", wtRoot, "err", err)
 	}
