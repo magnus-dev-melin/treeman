@@ -996,10 +996,8 @@ func snapshotDropTool(
 		out.DryRun = true
 		return nil, out, nil
 	}
-	if ok, reason := confirmDestructive(
-		ctx,
+	if ask, refused := confirmDestructive(
 		req,
-		false,
 		in.Ack,
 		fmt.Sprintf(
 			"Drop snapshot %s (engine=%s template=%s)? Engine template + SQLite row will be deleted.",
@@ -1007,9 +1005,9 @@ func snapshotDropTool(
 			rec.Engine,
 			rec.TemplateName,
 		),
-	); !ok {
-		out.Refused = reason
-		return nil, out, nil
+	); ask != nil || refused != "" {
+		out.Refused = refused
+		return ask, out, nil
 	}
 
 	cfg, cfgErr := loadCfgForRepo(ctx, in.Repo)

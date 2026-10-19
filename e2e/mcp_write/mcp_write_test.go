@@ -208,7 +208,8 @@ databases:
 			"arguments": map[string]any{
 				"name":  branch,
 				"repo":  mainRepo,
-				"force": true, // bypass confirmation (it's a no-op for MCP anyway)
+				"force": true,
+				"ack":   true,
 			},
 		},
 	})

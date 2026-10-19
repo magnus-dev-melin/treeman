@@ -437,48 +437,52 @@ func runBranchScopedStatus(ctx context.Context, worktree, repoOverride string) (
 	return prepare.BranchScopedStatus(ctx, &cfg, repoRoot, wt, id.WtID, st)
 }
 
-// confirmDestructive asks the user via MCP elicitation before running
-// a destructive action. Returns (true, "") when the agent should
-// proceed: dry_run=true short-circuits to true, ack=true skips
-// elicitation, an elicitation error (client doesn't support it)
-// falls through to true, and an "accept" response returns true. Only
-// an explicit "decline"/"cancel" stops the action.
+// confirmInputID keys the confirmation prompt in a tool call's
+// InputRequests / InputResponses.
+const confirmInputID = "confirm"
+
+// confirmDestructive gates a destructive tool call. It returns
+// (nil, "") when the action may run, (nil, reason) when it must not,
+// and (ask, "") when the user has to be asked first: the handler
+// returns ask as its result and the SDK gets the prompt answered (by
+// the client on protocol 2026-07-28+, by a server-sent elicitation on
+// older ones) and calls the handler again with the answer in
+// InputResponses.
 //
-// The intent: clients that DO support elicitation (Claude Desktop,
-// etc.) get a confirmation pop-up; clients that don't are unchanged.
-// Agents that want to bypass confirmation entirely can pass ack=true.
-func confirmDestructive(
-	ctx context.Context,
-	req *mcpsdk.CallToolRequest,
-	dryRun, ack bool,
-	message string,
-) (bool, string) {
-	if dryRun || ack {
-		return true, ""
+// ack=true means the agent already has the user's approval. A client
+// that cannot prompt is refused with a reason naming ack=true, the
+// same contract as the CLI refusing a destructive prompt without a
+// TTY.
+func confirmDestructive(req *mcpsdk.CallToolRequest, ack bool, message string) (*mcpsdk.CallToolResult, string) {
+	if ack {
+		return nil, ""
 	}
+	if req != nil && req.Params != nil {
+		if res, ok := req.Params.InputResponses[confirmInputID].(*mcpsdk.ElicitResult); ok {
+			if res.Action == "accept" {
+				return nil, ""
+			}
+			return nil, "user answered " + res.Action
+		}
+	}
+	if !canElicit(req) {
+		return nil, "confirmation required: " + message + " This client cannot prompt; re-run with ack=true once the user has approved."
+	}
+	return &mcpsdk.CallToolResult{InputRequests: mcpsdk.InputRequestMap{
+		confirmInputID: &mcpsdk.ElicitParams{
+			Mode:            "form",
+			Message:         message,
+			RequestedSchema: map[string]any{"type": "object", "properties": map[string]any{}},
+		},
+	}}, ""
+}
+
+func canElicit(req *mcpsdk.CallToolRequest) bool {
 	if req == nil || req.Session == nil {
-		return true, ""
+		return false
 	}
-	res, err := req.Session.Elicit(ctx, &mcpsdk.ElicitParams{
-		Mode:    "confirmation",
-		Message: message,
-	})
-	if err != nil || res == nil {
-		// Client doesn't support elicitation (or it errored). Fall
-		// through — refusing would break non-interactive agents that
-		// can't even ask the question.
-		return true, ""
-	}
-	switch res.Action {
-	case "accept":
-		return true, ""
-	case "decline":
-		return false, "user declined"
-	case "cancel":
-		return false, "user cancelled"
-	default:
-		return false, "user action: " + res.Action
-	}
+	ip := req.Session.InitializeParams()
+	return ip != nil && ip.Capabilities != nil && ip.Capabilities.Elicitation != nil
 }
 
 // runHookPhase synchronously executes one hook phase. Mirrors cmd's
