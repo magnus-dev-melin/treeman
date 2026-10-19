@@ -222,6 +222,15 @@ func (s *Store) RegisterEventHook(id string, fn EventHook) {
 	s.hookMu.Unlock()
 }
 
+// EventHookCount reports how many event hooks are registered.
+// Introspection seam for the subscription lifecycle: a closed
+// subscriber must leave none behind.
+func (s *Store) EventHookCount() int {
+	s.hookMu.RLock()
+	defer s.hookMu.RUnlock()
+	return len(s.hooks)
+}
+
 // UnregisterEventHook removes the named hook. No-op when the id was
 // never registered. Idempotent.
 func (s *Store) UnregisterEventHook(id string) {
@@ -531,52 +540,66 @@ func applyMigrations(ctx context.Context, db *sql.DB) error {
 	if err != nil {
 		return err
 	}
+	// One pinned connection so BEGIN IMMEDIATE and its COMMIT share a
+	// session: the write lock is taken BEFORE the "already applied?"
+	// check, so the daemon and a CLI opening the store right after an
+	// upgrade can't both see a migration as pending and the loser fail
+	// with "duplicate column" / "table already exists".
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("migration connection: %w", err)
+	}
+	defer func() { _ = conn.Close() }()
 	for _, e := range entries {
 		if e.IsDir() {
 			continue
 		}
 		// File names are `NNNN_name.sql`.
 		var version int
-		_, err := fmt.Sscanf(e.Name(), "%04d_", &version)
-		if err != nil {
-			continue
-		}
-		var existing int
-		row := db.QueryRowContext(ctx,
-			"SELECT COUNT(*) FROM _treeman_migrations WHERE version = ?", version)
-		if err := row.Scan(&existing); err != nil {
-			return fmt.Errorf("query _treeman_migrations: %w", err)
-		}
-		if existing > 0 {
+		if _, err := fmt.Sscanf(e.Name(), "%04d_", &version); err != nil {
 			continue
 		}
 		body, err := migrationsFS.ReadFile("migrations/" + e.Name())
 		if err != nil {
 			return err
 		}
-		tx, err := db.BeginTx(ctx, nil)
-		if err != nil {
-			return err
-		}
-		if _, err := tx.ExecContext(ctx, string(body)); err != nil {
-			if rbErr := tx.Rollback(); rbErr != nil && !errors.Is(rbErr, sql.ErrTxDone) {
-				return fmt.Errorf("apply migration %s: %w (rollback: %w)", e.Name(), err, rbErr)
-			}
+		if err := applyMigration(ctx, conn, version, e.Name(), string(body)); err != nil {
 			return fmt.Errorf("apply migration %s: %w", e.Name(), err)
-		}
-		if _, err := tx.ExecContext(ctx,
-			"INSERT INTO _treeman_migrations(version, filename, applied_at) VALUES (?,?,?)",
-			version, e.Name(), nowMillis()); err != nil {
-			if rbErr := tx.Rollback(); rbErr != nil && !errors.Is(rbErr, sql.ErrTxDone) {
-				return fmt.Errorf("%w (rollback: %w)", err, rbErr)
-			}
-			return err
-		}
-		if err := tx.Commit(); err != nil {
-			return err
 		}
 	}
 	return nil
+}
+
+// applyMigration applies one migration unless it is recorded already,
+// checking and applying under a single write lock.
+func applyMigration(ctx context.Context, conn *sql.Conn, version int, name, body string) (err error) {
+	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		return fmt.Errorf("begin: %w", err)
+	}
+	defer func() {
+		if err == nil {
+			_, err = conn.ExecContext(ctx, "COMMIT")
+			return
+		}
+		if _, rbErr := conn.ExecContext(ctx, "ROLLBACK"); rbErr != nil {
+			err = fmt.Errorf("%w (rollback: %w)", err, rbErr)
+		}
+	}()
+	var applied bool
+	if err := conn.QueryRowContext(ctx,
+		"SELECT EXISTS(SELECT 1 FROM _treeman_migrations WHERE version = ?)", version).Scan(&applied); err != nil {
+		return fmt.Errorf("query _treeman_migrations: %w", err)
+	}
+	if applied {
+		return nil
+	}
+	if _, err := conn.ExecContext(ctx, body); err != nil {
+		return err
+	}
+	_, err = conn.ExecContext(ctx,
+		"INSERT INTO _treeman_migrations(version, filename, applied_at) VALUES (?,?,?)",
+		version, name, nowMillis())
+	return err
 }
 
 func nowMillis() int64 { return time.Now().UnixMilli() }
@@ -924,14 +947,18 @@ func (s *Store) RemoveRepo(ctx context.Context, repoID int64) error {
 
 	stmts := []string{
 		`DELETE FROM hook_runs WHERE worktree_id IN (SELECT id FROM worktrees WHERE repo_id = ?)`,
-		`DELETE FROM events    WHERE repo_id = ? OR worktree_id IN (SELECT id FROM worktrees WHERE repo_id = ?)`,
+		// Two deletes, not one OR across columns: each is served by its
+		// own index (idx_events_repo, idx_events_worktree).
+		`DELETE FROM events    WHERE repo_id = ?`,
+		`DELETE FROM events    WHERE worktree_id IN (SELECT id FROM worktrees WHERE repo_id = ?)`,
 		`DELETE FROM snapshots WHERE repo_id = ?`,
 		`DELETE FROM worktrees WHERE repo_id = ?`,
 		`DELETE FROM repos     WHERE id = ?`,
 	}
 	args := [][]any{
 		{repoID},
-		{repoID, repoID},
+		{repoID},
+		{repoID},
 		{repoID},
 		{repoID},
 		{repoID},

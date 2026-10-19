@@ -143,11 +143,11 @@ func (d *Driver) tryPhysicalSnapshotCreate(ctx context.Context, source, template
 
 	// Recreate every table on the template + discard its tablespace.
 	// One connection so we don't churn USE statements; defer reset.
-	prepConn, err := d.DB.Conn(ctx)
+	prepConn, releasePrepConn, err := sessionConn(ctx, d.DB)
 	if err != nil {
 		return false, err
 	}
-	defer func() { _ = prepConn.Close() }()
+	defer releasePrepConn()
 	// Disable FK / unique checks for the whole DDL pass: tables are
 	// recreated in alphabetic order, so an `orders` table whose
 	// CREATE references `products` would error out if FKs validate
@@ -171,11 +171,11 @@ func (d *Driver) tryPhysicalSnapshotCreate(ctx context.Context, source, template
 
 	// FLUSH lock taken on a dedicated connection so it survives the
 	// per-table IMPORTs below. UNLOCK runs from this same connection.
-	lockConn, err := d.DB.Conn(ctx)
+	lockConn, releaseLockConn, err := sessionConn(ctx, d.DB)
 	if err != nil {
 		return false, err
 	}
-	defer func() { _ = lockConn.Close() }()
+	defer releaseLockConn()
 	flushList := make([]string, 0, len(tables))
 	for _, t := range tables {
 		qt, qerr := ident.QuoteMySQL(t)

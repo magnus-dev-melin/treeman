@@ -256,11 +256,53 @@ func (o DatabaseOverlay) validate(path string) error {
 		errs = appendIfErr(errs, validateTemplate(path+".key_prefix", o.KeyPrefix, template.Scope{}))
 	}
 	if o.TestClones != nil && o.TestClones.NameTemplate != "" {
-		errs = appendIfErr(errs, validateTemplate(
-			path+".test_clones.name_template", o.TestClones.NameTemplate,
-			template.Scope{AllowN: true}))
+		errs = appendIfErr(errs, validateCloneTemplate(path+".test_clones.name_template", o.TestClones.NameTemplate))
 	}
 	return errors.Join(errs...)
+}
+
+// validateCloneTemplate checks a test_clones.name_template: known keys
+// only, and exactly one {n}. Without {n} every clone renders the same
+// name; teardown matches clones as <before {n}><digits><after {n}>, so
+// a second {n} would make its names unmatchable.
+func validateCloneTemplate(path, tmpl string) error {
+	if err := validateTemplate(path, tmpl, template.Scope{AllowN: true}); err != nil {
+		return err
+	}
+	keys, err := template.Keys(tmpl)
+	if err != nil {
+		return fmt.Errorf("%s: %w", path, err)
+	}
+	if n := countKey(keys, "n"); n != 1 {
+		return fmt.Errorf("%s: %q must contain {n} exactly once (found %d) so each clone gets its own name", path, tmpl, n)
+	}
+	return nil
+}
+
+// validateWorktreeScoped checks that a top-level name_template /
+// key_prefix renders a different namespace per worktree. Without a
+// slug key every worktree shares one database, and tearing one down
+// drops it for all. The main_worktree overlay is exempt: the main
+// worktree is a single checkout and may bind a bare name.
+func validateWorktreeScoped(path, tmpl string) error {
+	keys, err := template.Keys(tmpl)
+	if err != nil {
+		return fmt.Errorf("%s: %w", path, err)
+	}
+	if countKey(keys, "slug")+countKey(keys, "slug_dash") == 0 {
+		return fmt.Errorf("%s: %q must contain {slug} or {slug_dash} so each worktree gets its own namespace", path, tmpl)
+	}
+	return nil
+}
+
+func countKey(keys []string, key string) int {
+	n := 0
+	for _, k := range keys {
+		if k == key {
+			n++
+		}
+	}
+	return n
 }
 
 // validate enforces that container / compose_service are not both
@@ -395,6 +437,26 @@ func (d DatabaseConfig) validateFamily(fam engine.Family, path string) error {
 	}
 }
 
+// validateNamespace checks the field that names the per-worktree
+// namespace: name_template for name-scoped engines, key_prefix for
+// prefix-scoped ones. It must be set, and (outside the file family,
+// whose default base is the worktree itself) reference a slug key.
+func (d DatabaseConfig) validateNamespace(fam engine.Family, path string) error {
+	if fam.Scope() == engine.ScopePrefix {
+		if d.KeyPrefix == "" {
+			return fmt.Errorf("%s: key_prefix is required for engine %q (used to compute the per-worktree namespace)", path, d.Engine)
+		}
+		return validateWorktreeScoped(path+".key_prefix", d.KeyPrefix)
+	}
+	if d.NameTemplate == "" {
+		return fmt.Errorf("%s: name_template is required for engine %q (used to compute the per-worktree database name)", path, d.Engine)
+	}
+	if fam == engine.FamilyFile {
+		return nil
+	}
+	return validateWorktreeScoped(path+".name_template", d.NameTemplate)
+}
+
 func (d DatabaseConfig) validate(path string) error {
 	var errs []error
 	if d.Engine == "" {
@@ -404,8 +466,8 @@ func (d DatabaseConfig) validate(path string) error {
 	if !ok {
 		return fmt.Errorf("%s: unknown engine %q (allowed: %s)", path, d.Engine, engine.KnownList())
 	}
-	if fam.Scope() == engine.ScopeName && d.NameTemplate == "" {
-		return fmt.Errorf("%s: name_template is required for engine %q (used to compute the per-worktree database name)", path, d.Engine)
+	if err := d.validateNamespace(fam, path); err != nil {
+		return err
 	}
 	// Per-family constraint checks (S3, file-backed).
 	if err := d.validateFamily(fam, path); err != nil {
@@ -440,9 +502,7 @@ func (d DatabaseConfig) validate(path string) error {
 		}
 	}
 	if d.TestClones != nil && d.TestClones.NameTemplate != "" {
-		errs = appendIfErr(errs, validateTemplate(
-			path+".test_clones.name_template", d.TestClones.NameTemplate,
-			template.Scope{AllowN: true}))
+		errs = appendIfErr(errs, validateCloneTemplate(path+".test_clones.name_template", d.TestClones.NameTemplate))
 	}
 
 	// branch_scoped and the test-clone fanout are mutually exclusive. A

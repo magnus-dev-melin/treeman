@@ -54,6 +54,11 @@ type logsWaitOut struct {
 // enough that the chosen polling interval doesn't matter relative to
 // the time the agent saved by not polling itself.
 func logsWaitTool(ctx context.Context, _ *mcpsdk.CallToolRequest, in logsWaitIn) (*mcpsdk.CallToolResult, logsWaitOut, error) {
+	levels, err := store.ParseLevels(in.Levels)
+	if err != nil {
+		return nil, logsWaitOut{}, err
+	}
+	in.Levels = levels
 	minCount := in.MinCount
 	if minCount <= 0 {
 		minCount = 1
@@ -74,7 +79,7 @@ func logsWaitTool(ctx context.Context, _ *mcpsdk.CallToolRequest, in logsWaitIn)
 
 	// Build the filter once. WorktreeID resolution mirrors logs_query.
 	f := store.EventFilter{
-		Levels:      validateLevels(in.Levels),
+		Levels:      in.Levels,
 		EventTypes:  in.EventTypes,
 		Phases:      in.Phases,
 		PayloadLike: in.PayloadLike,
@@ -182,6 +187,11 @@ func logsSubscribeTool(
 	req *mcpsdk.CallToolRequest,
 	in logsSubscribeIn,
 ) (*mcpsdk.CallToolResult, logsSubscribeOut, error) {
+	levels, err := store.ParseLevels(in.Levels)
+	if err != nil {
+		return nil, logsSubscribeOut{}, err
+	}
+	in.Levels = levels
 	minCount := in.MinCount
 	if minCount <= 0 {
 		minCount = 1
@@ -237,7 +247,7 @@ func subscribePushPath(
 	stream, cancel, err := rpc.SubscribeEvents(ctx, rpc.EventSubscribeArgs{
 		RepoPath:     resolvedRepo,
 		WorktreePath: resolvedWT,
-		Levels:       validateLevels(in.Levels),
+		Levels:       in.Levels,
 		EventTypes:   in.EventTypes,
 		Phases:       in.Phases,
 		PayloadLike:  in.PayloadLike,
@@ -300,7 +310,7 @@ func pushAnchor(ctx context.Context, in logsSubscribeIn) int64 {
 	}
 	defer func() { _ = st.Close() }()
 	f := store.EventFilter{
-		Levels:      validateLevels(in.Levels),
+		Levels:      in.Levels,
 		EventTypes:  in.EventTypes,
 		Phases:      in.Phases,
 		PayloadLike: in.PayloadLike,
@@ -329,7 +339,7 @@ func subscribePollPath(
 	defer func() { _ = st.Close() }()
 
 	f := store.EventFilter{
-		Levels:      validateLevels(in.Levels),
+		Levels:      in.Levels,
 		EventTypes:  in.EventTypes,
 		Phases:      in.Phases,
 		PayloadLike: in.PayloadLike,
@@ -682,8 +692,17 @@ func configDiffTool(ctx context.Context, _ *mcpsdk.CallToolRequest, in configDif
 		return nil, configDiffOut{Repo: baseLabel}, fmt.Errorf("marshal proposed config: %w", err)
 	}
 	var curMap, newMap map[string]any
-	_ = json.Unmarshal(curJSON, &curMap)
-	_ = json.Unmarshal(newJSON, &newMap)
+	if err := json.Unmarshal(curJSON, &curMap); err != nil {
+		return nil, configDiffOut{Repo: baseLabel}, fmt.Errorf("decode current config: %w", err)
+	}
+	if err := json.Unmarshal(newJSON, &newMap); err != nil {
+		return nil, configDiffOut{Repo: baseLabel}, fmt.Errorf("decode proposed config: %w", err)
+	}
+	// The current side is the env-substituted resolved config, so it
+	// holds real credentials; redact both sides before they reach the
+	// client. A changed secret still shows up as a changed path.
+	curMap, _ = redactValue("", curMap).(map[string]any)
+	newMap, _ = redactValue("", newMap).(map[string]any)
 
 	changes := diffMaps("", curMap, newMap)
 	out := configDiffOut{Repo: baseLabel, Parsed: true, Changes: changes}

@@ -454,9 +454,13 @@ type filterScope struct {
 }
 
 func buildFilterWithScope(ctx context.Context, c *cli.Command) (filterScope, error) {
+	levels, err := store.ParseLevels(c.StringSlice("level"))
+	if err != nil {
+		return filterScope{}, err
+	}
 	scope := filterScope{
 		Filter: store.EventFilter{
-			Levels:      validateLevels(c.StringSlice("level")),
+			Levels:      levels,
 			EventTypes:  c.StringSlice("event-type"),
 			Phases:      c.StringSlice("phase"),
 			PayloadLike: c.String("payload"),
@@ -591,23 +595,6 @@ func printScopePreamble(s filterScope, asJSON bool) {
 		return
 	}
 	fmt.Fprintf(os.Stderr, "# scope: worktree=%s (--all to widen)\n", s.WorktreeName)
-}
-
-// validateLevels normalises and rejects unknown level tokens early
-// rather than letting the SQL silently return zero rows.
-func validateLevels(in []string) []string {
-	if len(in) == 0 {
-		return nil
-	}
-	allowed := map[string]bool{"debug": true, "info": true, "warn": true, "error": true}
-	out := make([]string, 0, len(in))
-	for _, v := range in {
-		v = strings.ToLower(v)
-		if allowed[v] {
-			out = append(out, v)
-		}
-	}
-	return out
 }
 
 // parseSince accepts either a duration (`10m`, `2h`) or an absolute

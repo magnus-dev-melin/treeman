@@ -56,12 +56,20 @@ func Start(ctx context.Context) (int, error) {
 		return 0, fmt.Errorf("treemand not on PATH: %w", err)
 	}
 	cmd := exec.Command(binPath) //nolint:noctx // detached daemon fork; must outlive caller ctx
-	cmd.Env = daemonEnvironment(os.Environ())
-	cmd.Stdin = nil
-	cmd.Stdout, _ = os.OpenFile(os.DevNull, os.O_WRONLY, 0)
-	cmd.Stderr = cmd.Stdout
-	if err := cmd.Start(); err != nil {
+	if err := detach(cmd); err != nil {
 		return 0, err
+	}
+	cmd.Env = daemonEnvironment(os.Environ())
+	devNull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	if err != nil {
+		return 0, fmt.Errorf("open %s for treemand output: %w", os.DevNull, err)
+	}
+	// The child gets its own descriptor; ours is only needed until it
+	// starts.
+	defer func() { _ = devNull.Close() }()
+	cmd.Stdout, cmd.Stderr = devNull, devNull
+	if err := cmd.Start(); err != nil {
+		return 0, fmt.Errorf("start %s: %w", binPath, err)
 	}
 	pid := cmd.Process.Pid
 	_ = cmd.Process.Release()

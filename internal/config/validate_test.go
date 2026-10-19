@@ -115,14 +115,68 @@ func TestValidate(t *testing.T) {
 		{
 			name: "redis without name_template ok",
 			cfg: Config{
-				Databases: []DatabaseConfig{{Engine: "redis"}},
+				Databases: []DatabaseConfig{{Engine: "redis", KeyPrefix: "app:{slug}:"}},
 			},
 			want: "",
 		},
 		{
 			name: "elasticsearch without name_template ok",
 			cfg: Config{
-				Databases: []DatabaseConfig{{Engine: "elasticsearch"}},
+				Databases: []DatabaseConfig{{Engine: "elasticsearch", KeyPrefix: "app_{slug}_"}},
+			},
+			want: "",
+		},
+		{
+			name: "redis without key_prefix rejected",
+			cfg: Config{
+				Databases: []DatabaseConfig{{Engine: "redis"}},
+			},
+			want: "key_prefix is required for engine \"redis\"",
+		},
+		{
+			name: "name_template without a slug key rejected",
+			cfg: Config{
+				Databases: []DatabaseConfig{{Engine: "mysql", NameTemplate: "app_testing"}},
+			},
+			want: "must contain {slug} or {slug_dash}",
+		},
+		{
+			name: "key_prefix without a slug key rejected",
+			cfg: Config{
+				Databases: []DatabaseConfig{{Engine: "elasticsearch", KeyPrefix: "app_"}},
+			},
+			want: "must contain {slug} or {slug_dash}",
+		},
+		{
+			name: "slug_dash satisfies the slug requirement",
+			cfg: Config{
+				Databases: []DatabaseConfig{{Engine: "s3", KeyPrefix: "myapp-{slug_dash}"}},
+			},
+			want: "",
+		},
+		{
+			name: "test_clones template without {n} rejected",
+			cfg: Config{
+				Databases: []DatabaseConfig{{
+					Engine:       "mysql",
+					NameTemplate: "app_{slug}",
+					TestClones:   &TestClonesSpec{Clones: ClonesSetting{Fixed: 2}, NameTemplate: "app_{slug}_test"},
+				}},
+			},
+			want: "must contain {n} exactly once",
+		},
+		{
+			name: "main_worktree overlay may bind a bare name",
+			cfg: Config{
+				Databases: []DatabaseConfig{{
+					Engine:       "mysql",
+					NameTemplate: "app_{slug}",
+					TestClones:   &TestClonesSpec{Clones: ClonesSetting{Fixed: 2}, NameTemplate: "app_{slug}_test_{n}"},
+				}},
+				MainWorktree: MainWorktreeConfig{Databases: []DatabaseOverlay{{
+					NameTemplate: "app",
+					TestClones:   &TestClonesSpec{Clones: ClonesSetting{Fixed: 2}, NameTemplate: "app_test_{n}"},
+				}}},
 			},
 			want: "",
 		},
@@ -131,7 +185,7 @@ func TestValidate(t *testing.T) {
 			cfg: Config{
 				Databases: []DatabaseConfig{
 					{Engine: "mysql", NameTemplate: "app_{slug}"},
-					{Engine: "redis"},
+					{Engine: "redis", KeyPrefix: "app:{slug}:"},
 				},
 			},
 			want: "",
@@ -242,9 +296,9 @@ func TestValidate(t *testing.T) {
 			name: "prewarm rejects engines without the spare capability",
 			cfg: Config{
 				Databases: []DatabaseConfig{{
-					Engine:       "redis",
-					NameTemplate: "app_{slug}",
-					Prewarm:      2,
+					Engine:    "redis",
+					KeyPrefix: "app:{slug}:",
+					Prewarm:   2,
 				}},
 			},
 			want: "prewarm is not supported",

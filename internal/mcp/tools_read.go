@@ -514,7 +514,8 @@ func configGetTool(ctx context.Context, _ *mcpsdk.CallToolRequest, in configGetI
 		if err != nil {
 			return nil, nil, err
 		}
-		return nil, redactMap(map[string]any{"scope": "global", "path": path, "config": cfg}), nil
+		out, err := redactMap(map[string]any{"scope": "global", "path": path, "config": cfg})
+		return nil, out, err
 	}
 	if in.Scope != "" && !strings.EqualFold(in.Scope, "repo") {
 		return nil, nil, fmt.Errorf("invalid scope %q (want repo|global)", in.Scope)
@@ -531,24 +532,24 @@ func configGetTool(ctx context.Context, _ *mcpsdk.CallToolRequest, in configGetI
 	if in.Resolved {
 		out["resolved"] = resolve.Resolve(&cfg, repoRoot)
 	}
-	return nil, redactMap(out), nil
+	redactedOut, err := redactMap(out)
+	return nil, redactedOut, err
 }
 
-// redactMap round-trips `m` through JSON + redactSecrets so any
-// embedded password / token / URL-userinfo strings are scrubbed
-// regardless of how deeply nested they sit. Cheap: configs are
-// small and this only runs on tool invocation.
-func redactMap(m map[string]any) map[string]any {
-	b, err := json.Marshal(m)
+// redactMap round-trips `m` through JSON and redacts it structurally:
+// values under secret-named keys go, and credentials are scrubbed from
+// every other string however deeply nested. Cheap: configs are small
+// and this only runs on tool invocation.
+func redactMap(m map[string]any) (map[string]any, error) {
+	b, err := redactedJSON(m, false)
 	if err != nil {
-		return m
+		return nil, fmt.Errorf("redact config: %w", err)
 	}
-	clean := redactSecrets(string(b))
 	var out map[string]any
-	if err := json.Unmarshal([]byte(clean), &out); err != nil {
-		return m
+	if err := json.Unmarshal(b, &out); err != nil {
+		return nil, fmt.Errorf("redact config: %w", err)
 	}
-	return out
+	return out, nil
 }
 
 type configHistoryIn struct {
@@ -929,6 +930,10 @@ func filterEventsByRegex(events []store.Event, re *regexp.Regexp, limit int) []s
 }
 
 func logsQueryTool(ctx context.Context, _ *mcpsdk.CallToolRequest, in logsQueryIn) (*mcpsdk.CallToolResult, logsQueryOut, error) {
+	levels, err := store.ParseLevels(in.Levels)
+	if err != nil {
+		return nil, logsQueryOut{}, err
+	}
 	limit := clampLogLimit(in.Limit)
 	var re *regexp.Regexp
 	if in.Regex != "" {
@@ -945,7 +950,7 @@ func logsQueryTool(ctx context.Context, _ *mcpsdk.CallToolRequest, in logsQueryI
 		fetchLimit = 5000
 	}
 	f := store.EventFilter{
-		Levels:      validateLevels(in.Levels),
+		Levels:      levels,
 		EventTypes:  in.EventTypes,
 		Phases:      in.Phases,
 		PayloadLike: in.PayloadLike,
@@ -982,21 +987,6 @@ func logsQueryTool(ctx context.Context, _ *mcpsdk.CallToolRequest, in logsQueryI
 	return nil, logsQueryOut{Events: store.EventsJSON(events)}, nil
 }
 
-func validateLevels(in []string) []string {
-	if len(in) == 0 {
-		return nil
-	}
-	allowed := map[string]bool{"debug": true, "info": true, "warn": true, "error": true}
-	out := make([]string, 0, len(in))
-	for _, v := range in {
-		v = strings.ToLower(v)
-		if allowed[v] {
-			out = append(out, v)
-		}
-	}
-	return out
-}
-
 func parseSince(s string) (time.Time, error) {
 	if d, err := time.ParseDuration(s); err == nil {
 		return time.Now().Add(-d), nil
@@ -1010,25 +1000,38 @@ func parseSince(s string) (time.Time, error) {
 }
 
 func lookupRepoID(ctx context.Context, st *store.Store, root string) (int64, error) {
-	var id int64
-	row := st.DB.QueryRowContext(ctx, `SELECT id FROM repos WHERE path = ?`, root)
-	if err := row.Scan(&id); err != nil {
-		return 0, err
+	id, err := st.LookupRepoID(ctx, root)
+	if err != nil {
+		return 0, fmt.Errorf("look up repo %s: %w", root, err)
+	}
+	if id == 0 {
+		return 0, fmt.Errorf("repo %s is not enrolled", root)
 	}
 	return id, nil
 }
 
 // applyRepoWorktreeFilter resolves the optional repo/worktree scope onto
-// an EventFilter. A resolvable repo sets RepoID (lookup failures are
-// ignored — an unmatched repo simply leaves the filter unscoped); a
-// non-empty worktree must resolve or the call errors so a typo never
-// silently widens the query.
+// an EventFilter. An explicit repo or worktree must resolve, or the
+// call errors: a typo must never silently widen the query (or, for
+// logs_purge, the delete). With only a worktree given, the repo is
+// taken from the request's workspace when it resolves, and the
+// worktree lookup spans every repo otherwise.
 func applyRepoWorktreeFilter(ctx context.Context, st *store.Store, f *store.EventFilter, repo, worktree string) error {
 	if repo == "" && worktree == "" {
 		return nil
 	}
-	if repoRoot, err := resolveRepo(ctx, repo); err == nil && repoRoot != "" {
-		if rid, err := lookupRepoID(ctx, st, repoRoot); err == nil && rid > 0 {
+	if repo != "" {
+		repoRoot, err := resolveRepo(ctx, repo)
+		if err != nil {
+			return fmt.Errorf("resolve repo %q: %w", repo, err)
+		}
+		rid, err := lookupRepoID(ctx, st, repoRoot)
+		if err != nil {
+			return err
+		}
+		f.RepoID = rid
+	} else if repoRoot, err := resolveRepo(ctx, ""); err == nil {
+		if rid, err := lookupRepoID(ctx, st, repoRoot); err == nil {
 			f.RepoID = rid
 		}
 	}

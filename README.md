@@ -257,7 +257,7 @@ commands as a substitute. A writable per-build directory isolates SQLite
 (including WAL/SHM sidecars) and scratch files; do not point concurrent builds
 at one `TREEMAN_DB_PATH`. When two jobs can run the same branch on one
 machine (or share a DB server), set `TREEMAN_SLUG_SUFFIX` to a
-job-unique value (`$GITHUB_RUN_ID`, job id, …) so the `main_<branch>`
+job-unique value (`$GITHUB_RUN_ID`, job id, …) so the `main_<branch>_<tag>`
 slug namespace — and with it every rendered database name — stays
 disjoint per job.
 

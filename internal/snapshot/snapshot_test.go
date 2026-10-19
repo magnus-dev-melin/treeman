@@ -1,6 +1,8 @@
 package snapshot
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -72,5 +74,26 @@ func TestTemplateNameDeterministic(t *testing.T) {
 	k2 := New("mysql", "8.0", "", "filename", "abc", "dump1", map[string]string{"composer.lock": "x"})
 	if k1.TemplateName() != k2.TemplateName() {
 		t.Errorf("expected deterministic names: %s vs %s", k1.TemplateName(), k2.TemplateName())
+	}
+}
+
+func TestLockfileHashesKeepsSameNamedFilesApart(t *testing.T) {
+	dir := t.TempDir()
+	a := filepath.Join(dir, "frontend", "package-lock.json")
+	b := filepath.Join(dir, "backend", "package-lock.json")
+	for p, body := range map[string]string{a: "a", b: "b"} {
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := LockfileHashesFor([]string{a, b})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[a] == "" || got[a] == got[b] {
+		t.Fatalf("hashes = %v, want one distinct entry per path", got)
 	}
 }

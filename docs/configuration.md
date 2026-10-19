@@ -154,6 +154,15 @@ worktree's slug:
 | `{target_db}` | the rendered per-run DB name (only in `migrate.env` / `seed.env`) |
 | `{n}` | test-clone index, 1-based (only in `test_clones.name_template`) |
 
+A `databases[]` entry's `name_template` (or `key_prefix` for Redis,
+Elasticsearch and S3) must contain `{slug}` or `{slug_dash}`, so each
+worktree gets its own namespace. The file engines are exempt, because
+their path resolves inside the worktree. A `test_clones.name_template`
+must contain `{n}` exactly once. The `main_worktree.databases[]` overlay
+may bind bare names (`app_dev`), since the main checkout is a single
+worktree. Teardown drops exactly the names it owns: the source database,
+plus the databases whose names match the test-clone pattern.
+
 ## Fully declarative — no hidden defaults
 
 treeman runs against what `.treeman.yaml` says, not what it
@@ -329,7 +338,7 @@ unconditionally:
 | ------------------ | ---------------------------------------------------------------------- |
 | `TREEMAN_MAIN_ROOT`| Absolute path of the repo root (`git rev-parse --show-toplevel`).      |
 | `TREEMAN_WORKTREE` | Absolute path of the worktree firing the hook.                         |
-| `TREEMAN_SLUG`     | The slug used to name resources for this run (e.g. `feature_x`, `main_develop`). |
+| `TREEMAN_SLUG`     | The slug used to name resources for this run (e.g. `kon_1234_1a2b3c4d`, `main_develop_5e6f7a8b`). |
 | `TREEMAN_IS_MAIN`  | `"1"` when the firing worktree is the repo root with main-wt enabled, else `"0"`. Branch on this to skip dev-only setup on linked worktrees, or vice versa. |
 
 `file-change` hooks additionally receive `TREEMAN_WATCH_PATH`,
@@ -356,7 +365,8 @@ checkout doesn't get its own per-branch databases.
 
 `main_worktree:` opts the repo root into the same lifecycle. Once
 enabled, flipping a branch at the repo root produces per-branch
-databases keyed by `main_<branch>` (instead of every non-ticket
+databases keyed by `main_<branch>_<tag>`, where the tag is a hash of
+the exact branch name (instead of every non-ticket
 branch collapsing to one path-hash slug), and the checkout /
 file-change / create-* hooks fire against the repo root the
 same way they do for linked worktrees.

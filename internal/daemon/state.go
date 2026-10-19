@@ -518,6 +518,8 @@ const (
 	lblDBDropDrain       = "db:drop:drain"
 	lblNotify            = "notify:dispatch"
 	lblPlanLane          = "plan:lane"
+	lblPlanTask          = "plan:task"
+	lblSubscribeHangup   = "subscribe:hangup"
 )
 
 // safeGo runs fn in a daemon goroutine with panic recovery (delegates
@@ -527,13 +529,19 @@ func safeGo(label, detail string, fn func()) {
 	safego.Go(label, detail, fn)
 }
 
-// LockRepoTeardown returns the per-repo teardown mutex, creating it
-// on first call. Callers must `Lock()` on entry and `Unlock()` on
-// exit — typically with `defer mu.Unlock()` immediately after the
-// `Lock()`. Serialises every TeardownWorktree goroutine for a given
-// repo so concurrent teardown invocations queue instead of fanning out
-// disk + DB I/O.
-func (st *State) LockRepoTeardown(repoPath string) *sync.Mutex {
+// withRepoTeardown runs fn holding the per-repo teardown mutex, which
+// serialises the git operations of every TeardownWorktree for a repo
+// so concurrent teardowns queue instead of fanning out disk + DB I/O.
+// The unlock is deferred: a panic in fn (recovered by safego) must not
+// leave every later teardown in the repo blocked forever.
+func (st *State) withRepoTeardown(repoPath string, fn func()) {
+	mu := st.repoTeardownLock(repoPath)
+	mu.Lock()
+	defer mu.Unlock()
+	fn()
+}
+
+func (st *State) repoTeardownLock(repoPath string) *sync.Mutex {
 	st.teardownMu.Lock()
 	defer st.teardownMu.Unlock()
 	mu, ok := st.teardownLks[repoPath]
@@ -544,13 +552,20 @@ func (st *State) LockRepoTeardown(repoPath string) *sync.Mutex {
 	return mu
 }
 
-// LockWorktreePrepare returns the per-worktree engine-prepare mutex,
-// creating it on first call. Every caller that runs prepare.Run /
-// prepare.RunFiltered for a worktree must hold it across that call, so
-// concurrent builds queue instead of colliding on the same source
-// database (see prepareLks). Same usage contract as LockRepoTeardown:
-// `Lock()` on entry, `Unlock()` on exit.
-func (st *State) LockWorktreePrepare(wtPath string) *sync.Mutex {
+// withWorktreePrepare runs fn holding the per-worktree engine-prepare
+// mutex. Every caller that runs prepare.Run / prepare.RunFiltered for a
+// worktree must go through it, so concurrent builds queue instead of
+// colliding on the same source database (see prepareLks). The unlock is
+// deferred: a panic in fn (recovered by safego) must not leave every
+// later prepare, finalize or reset of the worktree blocked forever.
+func (st *State) withWorktreePrepare(wtPath string, fn func()) {
+	mu := st.worktreePrepareLock(wtPath)
+	mu.Lock()
+	defer mu.Unlock()
+	fn()
+}
+
+func (st *State) worktreePrepareLock(wtPath string) *sync.Mutex {
 	st.prepareMu.Lock()
 	defer st.prepareMu.Unlock()
 	mu, ok := st.prepareLks[wtPath]

@@ -632,7 +632,7 @@ func RunFiltered(
 	}
 	// Serialise against any other prepare of this worktree — including
 	// ones in other processes (`finalize --local`, the MCP server) that
-	// the daemon's in-process LockWorktreePrepare cannot see (#123).
+	// the daemon's in-process withWorktreePrepare cannot see (#123).
 	// Two builds of the same source database drop and reload it under
 	// each other and leave it half-migrated.
 	unlock, err := wtlock.Acquire(ctx, wtlock.Prepare, worktreePath, func() {
@@ -3606,28 +3606,29 @@ func keyFromWalks(
 ) snapshot.Key {
 	// 1. Fold each glob's per-file hashes into one entry, keyed by the
 	//    glob so the user can tell from the SQLite row what changed.
-	//    Basename-keyed so fingerprints stay byte-identical to the
-	//    historical fold.
+	//    Files are keyed by worktree-relative path: unique within the
+	//    glob, and identical across worktrees so templates stay shared.
 	inputHashes := map[string]string{}
 	for _, w := range walks {
-		baseHash := make(map[string]string, len(w.hashByAbs))
+		relHash := make(map[string]string, len(w.hashByAbs))
 		for abs, h := range w.hashByAbs {
-			baseHash[filepath.Base(abs)] = h
+			rel, err := filepath.Rel(worktreePath, abs)
+			if err != nil {
+				rel = abs
+			}
+			relHash[filepath.ToSlash(rel)] = h
 		}
 		var sb strings.Builder
-		for _, k := range sortedKeys(baseHash) {
-			sb.WriteString(k + ":" + baseHash[k] + "\n")
+		for _, k := range sortedKeys(relHash) {
+			sb.WriteString(k + ":" + relHash[k] + "\n")
 		}
 		inputHashes[w.glob] = sb.String()
 	}
 
 	// 2. Hash every dump file in declared ORDER and fold them into a
 	//    single DumpHashHex. Order matters: two dumps in different
-	//    sequence can produce different DB state. For exactly ONE
-	//    dump the result is byte-identical to the v5 single-dump hash
-	//    (basename lookup against LockfileHashesForWithCache), so
-	//    single-dump configs keep their existing templates instead of
-	//    force-rebuilding when this array refactor lands.
+	//    sequence can produce different DB state. A single dump's hash
+	//    is the file's own hash.
 	dumpHash := ""
 	if len(d.Dump) > 0 {
 		absPaths := make([]string, 0, len(d.Dump))
@@ -3636,7 +3637,7 @@ func keyFromWalks(
 		}
 		hashes, _ := snapshot.LockfileHashesForWithCache(ctx, st, absPaths)
 		if len(d.Dump) == 1 {
-			dumpHash = hashes[filepath.Base(absPaths[0])]
+			dumpHash = hashes[absPaths[0]]
 		} else {
 			h := blake3.New(32, nil)
 			for i, dn := range d.Dump {
@@ -3647,7 +3648,7 @@ func keyFromWalks(
 				// worktree reuse — see snapshot.FormatVersion v5).
 				_, _ = h.Write([]byte(dn.Path))
 				_, _ = h.Write([]byte{0})
-				_, _ = h.Write([]byte(hashes[filepath.Base(absPaths[i])]))
+				_, _ = h.Write([]byte(hashes[absPaths[i]]))
 				_, _ = h.Write([]byte{0})
 			}
 			dumpHash = hex.EncodeToString(h.Sum(nil))
@@ -3983,26 +3984,11 @@ func teardownSlugsVia(
 			if !ok || !engineconn.Configured(cfg, fam, d.Connection) {
 				continue
 			}
-			tmpl := d.NameTemplate
-			if fam.Scope() == engine.ScopePrefix {
-				if d.KeyPrefix == "" {
-					continue
-				}
-				tmpl = d.KeyPrefix
-			}
-			target, err := template.Render(tmpl, tplCtx)
+			target, err := teardownTarget(ctx, cfg, st, worktreeID, d, fam, tplCtx)
 			if err != nil {
 				slog.Warn("batch teardown", "slug", sl, "engine", d.Engine, "err", err)
 				failed = true
 				continue
-			}
-			if fam == engine.FamilyFile {
-				target, err = fileTeardownTarget(ctx, cfg, st, worktreeID, d.Connection, target)
-				if err != nil {
-					slog.Warn("batch teardown", "slug", sl, "engine", d.Engine, "err", err)
-					failed = true
-					continue
-				}
 			}
 			conn, err := pool.get(ctx, cfg, fam, d.Connection, connect)
 			if err != nil {
@@ -4010,7 +3996,10 @@ func teardownSlugsVia(
 				failed = true
 				continue
 			}
-			if err := teardownGeneric(ctx, string(fam), target, sl, repoID, worktreeID, st, conn.DropMatching); err != nil {
+			drop := func(ctx context.Context, t string) (int, error) {
+				return dropOwned(ctx, conn, fam, t, d.TestClones, tplCtx)
+			}
+			if err := teardownGeneric(ctx, string(fam), target, sl, repoID, worktreeID, st, drop); err != nil {
 				slog.Warn("batch teardown", "slug", sl, "engine", d.Engine, "err", err)
 				failed = true
 			}
@@ -4055,35 +4044,19 @@ func teardownOne(
 	if !engineconn.Configured(cfg, fam, d.Connection) {
 		return nil
 	}
-	// Name-scoped engines (mysql/postgres/mongo) reap the rendered
-	// name_template family; prefix-scoped engines (redis/es) reap the
-	// rendered key_prefix, which is required.
-	tmpl := d.NameTemplate
-	if fam.Scope() == engine.ScopePrefix {
-		if d.KeyPrefix == "" {
-			return fmt.Errorf("%s: missing key_prefix", fam)
-		}
-		tmpl = d.KeyPrefix
-	}
-	target, err := template.Render(tmpl, tplCtx)
+	target, err := teardownTarget(ctx, cfg, st, worktreeID, d, fam, tplCtx)
 	if err != nil {
 		return err
-	}
-	if fam == engine.FamilyFile {
-		// The file family's "name" is a rendered relative path; resolve
-		// it onto the same base prepare used, so teardown reaps the
-		// file that was actually built.
-		target, err = fileTeardownTarget(ctx, cfg, st, worktreeID, d.Connection, target)
-		if err != nil {
-			return err
-		}
 	}
 	conn, _, err := engineconn.Connect(ctx, cfg, fam, d.Connection)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = conn.Close() }()
-	return teardownGeneric(ctx, string(fam), target, sl, repoID, worktreeID, st, conn.DropMatching)
+	return teardownGeneric(ctx, string(fam), target, sl, repoID, worktreeID, st,
+		func(ctx context.Context, t string) (int, error) {
+			return dropOwned(ctx, conn, fam, t, d.TestClones, tplCtx)
+		})
 }
 
 // fileTeardownTarget resolves a rendered file-family name_template

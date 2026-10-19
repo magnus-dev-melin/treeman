@@ -72,6 +72,15 @@ type SpareClaimer interface {
 	ClaimSpare(ctx context.Context, spare, target string) error
 }
 
+// DatabaseDropper is the capability of dropping exactly one named
+// database, never a prefix family. The name-scoped server engines
+// (MySQL, Postgres, Mongo) implement it; worktree teardown drops the
+// names it owns through it so a bare or short name can't reach a
+// sibling worktree's databases.
+type DatabaseDropper interface {
+	DropDatabase(ctx context.Context, name string) error
+}
+
 // NewPostgresConn wraps an already-connected driver in the Conn view —
 // for sites that hold the concrete driver and want the capability
 // interfaces without re-dialing.
@@ -97,6 +106,8 @@ func (c mysqlConn) ClaimSpare(ctx context.Context, spare, target string) error {
 }
 
 type mysqlConn struct{ d *dbmysql.Driver }
+
+func (c mysqlConn) DropDatabase(ctx context.Context, n string) error { return c.d.DropDatabase(ctx, n) }
 
 func (c mysqlConn) Close() error                                      { return c.d.Close() }
 func (c mysqlConn) EngineVersion(ctx context.Context) (string, error) { return c.d.EngineVersion(ctx) }
@@ -128,6 +139,10 @@ func (c mysqlConn) SizeKB(ctx context.Context, n string) int64 {
 }
 
 type postgresConn struct{ d *dbpostgres.Driver }
+
+func (c postgresConn) DropDatabase(ctx context.Context, n string) error {
+	return c.d.DropDatabase(ctx, n)
+}
 
 func (c postgresConn) Close() error { return c.d.Close() }
 func (c postgresConn) EngineVersion(ctx context.Context) (string, error) {
@@ -163,6 +178,8 @@ type mongoConn struct {
 	d   *dbmongo.Driver
 	ctx context.Context
 }
+
+func (c mongoConn) DropDatabase(ctx context.Context, n string) error { return c.d.DropDatabase(ctx, n) }
 
 func (c mongoConn) Close() error                                      { return c.d.Close(c.ctx) }
 func (c mongoConn) EngineVersion(ctx context.Context) (string, error) { return c.d.EngineVersion(ctx) }

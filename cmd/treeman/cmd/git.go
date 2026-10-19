@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -71,10 +72,19 @@ func repoFlag() cli.Flag {
 	return &cli.StringFlag{Name: "repo", Aliases: []string{"r"}, Usage: "worktree/repo dir (default: cwd)"}
 }
 
-// currentBranch returns the checked-out branch of dir, or "" if
-// detached. Fork-free HEAD-file read.
-func currentBranch(ctx context.Context, dir string) string {
-	return gitenv.DetectBranch(ctx, dir)
+// currentBranch returns the branch checked out in the worktree that
+// contains dir — dir may be any subdirectory of it — or "" on a
+// detached HEAD. It asks git rather than reading <dir>/.git/HEAD,
+// which exists only at the worktree root.
+func currentBranch(ctx context.Context, dir string) (string, error) {
+	out, err := gitcmd.String(ctx, dir, "symbolic-ref", "--short", "-q", "HEAD")
+	if err == nil {
+		return out, nil
+	}
+	if ge, ok := errors.AsType[*gitcmd.Error](err); ok && ge.ExitCode == 1 {
+		return "", nil
+	}
+	return "", fmt.Errorf("read current branch in %s: %w", dir, err)
 }
 
 // std wires a git subprocess to the terminal.
@@ -96,7 +106,11 @@ func gitCommit() *cli.Command {
 			if err != nil {
 				return err
 			}
-			prefix := gitx.TicketPrefix(currentBranch(ctx, dir))
+			branch, err := currentBranch(ctx, dir)
+			if err != nil {
+				return err
+			}
+			prefix := gitx.TicketPrefix(branch)
 
 			// No terminal (script / agent): the args ARE the message —
 			// commit directly, same ticket-prefix treatment, no TUI.
@@ -155,7 +169,10 @@ func gitPush() *cli.Command {
 			if err != nil {
 				return err
 			}
-			branch := currentBranch(ctx, dir)
+			branch, err := currentBranch(ctx, dir)
+			if err != nil {
+				return err
+			}
 			if branch == "" {
 				return errors.New("detached HEAD; nothing to push")
 			}
@@ -216,8 +233,10 @@ func gitAdd() *cli.Command {
 					return err
 				}
 			}
-			porcelain, _ := gitcmd.String(ctx, dir, "status", "--porcelain")
-			rows := expandStageRows(dir, gitx.StageRows(porcelain))
+			rows, err := stageRows(ctx, dir)
+			if err != nil {
+				return err
+			}
 			if len(rows) == 0 {
 				ui.Info("Nothing to stage.")
 				return nil
@@ -264,6 +283,16 @@ func sortStageRows(rows []gitx.StageRow) {
 		}
 		return rows[i].Path < rows[j].Path
 	})
+}
+
+// stageRows lists the worktree's stageable changes, untracked
+// directories expanded into their files.
+func stageRows(ctx context.Context, dir string) ([]gitx.StageRow, error) {
+	out, err := gitcmd.Output(ctx, dir, "status", "--porcelain", "-z")
+	if err != nil {
+		return nil, err
+	}
+	return expandStageRows(dir, gitx.StageRows(string(out))), nil
 }
 
 // expandStageRows walks untracked directories into their contained
@@ -335,7 +364,11 @@ func gitDiff() *cli.Command {
 				}
 				target = "origin/" + target
 			}
-			cur := currentBranch(ctx, dir)
+			cur, err := currentBranch(ctx, dir)
+			if err != nil {
+				return err
+			}
+			cur = cmp.Or(cur, "HEAD")
 			spec := cur + "..." + target
 			if c.Bool("patch") {
 				out, err := gitcmd.Output(ctx, dir, "diff", spec)
@@ -394,7 +427,11 @@ func gitPull() *cli.Command {
 				return runGit(ctx, dir, "pull", "origin", branch)
 			}
 			// Ensure an upstream so a bare `git pull` works on a fresh branch.
-			if branch := currentBranch(ctx, dir); branch != "" {
+			branch, err := currentBranch(ctx, dir)
+			if err != nil {
+				return err
+			}
+			if branch != "" {
 				if gitcmd.RunOptional(ctx, dir, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}") != nil {
 					_ = gitcmd.Run(ctx, dir, "branch", "--set-upstream-to=origin/"+branch)
 				}
@@ -518,21 +555,60 @@ func gitWipe() *cli.Command {
 				if !c.Bool("yes") && !ui.ConfirmYes("Wipe working changes + entire stash stack?") {
 					return nil
 				}
-				_ = gitcmd.Run(ctx, dir, "stash", "push", "-u")
+				if err := gitcmd.Run(ctx, dir, "stash", "push", "-u"); err != nil {
+					return err
+				}
 				return gitcmd.Run(ctx, dir, "stash", "clear")
 			}
-			if dirty, _ := gitenv.HasWorkingTreeChanges(ctx, dir); !dirty {
+			dirty, err := gitenv.HasWorkingTreeChanges(ctx, dir)
+			if err != nil {
+				return err
+			}
+			if !dirty {
 				return nil
 			}
 			if !c.Bool("yes") && !ui.ConfirmYes("Wipe non-pushed changes on local branch?") {
 				return nil
 			}
-			if err := gitcmd.Run(ctx, dir, "stash", "push", "-u"); err != nil {
+			wiped, err := wipeChanges(ctx, dir)
+			if err != nil {
 				return err
 			}
-			return gitcmd.Run(ctx, dir, "stash", "drop")
+			if !wiped {
+				ui.Info("Nothing git stash can wipe (e.g. only submodule changes).")
+			}
+			return nil
 		},
 	}
+}
+
+func wipeChanges(ctx context.Context, dir string) (bool, error) {
+	before, err := stashTip(ctx, dir)
+	if err != nil {
+		return false, err
+	}
+	if err := gitcmd.Run(ctx, dir, "stash", "push", "-u"); err != nil {
+		return false, err
+	}
+	after, err := stashTip(ctx, dir)
+	if err != nil {
+		return false, err
+	}
+	if after == before {
+		return false, nil
+	}
+	return true, gitcmd.Run(ctx, dir, "stash", "drop", "--quiet", "stash@{0}")
+}
+
+func stashTip(ctx context.Context, dir string) (string, error) {
+	out, err := gitcmd.String(ctx, dir, "rev-parse", "--verify", "--quiet", "refs/stash")
+	if err == nil {
+		return out, nil
+	}
+	if ge, ok := errors.AsType[*gitcmd.Error](err); ok && ge.ExitCode == 1 {
+		return "", nil
+	}
+	return "", fmt.Errorf("read stash tip in %s: %w", dir, err)
 }
 
 // gitLog — `treeman git log` (was gl). Interactive multi-select log;

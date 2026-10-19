@@ -22,12 +22,9 @@
 package mcp_write_e2e
 
 import (
-	"bufio"
 	"context"
 	"database/sql"
-	"encoding/json"
 	"fmt"
-	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -56,10 +53,6 @@ func TestMCPWriteTools(t *testing.T) {
 		_ = c.Close()
 		return nil
 	})
-
-	repoRoot := projectRoot(t)
-	binDir := t.TempDir()
-	buildBin(t, binDir, repoRoot, "treeman", "./cmd/treeman")
 
 	// Isolated state so we don't trip over the developer's daemon.
 	stateDir := t.TempDir()
@@ -103,46 +96,14 @@ databases:
 	mustGit(t, mainRepo, "add", "-A")
 	mustGit(t, mainRepo, "commit", "-q", "-m", "init")
 
-	srv := startMCPServer(t, binDir, mainRepo)
-
-	// MCP handshake.
-	srv.send(map[string]any{
-		"jsonrpc": "2.0",
-		"id":      1,
-		"method":  "initialize",
-		"params": map[string]any{
-			"protocolVersion": "2024-11-05",
-			"capabilities":    map[string]any{},
-			"clientInfo":      map[string]any{"name": "treeman-e2e", "version": "0.0.0"},
-		},
-	})
-	if resp := srv.read(); resp["error"] != nil {
-		t.Fatalf("initialize: %v", resp["error"])
-	}
-	srv.send(map[string]any{
-		"jsonrpc": "2.0",
-		"method":  "notifications/initialized",
-	})
+	srv := harness.StartMCPServer(t, mainRepo)
 
 	// ── worktree_create ─────────────────────────────────────────────
 	branch := "feature/mcpw"
-	srv.send(map[string]any{
-		"jsonrpc": "2.0",
-		"id":      2,
-		"method":  "tools/call",
-		"params": map[string]any{
-			"name": "worktree_create",
-			"arguments": map[string]any{
-				"branch": branch,
-				"repo":   mainRepo,
-			},
-		},
-	})
-	resp := srv.read()
-	if errObj := resp["error"]; errObj != nil {
-		t.Fatalf("worktree_create error: %v", errObj)
+	res, toolErr := srv.CallTool("worktree_create", map[string]any{"branch": branch, "repo": mainRepo})
+	if toolErr != "" {
+		t.Fatalf("worktree_create error: %s", toolErr)
 	}
-	res := decodeStructuredResult(t, resp)
 	t.Logf("worktree_create result: %+v", res)
 
 	// Structured-result shape: must include wt_path, slug, status.
@@ -177,46 +138,24 @@ databases:
 	})
 
 	// ── idempotent re-create ─────────────────────────────────────────
-	srv.send(map[string]any{
-		"jsonrpc": "2.0",
-		"id":      3,
-		"method":  "tools/call",
-		"params": map[string]any{
-			"name": "worktree_create",
-			"arguments": map[string]any{
-				"branch": branch,
-				"repo":   mainRepo,
-			},
-		},
-	})
-	resp = srv.read()
-	if errObj := resp["error"]; errObj != nil {
-		t.Fatalf("worktree_create (re-run) error: %v", errObj)
+	res, toolErr = srv.CallTool("worktree_create", map[string]any{"branch": branch, "repo": mainRepo})
+	if toolErr != "" {
+		t.Fatalf("worktree_create (re-run) error: %s", toolErr)
 	}
-	res = decodeStructuredResult(t, resp)
 	if got, _ := res["status"].(string); got != "noop" {
 		t.Errorf("re-run status = %q, want noop", got)
 	}
 
 	// ── worktree_delete ─────────────────────────────────────────────
-	srv.send(map[string]any{
-		"jsonrpc": "2.0",
-		"id":      4,
-		"method":  "tools/call",
-		"params": map[string]any{
-			"name": "worktree_delete",
-			"arguments": map[string]any{
-				"name":  branch,
-				"repo":  mainRepo,
-				"force": true, // bypass confirmation (it's a no-op for MCP anyway)
-			},
-		},
+	res, toolErr = srv.CallTool("worktree_delete", map[string]any{
+		"name":  branch,
+		"repo":  mainRepo,
+		"force": true,
+		"ack":   true,
 	})
-	resp = srv.read()
-	if errObj := resp["error"]; errObj != nil {
-		t.Fatalf("worktree_delete error: %v", errObj)
+	if toolErr != "" {
+		t.Fatalf("worktree_delete error: %s", toolErr)
 	}
-	res = decodeStructuredResult(t, resp)
 	delStatus, _ := res["status"].(string)
 	// queued = daemon dispatch; inline = daemon unreachable and the
 	// teardown ran synchronously in-process (the daemon-less fallback —
@@ -237,106 +176,6 @@ databases:
 }
 
 // ── helpers ──────────────────────────────────────────────────────
-
-type mcpServer struct {
-	t      *testing.T
-	stdin  io.WriteCloser
-	rdr    *bufio.Reader
-	cancel context.CancelFunc
-}
-
-func startMCPServer(t *testing.T, binDir, cwd string) *mcpServer {
-	t.Helper()
-	ctx, cancel := context.WithCancel(context.Background())
-	cmd := exec.CommandContext(ctx, filepath.Join(binDir, "treeman"), "mcp")
-	cmd.Dir = cwd
-	cmd.Env = os.Environ()
-	cmd.Stderr = os.Stderr
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		cancel()
-		t.Fatal(err)
-	}
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		cancel()
-		t.Fatal(err)
-	}
-	if err := cmd.Start(); err != nil {
-		cancel()
-		t.Fatalf("start mcp: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = stdin.Close()
-		cancel()
-		_ = cmd.Process.Kill()
-		_, _ = cmd.Process.Wait()
-	})
-	return &mcpServer{t: t, stdin: stdin, rdr: bufio.NewReader(stdout), cancel: cancel}
-}
-
-func (m *mcpServer) send(req map[string]any) {
-	m.t.Helper()
-	body, err := json.Marshal(req)
-	if err != nil {
-		m.t.Fatal(err)
-	}
-	if _, err := m.stdin.Write(append(body, '\n')); err != nil {
-		m.t.Fatalf("write: %v", err)
-	}
-}
-
-func (m *mcpServer) read() map[string]any {
-	m.t.Helper()
-	line, err := m.rdr.ReadBytes('\n')
-	if err != nil && err != io.EOF {
-		m.t.Fatalf("read: %v", err)
-	}
-	if len(line) == 0 {
-		m.t.Fatal("empty response")
-	}
-	var resp map[string]any
-	if err := json.Unmarshal(line, &resp); err != nil {
-		m.t.Fatalf("parse %q: %v", string(line), err)
-	}
-	return resp
-}
-
-// decodeStructuredResult pulls the embedded structuredContent out of
-// the mcp-sdk's CallToolResult envelope. The shape is:
-//
-//	{ "result": { "structuredContent": { …tool output… } } }
-func decodeStructuredResult(t *testing.T, resp map[string]any) map[string]any {
-	t.Helper()
-	result, ok := resp["result"].(map[string]any)
-	if !ok {
-		t.Fatalf("response missing result: %+v", resp)
-	}
-	if sc, ok := result["structuredContent"].(map[string]any); ok {
-		return sc
-	}
-	// Older SDK shape — fall back to result itself.
-	return result
-}
-
-func projectRoot(t *testing.T) string {
-	t.Helper()
-	wd, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	return filepath.Dir(filepath.Dir(wd))
-}
-
-func buildBin(t *testing.T, binDir, repoRoot, name, pkg string) {
-	t.Helper()
-	cmd := exec.Command("go", "build", "-o", filepath.Join(binDir, name), pkg)
-	cmd.Dir = repoRoot
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("build %s: %v", name, err)
-	}
-}
 
 func mustGit(t *testing.T, dir string, args ...string) {
 	t.Helper()

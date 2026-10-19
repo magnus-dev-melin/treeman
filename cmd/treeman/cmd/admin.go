@@ -14,6 +14,7 @@ import (
 	"github.com/urfave/cli/v3"
 	"gopkg.in/yaml.v3"
 
+	"github.com/stubbedev/treeman/internal/atomicfile"
 	"github.com/stubbedev/treeman/internal/config"
 	"github.com/stubbedev/treeman/internal/resolve"
 	"github.com/stubbedev/treeman/internal/snapshot"
@@ -331,16 +332,16 @@ never wipe the whole table.
 			&cli.BoolFlag{Name: "json"},
 		},
 		Action: func(ctx context.Context, c *cli.Command) error {
-			if c.String("repo") == "" && c.String("worktree") == "" && c.String("older-than") == "" &&
-				len(c.StringSlice("level")) == 0 && len(c.StringSlice("event-type")) == 0 {
-				return errors.New("at least one filter (--repo, --worktree, --older-than, --level, --event-type) is required")
-			}
 			// Build the purge filter as task params; the daemon owns the
 			// DELETE (single SQLite writer). Scope paths are resolved to
 			// absolute here — the daemon's cwd is not the user's.
 			params := map[string]string{}
-			if lv := validateLevels(c.StringSlice("level")); len(lv) > 0 {
-				params["levels"] = strings.Join(lv, ",")
+			levels, err := store.ParseLevels(c.StringSlice("level"))
+			if err != nil {
+				return err
+			}
+			if len(levels) > 0 {
+				params["levels"] = strings.Join(levels, ",")
 			}
 			if et := c.StringSlice("event-type"); len(et) > 0 {
 				params["event_types"] = strings.Join(et, ",")
@@ -541,7 +542,7 @@ func persistConfigBody(ctx context.Context, histRoot, path string, body []byte, 
 			_ = st.Close()
 		}
 	}
-	return yamlpatch.AtomicWrite(path, body)
+	return atomicfile.Write(path, body, 0o600)
 }
 
 // openDefaultStore opens the default SQLite event store.

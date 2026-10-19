@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -395,34 +396,90 @@ var osWriteFile = os.WriteFile
 
 // ─── elicitation guard ──────────────────────────────────────────────
 
-// TestConfirmDestructive_DryRunShortCircuits — dry_run=true must
-// always proceed (the destructive action is a no-op). Guards against
-// a regression that asks for confirmation on a dry-run.
-func TestConfirmDestructive_DryRunShortCircuits(t *testing.T) {
-	ok, reason := confirmDestructive(context.Background(), nil, true, false, "test")
-	if !ok || reason != "" {
-		t.Errorf("dry_run should proceed; got ok=%v reason=%q", ok, reason)
+func TestConfirmDestructive_AckSkipsPrompt(t *testing.T) {
+	ask, refused := confirmDestructive(nil, true, "Drop it?")
+	if ask != nil || refused != "" {
+		t.Errorf("ack should proceed; got ask=%v refused=%q", ask, refused)
 	}
 }
 
-// TestConfirmDestructive_AckSkipsElicit — ack=true means the agent
-// has already secured user approval. Must proceed without elicitation
-// so non-interactive flows aren't blocked.
-func TestConfirmDestructive_AckSkipsElicit(t *testing.T) {
-	ok, reason := confirmDestructive(context.Background(), nil, false, true, "test")
-	if !ok || reason != "" {
-		t.Errorf("ack should proceed; got ok=%v reason=%q", ok, reason)
+func TestConfirmDestructive_NilRequestRefuses(t *testing.T) {
+	ask, refused := confirmDestructive(nil, false, "Drop it?")
+	if ask != nil || !strings.Contains(refused, "ack=true") {
+		t.Errorf("nil request must refuse and name ack=true; got ask=%v refused=%q", ask, refused)
 	}
 }
 
-// TestConfirmDestructive_NilSessionFallthroughs — when there is no
-// session (e.g. tool called from a test or a one-shot CLI), elicitation
-// isn't possible; the helper must fall through to proceed rather than
-// refusing every destructive call.
-func TestConfirmDestructive_NilSessionFallthroughs(t *testing.T) {
-	ok, _ := confirmDestructive(context.Background(), nil, false, false, "test")
-	if !ok {
-		t.Errorf("nil session should fall through to proceed")
+type guardOut struct {
+	Ran     bool   `json:"ran"`
+	Refused string `json:"refused,omitempty"`
+}
+
+// guardCall drives a confirmDestructive-gated tool from a real
+// in-memory client, so the session carries that client's capabilities
+// and protocol version.
+func guardCall(t *testing.T, opts *mcpsdk.ClientOptions) guardOut {
+	t.Helper()
+	ctx := context.Background()
+	srv := mcpsdk.NewServer(&mcpsdk.Implementation{Name: "guard", Version: "v0"}, nil)
+	mcpsdk.AddTool(srv, &mcpsdk.Tool{Name: "guard"},
+		func(_ context.Context, req *mcpsdk.CallToolRequest, _ struct{}) (*mcpsdk.CallToolResult, guardOut, error) {
+			if ask, refused := confirmDestructive(req, false, "Drop it?"); ask != nil || refused != "" {
+				return ask, guardOut{Refused: refused}, nil
+			}
+			return nil, guardOut{Ran: true}, nil
+		})
+	ct, st := mcpsdk.NewInMemoryTransports()
+	ss, err := srv.Connect(ctx, st, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ss.Close() })
+	cs, err := mcpsdk.NewClient(&mcpsdk.Implementation{Name: "c", Version: "v0"}, opts).Connect(ctx, ct, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cs.Close() })
+	res, err := cs.CallTool(ctx, &mcpsdk.CallToolParams{Name: "guard"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out guardOut
+	raw, err := json.Marshal(res.StructuredContent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatalf("decode %s: %v", raw, err)
+	}
+	return out
+}
+
+func TestConfirmDestructive_ClientWithoutElicitationRefuses(t *testing.T) {
+	out := guardCall(t, nil)
+	if out.Ran || !strings.Contains(out.Refused, "ack=true") {
+		t.Errorf("client without elicitation must be refused; got %+v", out)
+	}
+}
+
+func TestConfirmDestructive_UserAnswerDecides(t *testing.T) {
+	for _, tc := range []struct {
+		action  string
+		wantRan bool
+	}{{"accept", true}, {"decline", false}, {"cancel", false}} {
+		var asked string
+		out := guardCall(t, &mcpsdk.ClientOptions{
+			ElicitationHandler: func(_ context.Context, req *mcpsdk.ElicitRequest) (*mcpsdk.ElicitResult, error) {
+				asked = req.Params.Mode + ": " + req.Params.Message
+				return &mcpsdk.ElicitResult{Action: tc.action}, nil
+			},
+		})
+		if out.Ran != tc.wantRan {
+			t.Errorf("action=%s: got %+v, want ran=%v", tc.action, out, tc.wantRan)
+		}
+		if asked != "form: Drop it?" {
+			t.Errorf("action=%s: prompt = %q, want a form elicitation with the message", tc.action, asked)
+		}
 	}
 }
 

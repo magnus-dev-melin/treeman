@@ -8,6 +8,8 @@ import (
 	"strings"
 
 	ini "gopkg.in/ini.v1"
+
+	"github.com/stubbedev/treeman/internal/atomicfile"
 )
 
 // PatchTOMLFile sets each (dotted-path, value) pair inside the TOML
@@ -36,8 +38,8 @@ func PatchTOMLFile(path string, pairs map[string]string) (Outcome, error) {
 	if !changed {
 		return Unchanged, nil
 	}
-	if err := os.WriteFile(path, []byte(out), 0o644); err != nil {
-		return Updated, fmt.Errorf("write %s: %w", path, err)
+	if err := atomicfile.Write(path, []byte(out), 0o644); err != nil {
+		return Updated, err
 	}
 	return Updated, nil
 }
@@ -82,8 +84,8 @@ func PatchINIFile(path string, pairs map[string]string) (Outcome, error) {
 	if !changed {
 		return Unchanged, nil
 	}
-	if err := os.WriteFile(path, []byte(out), 0o644); err != nil {
-		return Updated, fmt.Errorf("write %s: %w", path, err)
+	if err := atomicfile.Write(path, []byte(out), 0o644); err != nil {
+		return Updated, err
 	}
 	return Updated, nil
 }

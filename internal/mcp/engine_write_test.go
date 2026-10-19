@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	"go.mongodb.org/mongo-driver/v2/bson"
+
 	"github.com/stubbedev/treeman/internal/config"
 )
 
@@ -67,10 +69,41 @@ func TestESIsReadRequest(t *testing.T) {
 		{"POST", "_bulk", false},
 		{"PUT", "myindex", false},
 		{"DELETE", "myindex/_doc/1", false},
+		{"POST", "_search/template", true},
+		{"POST", "products_search/_doc", false},
+		{"POST", "idx/_delete_by_query?x=_count", false},
+		{"POST", "idx/_update_by_query", false},
 	}
 	for _, c := range cases {
-		if got := esIsReadRequest(c.method, c.path); got != c.read {
-			t.Errorf("esIsReadRequest(%s, %s) = %v, want %v", c.method, c.path, got, c.read)
+		got, err := esIsReadRequest(c.method, c.path)
+		if err != nil || got != c.read {
+			t.Errorf("esIsReadRequest(%s, %s) = %v, %v; want %v", c.method, c.path, got, err, c.read)
+		}
+	}
+	for _, path := range []string{"idx/_search#/../_delete_by_query", "idx/../_bulk", "./_search"} {
+		if _, err := esIsReadRequest("POST", path); err == nil {
+			t.Errorf("esIsReadRequest(POST, %s) must be refused", path)
+		}
+	}
+}
+
+func TestAssertReadOnlyMongoRejectsWritingAggregates(t *testing.T) {
+	for _, tc := range []struct {
+		cmd     string
+		wantErr bool
+	}{
+		{`{"aggregate":"c","pipeline":[{"$match":{}}],"cursor":{}}`, false},
+		{`{"aggregate":"c","pipeline":[{"$match":{}},{"$out":"victim"}],"cursor":{}}`, true},
+		{`{"aggregate":"c","pipeline":[{"$merge":{"into":"victim"}}],"cursor":{}}`, true},
+		{`{"insert":"c","documents":[{}]}`, true},
+		{`{"find":"c"}`, false},
+	} {
+		var cmd bson.D
+		if err := bson.UnmarshalExtJSON([]byte(tc.cmd), false, &cmd); err != nil {
+			t.Fatal(err)
+		}
+		if err := assertReadOnlyMongo(cmd); (err != nil) != tc.wantErr {
+			t.Errorf("assertReadOnlyMongo(%s) err = %v, wantErr %v", tc.cmd, err, tc.wantErr)
 		}
 	}
 }
@@ -84,5 +117,24 @@ func TestMongoCommand_WriteVerbGate(t *testing.T) {
 		DB: "x", CommandJSON: `{"insert":"users","documents":[{"a":1}]}`,
 	}); err == nil || !strings.Contains(err.Error(), "write=true") {
 		t.Fatalf("expected write-verb gate error, got %v", err)
+	}
+}
+
+// db_query / db_dump dereferenced an absent connections block and
+// panicked, killing the MCP server (shared by every client over HTTP).
+func TestEngineToolsRefuseUnconfiguredEngine(t *testing.T) {
+	repo := enrolledRepoDir(t)
+	ctx := context.Background()
+	if _, _, err := dbQueryTool(ctx, nil, dbQueryIn{Repo: repo, Engine: "redis", Query: "PING"}); err == nil ||
+		!strings.Contains(err.Error(), "connections.redis is not configured") {
+		t.Errorf("db_query: err = %v", err)
+	}
+	if _, _, err := dbDumpTool(ctx, nil, dbDumpIn{Repo: repo, Engine: "mysql", DB: "app", OutputDir: t.TempDir()}); err == nil ||
+		!strings.Contains(err.Error(), "connections.mysql is not configured") {
+		t.Errorf("db_dump: err = %v", err)
+	}
+	if _, _, err := dbSchemaDumpTool(ctx, nil, dbSchemaIn{Repo: repo, Engine: "postgres", DB: "app"}); err == nil ||
+		!strings.Contains(err.Error(), "connections.postgres is not configured") {
+		t.Errorf("db_schema_dump: err = %v", err)
 	}
 }

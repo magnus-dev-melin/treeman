@@ -18,6 +18,12 @@ CREATE TABLE product_audit (
 CREATE TRIGGER products_ai AFTER INSERT ON products
 FOR EACH ROW INSERT INTO product_audit (product_id) VALUES (NEW.id);
 
+-- Views: clones must replay them too, reading the clone's own tables
+-- (issue #144). a_cheap reads z_priced, so alphabetical order is the
+-- wrong creation order.
+CREATE VIEW z_priced AS SELECT id, name, price FROM products;
+CREATE VIEW a_cheap AS SELECT id, name FROM z_priced WHERE price < 20;
+
 INSERT INTO products (name, price) VALUES
   ('Widget', 9.99),
   ('Gadget', 19.99),

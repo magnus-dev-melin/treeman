@@ -19,7 +19,6 @@ import (
 
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
-	"go.mongodb.org/mongo-driver/v2/mongo/options"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -157,10 +156,15 @@ func (d *Driver) cloneCollection(ctx context.Context, source, dest, coll string)
 	return copyIndexes(ctx, srcDB.Collection(coll), d.Client.Database(dest).Collection(coll))
 }
 
-// copyIndexes reads the source's listIndexes output and re-creates
-// each non-`_id_` index on the destination. `_id_` is auto-created
-// by mongo on any new collection, so re-creating it surfaces an
-// IndexOptionsConflict-shaped error we silently drop.
+// copyIndexes replays the source's listIndexes specs onto the
+// destination through a raw createIndexes command. Each spec is kept as
+// listed — partialFilterExpression, expireAfterSeconds of any numeric
+// type, collation, text weights and every other option — minus `ns`,
+// the bookkeeping field older servers report and createIndexes refuses.
+// Whitelisting options by Go type dropped whatever didn't match: under
+// the v2 driver nested documents decode as bson.D, so a partial unique
+// index came back as a full unique one. `_id_` exists on every new
+// collection and is skipped.
 func copyIndexes(ctx context.Context, src, dst *mongo.Collection) error {
 	cur, err := src.Indexes().List(ctx)
 	if err != nil {
@@ -168,52 +172,38 @@ func copyIndexes(ctx context.Context, src, dst *mongo.Collection) error {
 	}
 	defer func() { _ = cur.Close(ctx) }()
 
-	var models []mongo.IndexModel
+	var specs bson.A
 	for cur.Next(ctx) {
-		var idx bson.M
-		if err := cur.Decode(&idx); err != nil {
+		var spec bson.D
+		if err := cur.Decode(&spec); err != nil {
 			return fmt.Errorf("decode index: %w", err)
 		}
-		name, _ := idx["name"].(string)
-		if name == "_id_" {
-			// Auto-created by mongo on collection birth; re-creating
-			// it triggers IndexOptionsConflict.
+		if indexName(spec) == "_id_" {
 			continue
 		}
-		keys, ok := idx["key"]
-		if !ok {
-			continue
-		}
-		// Strip server-side bookkeeping fields before round-tripping
-		// the index back through createIndexes.
-		opts := options.Index()
-		if name != "" {
-			opts.SetName(name)
-		}
-		if v, ok := idx["unique"].(bool); ok && v {
-			opts.SetUnique(true)
-		}
-		if v, ok := idx["sparse"].(bool); ok && v {
-			opts.SetSparse(true)
-		}
-		if v, ok := idx["partialFilterExpression"].(bson.M); ok {
-			opts.SetPartialFilterExpression(v)
-		}
-		if v, ok := idx["expireAfterSeconds"].(int32); ok {
-			opts.SetExpireAfterSeconds(v)
-		}
-		models = append(models, mongo.IndexModel{Keys: keys, Options: opts})
+		specs = append(specs, slices.DeleteFunc(spec, func(e bson.E) bool { return e.Key == "ns" }))
 	}
-	if len(models) == 0 {
+	if err := cur.Err(); err != nil {
+		return fmt.Errorf("list indexes: %w", err)
+	}
+	if len(specs) == 0 {
 		return nil
 	}
-	if _, err := dst.Indexes().CreateMany(ctx, models); err != nil {
-		// Conflict on a pre-existing identical index is fine.
-		if !isIndexConflict(err) {
-			return fmt.Errorf("createIndexes on dst: %w", err)
-		}
+	cmd := bson.D{{Key: "createIndexes", Value: dst.Name()}, {Key: "indexes", Value: specs}}
+	if err := dst.Database().RunCommand(ctx, cmd).Err(); err != nil && !isIndexConflict(err) {
+		return fmt.Errorf("createIndexes on %s: %w", dst.Name(), err)
 	}
 	return nil
+}
+
+func indexName(spec bson.D) string {
+	for _, e := range spec {
+		if e.Key == "name" {
+			name, _ := e.Value.(string)
+			return name
+		}
+	}
+	return ""
 }
 
 // isIndexConflict reports whether `err` is the "index already

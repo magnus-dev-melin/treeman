@@ -1,6 +1,7 @@
 package resolve
 
 import (
+	"net/url"
 	"os"
 	"path/filepath"
 	"testing"
@@ -258,5 +259,23 @@ func TestFillS3KeysFromEnv(t *testing.T) {
 				t.Errorf("keys = (%q, %q), want (%q, %q)", s.AccessKey, s.SecretKey, tc.wantAccess, tc.wantSK)
 			}
 		})
+	}
+}
+
+func TestUserInfoRoundTrips(t *testing.T) {
+	const user, pass = "app user", "p w+d:@/?#%"
+	u, err := url.Parse("mongodb://" + buildUserInfo(user, pass) + "h:27017")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p, _ := u.User.Password(); u.User.Username() != user || p != pass {
+		t.Errorf("buildUserInfo round trip = %q / %q", u.User.Username(), p)
+	}
+	r, err := url.Parse("redis://" + passwordOnlyUserInfo(pass) + "h:6379")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p, _ := r.User.Password(); p != pass {
+		t.Errorf("passwordOnlyUserInfo round trip = %q", p)
 	}
 }

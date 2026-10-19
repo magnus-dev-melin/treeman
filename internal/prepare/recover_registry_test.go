@@ -40,6 +40,11 @@ func (f *fakeConn) Exists(context.Context, string) (bool, error) {
 func (f *fakeConn) SizeKB(context.Context, string) int64       { return 0 }
 func (f *fakeConn) DropSnapshot(context.Context, string) error { return nil }
 
+func (f *fakeConn) DropDatabase(_ context.Context, name string) error {
+	_, err := f.DropMatching(context.Background(), name)
+	return err
+}
+
 func (f *fakeConn) DropMatching(_ context.Context, name string) (int, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -199,5 +200,88 @@ func TestClassifyMatchesEveryDatabase(t *testing.T) {
 	}
 	if got := w.classify("/repo/README.md"); len(got) != 0 {
 		t.Fatalf("unmatched path classified as %+v", got)
+	}
+}
+
+// collect starts a watcher over paths and returns a func that waits
+// for a dispatched event whose path ends in suffix.
+func collect(t *testing.T, repoRoot string, paths []config.WatcherPath) func(suffix string) {
+	t.Helper()
+	var mu sync.Mutex
+	var seen []string
+	w, err := New(repoRoot, paths, 50, func(_ context.Context, ev Event) error {
+		mu.Lock()
+		seen = append(seen, ev.Path)
+		mu.Unlock()
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = w.Start(t.Context()) }()
+	time.Sleep(150 * time.Millisecond)
+	return func(suffix string) {
+		t.Helper()
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			mu.Lock()
+			hit := slices.ContainsFunc(seen, func(p string) bool { return strings.HasSuffix(p, suffix) })
+			mu.Unlock()
+			if hit {
+				return
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		t.Fatalf("no event for %s; saw %v", suffix, seen)
+	}
+}
+
+// A literal input (the documented `composer.lock`) used to subscribe
+// the file itself, which WalkDir skips, so edits never re-prepared.
+func TestLiteralInputIsWatched(t *testing.T) {
+	repoRoot := t.TempDir()
+	lock := filepath.Join(repoRoot, "composer.lock")
+	if err := os.WriteFile(lock, []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	wait := collect(t, repoRoot, []config.WatcherPath{{Glob: "composer.lock"}})
+	if err := os.WriteFile(lock, []byte(`{"x":1}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	wait("composer.lock")
+}
+
+// `mkdir -p` (or a checkout) lands a whole subtree, files included,
+// before the watcher reads the first Create event. Nested dirs and the
+// files already inside them must still be seen — also when the glob's
+// static root did not exist at start.
+func TestNestedTreeCreatedAtOnceIsSeen(t *testing.T) {
+	repoRoot := t.TempDir()
+	wait := collect(t, repoRoot, []config.WatcherPath{{Glob: "db/migrations/**/*.sql"}})
+	nested := filepath.Join(repoRoot, "db", "migrations", "2026", "10")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(nested, "001_init.sql"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	wait("001_init.sql")
+}
+
+func TestRootOf(t *testing.T) {
+	for _, tc := range []struct {
+		glob string
+		want watchRoot
+	}{
+		{"composer.lock", watchRoot{dir: "."}},
+		{"backend/package-lock.json", watchRoot{dir: "backend"}},
+		{"database/migrations/**", watchRoot{dir: "database/migrations", recursive: true}},
+		{"**/migrations/*.py", watchRoot{dir: ".", recursive: true}},
+	} {
+		if got := rootOf(tc.glob); got != tc.want {
+			t.Errorf("rootOf(%q) = %+v, want %+v", tc.glob, got, tc.want)
+		}
 	}
 }

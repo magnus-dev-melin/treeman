@@ -8,10 +8,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -25,6 +27,7 @@ import (
 
 	"github.com/stubbedev/treeman/internal/config"
 	"github.com/stubbedev/treeman/internal/db/containerip"
+	"github.com/stubbedev/treeman/internal/db/engineconn"
 	dbes "github.com/stubbedev/treeman/internal/db/es"
 	"github.com/stubbedev/treeman/internal/db/ident"
 	dbmongo "github.com/stubbedev/treeman/internal/db/mongo"
@@ -345,6 +348,9 @@ func dbSchemaDumpTool(ctx context.Context, _ *mcpsdk.CallToolRequest, in dbSchem
 	if !ok {
 		return nil, out, fmt.Errorf("unsupported engine: %s", in.Engine)
 	}
+	if err := requireConnection(cfg, fam); err != nil {
+		return nil, out, err
+	}
 	switch fam {
 	case engine.FamilyMySQL:
 		schema, err = dbSchemaMySQL(ctx, cfg, in.DB)
@@ -413,10 +419,22 @@ func capSchemaTables(schema map[string]any, maxTables int) bool {
 	return truncated
 }
 
-func dbSchemaMySQL(ctx context.Context, cfg *config.Config, db string) (map[string]any, error) {
-	if cfg.Connections.Mysql == nil {
-		return nil, errors.New("connections.mysql not configured")
+// requireConnection refuses a server engine whose singular
+// connections block is absent, before a per-engine path dereferences
+// it — a nil dereference panicked the MCP server (over HTTP, the one
+// every client shares). The object store and file families have no
+// such block and report their own unsupported-operation errors.
+func requireConnection(cfg *config.Config, fam engine.Family) error {
+	if fam == engine.FamilyS3 || fam == engine.FamilyFile {
+		return nil
 	}
+	if !engineconn.Configured(cfg, fam, "") {
+		return fmt.Errorf("connections.%s is not configured for this repo", fam)
+	}
+	return nil
+}
+
+func dbSchemaMySQL(ctx context.Context, cfg *config.Config, db string) (map[string]any, error) {
 	drv, err := dbmysql.Connect(ctx, *cfg.Connections.Mysql)
 	if err != nil {
 		return nil, err
@@ -426,9 +444,6 @@ func dbSchemaMySQL(ctx context.Context, cfg *config.Config, db string) (map[stri
 }
 
 func dbSchemaPostgres(ctx context.Context, cfg *config.Config, db string) (map[string]any, error) {
-	if cfg.Connections.Postgres == nil {
-		return nil, errors.New("connections.postgres not configured")
-	}
 	drv, err := dbpostgres.Connect(ctx, *cfg.Connections.Postgres)
 	if err != nil {
 		return nil, err
@@ -438,9 +453,6 @@ func dbSchemaPostgres(ctx context.Context, cfg *config.Config, db string) (map[s
 }
 
 func dbSchemaMongo(ctx context.Context, cfg *config.Config, db string) (map[string]any, error) {
-	if cfg.Connections.Mongodb == nil {
-		return nil, errors.New("connections.mongodb not configured")
-	}
 	drv, err := dbmongo.Connect(ctx, *cfg.Connections.Mongodb)
 	if err != nil {
 		return nil, err
@@ -450,9 +462,6 @@ func dbSchemaMongo(ctx context.Context, cfg *config.Config, db string) (map[stri
 }
 
 func dbSchemaES(ctx context.Context, cfg *config.Config, db string) (map[string]any, error) {
-	if cfg.Connections.Elasticsearch == nil {
-		return nil, errors.New("connections.elasticsearch not configured")
-	}
 	drv, err := dbes.Connect(ctx, *cfg.Connections.Elasticsearch)
 	if err != nil {
 		return nil, err
@@ -461,9 +470,6 @@ func dbSchemaES(ctx context.Context, cfg *config.Config, db string) (map[string]
 }
 
 func dbSchemaRedis(ctx context.Context, cfg *config.Config, db string) (map[string]any, error) {
-	if cfg.Connections.Redis == nil {
-		return nil, errors.New("connections.redis not configured")
-	}
 	drv, err := dbredis.Connect(ctx, *cfg.Connections.Redis)
 	if err != nil {
 		return nil, err
@@ -519,6 +525,9 @@ func dbQueryTool(ctx context.Context, _ *mcpsdk.CallToolRequest, in dbQueryIn) (
 	if !ok {
 		return nil, out, fmt.Errorf("unsupported engine: %s", in.Engine)
 	}
+	if err := requireConnection(cfg, fam); err != nil {
+		return nil, out, err
+	}
 	switch fam {
 	case engine.FamilyMySQL:
 		rows, cols, affected, err = dbQueryMySQL(ctx, cfg, in)
@@ -566,15 +575,16 @@ func dbQueryMySQL(ctx context.Context, cfg *config.Config, in dbQueryIn) ([]any,
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("db %q: %w", in.DB, err)
 	}
-	if _, err := drv.DB.ExecContext(ctx, "USE "+qdb); err != nil {
+	// USE is per connection: pin one so the query runs where it ran.
+	conn, err := drv.DB.Conn(ctx)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("mysql connection: %w", err)
+	}
+	defer func() { _ = conn.Close() }()
+	if _, err := conn.ExecContext(ctx, "USE "+qdb); err != nil {
 		return nil, nil, nil, fmt.Errorf("use %s: %w", in.DB, err)
 	}
-	if in.Write {
-		rows, aff, err := execSQL(ctx, drv.DB, in.Query)
-		return rows, nil, aff, err
-	}
-	rows, cols, err := runSQLQuery(ctx, drv.DB, in.Query, in.Limit)
-	return rows, cols, nil, err
+	return runSQL(ctx, conn, in)
 }
 
 func dbQueryPostgres(ctx context.Context, cfg *config.Config, in dbQueryIn) ([]any, []string, *int64, error) {
@@ -593,18 +603,39 @@ func dbQueryPostgres(ctx context.Context, cfg *config.Config, in dbQueryIn) ([]a
 		return nil, nil, nil, err
 	}
 	defer func() { _ = scoped.Close() }()
+	return runSQL(ctx, scoped, in)
+}
+
+// sqlSession is the query surface shared by *sql.DB and *sql.Conn.
+type sqlSession interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, error)
+}
+
+// runSQL is db_query's SQL tail. A write executes the statement. A read
+// runs inside a READ ONLY transaction that is always rolled back, so the
+// engine itself refuses a mutation the leading-keyword check let
+// through (a data-modifying CTE, EXPLAIN ANALYZE of a DELETE). The
+// keyword check stays: MySQL DDL implicitly commits and would escape
+// the transaction.
+func runSQL(ctx context.Context, db sqlSession, in dbQueryIn) ([]any, []string, *int64, error) {
 	if in.Write {
-		rows, aff, err := execSQL(ctx, scoped, in.Query)
+		rows, aff, err := execSQL(ctx, db, in.Query)
 		return rows, nil, aff, err
 	}
-	rows, cols, err := runSQLQuery(ctx, scoped, in.Query, in.Limit)
+	tx, err := db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("begin read-only transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	rows, cols, err := runSQLQuery(ctx, tx, in.Query, in.Limit)
 	return rows, cols, nil, err
 }
 
 // execSQL runs a mutating statement and reports rows-affected (plus the
 // driver's last-insert-id when it exposes a useful one). The write path
 // for db_query's SQL engines.
-func execSQL(ctx context.Context, db *sql.DB, q string) ([]any, *int64, error) {
+func execSQL(ctx context.Context, db sqlSession, q string) ([]any, *int64, error) {
 	res, err := db.ExecContext(ctx, q)
 	if err != nil {
 		return nil, nil, err
@@ -678,6 +709,40 @@ var mongoReadCommands = map[string]bool{
 	"explain": true, "geosearch": true, "connectionstatus": true, "hello": true,
 }
 
+// assertReadOnlyMongo refuses a command whose verb isn't a read, and a
+// read-verb aggregate whose pipeline writes ($out / $merge replace or
+// merge into a collection).
+func assertReadOnlyMongo(cmd bson.D) error {
+	verb := strings.ToLower(cmd[0].Key)
+	if !mongoReadCommands[verb] {
+		return fmt.Errorf("mongo command %q is a write — set write=true and ack=true", cmd[0].Key)
+	}
+	if verb != "aggregate" {
+		return nil
+	}
+	for _, e := range cmd {
+		if e.Key != "pipeline" {
+			continue
+		}
+		stages, ok := e.Value.(bson.A)
+		if !ok {
+			return fmt.Errorf("mongo aggregate: pipeline is %T, want an array", e.Value)
+		}
+		for _, st := range stages {
+			doc, ok := st.(bson.D)
+			if !ok {
+				return fmt.Errorf("mongo aggregate: pipeline stage is %T, want a document", st)
+			}
+			for _, op := range doc {
+				if op.Key == "$out" || op.Key == "$merge" {
+					return fmt.Errorf("mongo aggregate stage %s writes a collection — set write=true and ack=true", op.Key)
+				}
+			}
+		}
+	}
+	return nil
+}
+
 // dbCommandMongo runs a raw Mongo command via RunCommand — the unified
 // read+write path. The command's first key decides read vs write: a read
 // verb runs with write=false; anything else needs write=true+ack (already
@@ -690,9 +755,10 @@ func dbCommandMongo(ctx context.Context, cfg *config.Config, in dbQueryIn) ([]an
 	if len(cmd) == 0 {
 		return nil, errors.New("command_json is empty")
 	}
-	verb := strings.ToLower(cmd[0].Key)
-	if !mongoReadCommands[verb] && !in.Write {
-		return nil, fmt.Errorf("mongo command %q is a write — set write=true and ack=true", cmd[0].Key)
+	if !in.Write {
+		if err := assertReadOnlyMongo(cmd); err != nil {
+			return nil, err
+		}
 	}
 	drv, err := dbmongo.Connect(ctx, *cfg.Connections.Mongodb)
 	if err != nil {
@@ -723,7 +789,7 @@ func dbQueryES(ctx context.Context, cfg *config.Config, in dbQueryIn) ([]any, er
 		body = `{"query":{"match_all":{}},"from":` + strconv.Itoa(in.Offset) + `,"size":` + strconv.Itoa(in.Limit) + `}`
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		drv.Base+"/"+idx+"/_search", strings.NewReader(body))
+		drv.Base+"/"+url.PathEscape(idx)+"/_search", strings.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -820,8 +886,12 @@ func esRequestTool(ctx context.Context, _ *mcpsdk.CallToolRequest, in esRequestI
 	if path == "" {
 		return nil, esRequestOut{}, errors.New("path is required")
 	}
+	read, err := esIsReadRequest(method, path)
+	if err != nil {
+		return nil, esRequestOut{}, err
+	}
 	// A non-read request is a mutation — gate it behind write+ack.
-	if !esIsReadRequest(method, path) {
+	if !read {
 		if !in.Write {
 			return nil, esRequestOut{}, fmt.Errorf("%s /%s looks like a write — set write=true (and ack=true) to run it", method, path)
 		}
@@ -882,22 +952,43 @@ func esRequestTool(ctx context.Context, _ *mcpsdk.CallToolRequest, in esRequestI
 	return nil, out, nil
 }
 
+// esReadAPIs are the endpoints that only read even when called with
+// POST (to carry a body).
+var esReadAPIs = map[string]bool{
+	"_search": true, "_count": true, "_msearch": true, "_mget": true, "_field_caps": true,
+	"_explain": true, "_validate": true, "_analyze": true, "_terms_enum": true, "_rank_eval": true,
+}
+
 // esIsReadRequest reports whether an ES REST call is non-mutating: any
-// GET/HEAD, plus POST to the read endpoints (_search/_count/_mget/…) that
-// conventionally use POST to carry a body. Everything else (PUT, DELETE,
-// POST to _doc/_bulk/_update/etc.) is treated as a write.
-func esIsReadRequest(method, path string) bool {
+// GET/HEAD, plus POST whose API (the first `_`-prefixed path segment,
+// e.g. _search in idx/_search/template) is a read endpoint. It parses
+// the path exactly as the request will send it, so an index named
+// products_search or a query string can't pass a write off as a read.
+// A fragment or a dot segment is refused: either would make the path
+// ES serves differ from the one classified here.
+func esIsReadRequest(method, path string) (bool, error) {
+	u, err := url.Parse(path)
+	if err != nil {
+		return false, fmt.Errorf("parse path %q: %w", path, err)
+	}
+	if u.Fragment != "" || strings.Contains(path, "#") {
+		return false, fmt.Errorf("path %q: fragments are not allowed", path)
+	}
+	segments := strings.Split(u.Path, "/")
+	if slices.Contains(segments, "..") || slices.Contains(segments, ".") {
+		return false, fmt.Errorf("path %q: dot segments are not allowed", path)
+	}
 	switch method {
 	case http.MethodGet, http.MethodHead:
-		return true
+		return true, nil
 	case http.MethodPost:
-		for _, ro := range []string{"_search", "_count", "_msearch", "_mget", "_field_caps", "_explain", "_validate", "_analyze", "_terms_enum", "_rank_eval"} {
-			if strings.Contains(path, ro) {
-				return true
+		for _, seg := range segments {
+			if strings.HasPrefix(seg, "_") {
+				return esReadAPIs[seg], nil
 			}
 		}
 	}
-	return false
+	return false, nil
 }
 
 // ─── snapshots_inspect ───────────────────────────────────────────────
@@ -996,10 +1087,8 @@ func snapshotDropTool(
 		out.DryRun = true
 		return nil, out, nil
 	}
-	if ok, reason := confirmDestructive(
-		ctx,
+	if ask, refused := confirmDestructive(
 		req,
-		false,
 		in.Ack,
 		fmt.Sprintf(
 			"Drop snapshot %s (engine=%s template=%s)? Engine template + SQLite row will be deleted.",
@@ -1007,17 +1096,34 @@ func snapshotDropTool(
 			rec.Engine,
 			rec.TemplateName,
 		),
-	); !ok {
-		out.Refused = reason
-		return nil, out, nil
+	); ask != nil || refused != "" {
+		out.Refused = refused
+		return ask, out, nil
 	}
 
-	cfg, cfgErr := loadCfgForRepo(ctx, in.Repo)
+	// The template lives on the server the snapshot's own repo config
+	// names, which need not be the caller's repo.
+	repo := in.Repo
+	if rec.RepoID != 0 {
+		p, err := st.RepoPath(ctx, rec.RepoID)
+		if err != nil {
+			return nil, out, fmt.Errorf("resolve repo of snapshot %s: %w", in.Fingerprint, err)
+		}
+		if p == "" {
+			return nil, out, fmt.Errorf("snapshot %s belongs to repo id %d, which is no longer registered", in.Fingerprint, rec.RepoID)
+		}
+		repo = p
+	}
+	cfg, cfgErr := loadCfgForRepo(ctx, repo)
 	if cfgErr != nil {
 		out.EngineDropErr = "load config: " + cfgErr.Error()
 		return nil, out, fmt.Errorf("load config: %w", cfgErr)
 	}
-	if dropErr := dropTemplate(ctx, cfg, rec.Engine, rec.Connection, rec.TemplateName); dropErr != nil {
+	candidate := store.SnapshotEvictionCandidate{
+		Fingerprint: rec.Fingerprint, Engine: rec.Engine, TemplateName: rec.TemplateName,
+		SourceDB: rec.SourceDB, Connection: rec.Connection,
+	}
+	if dropErr := dropTemplate(ctx, cfg, candidate); dropErr != nil {
 		// Don't proceed to the SQLite delete: leaving the row in
 		// place AND the orphan template means the next snapshots_inspect
 		// will surface the orphan correctly. Deleting the row here
@@ -1110,6 +1216,9 @@ func dbDumpTool(ctx context.Context, _ *mcpsdk.CallToolRequest, in dbDumpIn) (*m
 	fam, ok := engine.Canonical(in.Engine)
 	if !ok {
 		return nil, dbDumpOut{}, fmt.Errorf("db_dump: unknown engine %q (allowed: %s)", in.Engine, engine.KnownList())
+	}
+	if err := requireConnection(cfg, fam); err != nil {
+		return nil, dbDumpOut{}, err
 	}
 	switch fam {
 	case engine.FamilyMySQL:
@@ -1467,8 +1576,8 @@ func firstWord(s string) string {
 	return s
 }
 
-func runSQLQuery(ctx context.Context, db *sql.DB, q string, limit int) ([]any, []string, error) {
-	rows, err := db.QueryContext(ctx, q)
+func runSQLQuery(ctx context.Context, tx *sql.Tx, q string, limit int) ([]any, []string, error) {
+	rows, err := tx.QueryContext(ctx, q)
 	if err != nil {
 		return nil, nil, err
 	}

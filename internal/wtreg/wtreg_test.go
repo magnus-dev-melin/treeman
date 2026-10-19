@@ -146,3 +146,30 @@ func TestRepairUnregistersMissingFromGit(t *testing.T) {
 		t.Errorf("Unregistered = %+v, want [/nonexistent-wt]", res.Unregistered)
 	}
 }
+
+// With worktree.useRelativePaths git records the gitdir relative to its
+// admin dir; resolving it against the process cwd dropped every linked
+// worktree, and Repair then marked them all deleted.
+func TestGitWorktreePathsResolvesRelativeGitdir(t *testing.T) {
+	requireGit(t)
+	repo := t.TempDir()
+	git := func(args ...string) {
+		t.Helper()
+		full := append([]string{"-C", repo, "-c", "user.email=t@t", "-c", "user.name=t"}, args...)
+		if out, err := exec.Command("git", full...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	git("init", "-q", "-b", "main")
+	git("commit", "-q", "--allow-empty", "-m", "init")
+	wt := filepath.Join(repo, ".worktrees", "feature")
+	git("-c", "worktree.useRelativePaths=true", "worktree", "add", "-q", "-b", "feature", wt)
+
+	paths, err := GitWorktreePaths(context.Background(), repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(paths) != 1 || paths[0] != wt {
+		t.Fatalf("GitWorktreePaths = %v, want [%s]", paths, wt)
+	}
+}

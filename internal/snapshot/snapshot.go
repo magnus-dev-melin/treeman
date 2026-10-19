@@ -36,9 +36,13 @@ import (
 // cold builds. v6 added Connection: two entries on one family can
 // target different servers, and a template built on server A must
 // never be cache-hit by an entry pointing at server B — different
-// (family, connection) pairs never share template rows (#44). Every
-// existing _tm_… template rebuilds once after each bump.
-const FormatVersion uint32 = 6
+// (family, connection) pairs never share template rows (#44). v7 keys
+// input and dump file hashes by worktree-relative path instead of
+// basename: two inputs named alike (frontend/ and backend/
+// package-lock.json) overwrote each other, so a change to the loser
+// never invalidated the template and the winner depended on map
+// order. Every existing _tm_… template rebuilds once after each bump.
+const FormatVersion uint32 = 7
 
 // Key fingerprints a snapshot. Two prepare runs that share every
 // field can reuse the same template DB. The key is content-only — it
@@ -157,9 +161,10 @@ type HashCache interface {
 	BatchHashedFiles(ctx context.Context, paths []string) (map[string]string, error)
 }
 
-// LockfileHashesFor hashes a list of files. Missing files are
-// skipped (not an error) so configs that name optional lockfiles
-// don't fail when a particular project doesn't ship them.
+// LockfileHashesFor hashes a list of files, keyed by each path exactly
+// as given. Missing files are skipped (not an error) so configs that
+// name optional lockfiles don't fail when a particular project doesn't
+// ship them.
 //
 // When cache is non-nil, hashes are looked up via the stat-gated
 // SQLite cache so unchanged files (matching size + mtime_ns) skip
@@ -177,7 +182,7 @@ func LockfileHashesForWithCache(ctx context.Context, cache HashCache, paths []st
 	out := map[string]string{}
 	if cache != nil {
 		absPaths := make([]string, 0, len(paths))
-		baseOf := make(map[string]string, len(paths))
+		given := make(map[string]string, len(paths))
 		for _, p := range paths {
 			info, err := os.Stat(p)
 			if err != nil || info.IsDir() {
@@ -188,13 +193,13 @@ func LockfileHashesForWithCache(ctx context.Context, cache HashCache, paths []st
 				continue
 			}
 			absPaths = append(absPaths, abs)
-			baseOf[abs] = filepath.Base(p)
+			given[abs] = p
 		}
 		hashes, err := cache.BatchHashedFiles(ctx, absPaths)
 		if err == nil {
 			for abs, h := range hashes {
-				if name, ok := baseOf[abs]; ok {
-					out[name] = h
+				if p, ok := given[abs]; ok {
+					out[p] = h
 				}
 			}
 			return out, nil
@@ -211,7 +216,7 @@ func LockfileHashesForWithCache(ctx context.Context, cache HashCache, paths []st
 		if err != nil {
 			return out, err
 		}
-		out[filepath.Base(p)] = h
+		out[p] = h
 	}
 	return out, nil
 }

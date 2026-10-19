@@ -173,12 +173,12 @@ func (d *Driver) stageTemplate(ctx context.Context, st *templateStage, template 
 	// tables read-only and writes a .cfg next to each .ibd describing
 	// the tablespace layout. The .cfg only exists while the lock is
 	// held (UNLOCK deletes it), so the copy MUST run before UNLOCK.
-	lockConn, err := d.DB.Conn(ctx)
+	lockConn, releaseLockConn, err := sessionConn(ctx, d.DB)
 	if err != nil {
 		st.err = err
 		return
 	}
-	defer func() { _ = lockConn.Close() }()
+	defer releaseLockConn()
 	if _, err := lockConn.ExecContext(ctx, "FLUSH TABLES "+strings.Join(flushList, ", ")+" FOR EXPORT"); err != nil {
 		st.err = fmt.Errorf("FLUSH TABLES FOR EXPORT: %w", err)
 		return
@@ -209,11 +209,11 @@ func (d *Driver) captureCreateDDL(ctx context.Context, schema string, tables []s
 	if err != nil {
 		return nil, err
 	}
-	conn, err := d.DB.Conn(ctx)
+	conn, releaseConn, err := sessionConn(ctx, d.DB)
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = conn.Close() }()
+	defer releaseConn()
 	out := make([]string, len(tables))
 	for i, t := range tables {
 		qt, qerr := ident.QuoteMySQL(t)
@@ -303,11 +303,11 @@ func (d *Driver) physicalRestoreFromStage(ctx context.Context, st *templateStage
 			"exec", st.cid, "rm", "-rf", st.datadir+"/"+target).Run()
 	}()
 
-	prepConn, err := d.DB.Conn(ctx)
+	prepConn, releasePrepConn, err := sessionConn(ctx, d.DB)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = prepConn.Close() }()
+	defer releasePrepConn()
 	if _, err := prepConn.ExecContext(ctx, "SET SESSION foreign_key_checks=0"); err != nil {
 		return fmt.Errorf("disable foreign_key_checks: %w", err)
 	}

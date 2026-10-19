@@ -117,27 +117,18 @@ func (s *Store) LoadWorktreePorts(ctx context.Context, worktreeID int64) (map[st
 	return out, rows.Err()
 }
 
-// ListUsedPorts returns the set of ports currently allocated to any
-// live worktree under (repoID, name). Used by the allocator to skip
-// over already-claimed ports when scanning the configured range.
-//
-// Soft-deleted worktrees are excluded: if a worktree was removed
-// without `wt delete` cleaning up its rows (e.g. the daemon was
-// killed), the join filter keeps those rows from blocking new
-// allocations forever.
-func (s *Store) ListUsedPorts(ctx context.Context, repoID int64, name string) (map[uint16]struct{}, error) {
+// ListHeldPorts returns every port in [lo, hi] reserved by any
+// worktree of any repo, for any slot. A TCP port is host-global, and
+// idx_worktree_ports_one_per_port (one row per port) both enforces
+// that and serves this range scan. Rows of soft-deleted worktrees are
+// included: they still hold their port until ReleaseWorktreePorts or
+// the boot purge removes them.
+func (s *Store) ListHeldPorts(ctx context.Context, lo, hi uint16) (map[uint16]struct{}, error) {
 	out := map[uint16]struct{}{}
-	if repoID <= 0 || name == "" {
-		return out, nil
-	}
-	rows, err := s.DB.QueryContext(ctx, `
-		SELECT wp.port
-		FROM worktree_ports wp
-		JOIN worktrees w ON w.id = wp.worktree_id
-		WHERE wp.repo_id = ? AND wp.name = ? AND w.deleted_at IS NULL`,
-		repoID, name)
+	rows, err := s.DB.QueryContext(ctx,
+		`SELECT port FROM worktree_ports WHERE port BETWEEN ? AND ?`, lo, hi)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("list held ports %d-%d: %w", lo, hi, err)
 	}
 	defer func() { _ = rows.Close() }()
 	for rows.Next() {
@@ -182,10 +173,8 @@ func (s *Store) ReleaseWorktreePort(ctx context.Context, worktreeID int64, name 
 // Per-delete teardown already calls ReleaseWorktreePorts, but rows can
 // still leak when teardown is interrupted (daemon killed mid-teardown)
 // or when a worktree was deleted by an older binary that predates that
-// release. Leaked rows are invisible to ListUsedPorts (it filters on
-// deleted_at IS NULL) yet the unique index on (repo_id, name, port)
-// still rejects the re-insert, so the allocator climbs past every
-// leaked port instead of reusing it. Sweeping on daemon boot keeps the
+// release. A leaked row still holds its port (one row per port), so
+// the allocator climbs past every leaked port instead of reusing it. Sweeping on daemon boot keeps the
 // allocation range from drifting upward indefinitely.
 func (s *Store) PurgeDeletedWorktreePorts(ctx context.Context) (int64, error) {
 	res, err := s.DB.ExecContext(ctx, `

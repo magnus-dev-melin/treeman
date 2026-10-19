@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 )
@@ -152,6 +153,36 @@ func TestPurgeEventsRequiresFilter(t *testing.T) {
 		if e.Level == "error" {
 			t.Errorf("error row survived: %+v", e)
 		}
+	}
+}
+
+func TestPurgeEventsRefusesUnscopedFilter(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(ctx, filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+	_ = st.WriteEvent(ctx, LevelInfo, "test", "msg", 0, 0, "", 0, nil)
+
+	if _, err := st.PurgeEvents(ctx, EventFilter{MessageLike: "%msg%"}); !errors.Is(err, ErrUnscopedPurge) {
+		t.Fatalf("PurgeEvents with no honoured filter: err = %v, want ErrUnscopedPurge", err)
+	}
+	if _, err := st.CountEvents(ctx, EventFilter{}); !errors.Is(err, ErrUnscopedPurge) {
+		t.Fatalf("CountEvents with empty filter: err = %v, want ErrUnscopedPurge", err)
+	}
+	if left, _ := st.QueryEvents(ctx, EventFilter{Limit: 10}); len(left) != 1 {
+		t.Fatalf("event table changed: %d rows left, want 1", len(left))
+	}
+}
+
+func TestParseLevels(t *testing.T) {
+	got, err := ParseLevels([]string{"WARN", "error"})
+	if err != nil || len(got) != 2 || got[0] != LevelWarn || got[1] != LevelError {
+		t.Fatalf("ParseLevels = %v, %v", got, err)
+	}
+	if _, err := ParseLevels([]string{"warning"}); err == nil {
+		t.Fatal("unknown level must be rejected, not dropped")
 	}
 }
 

@@ -549,10 +549,10 @@ func runFinalizeSetupPipeline(
 		// Serialise against a queued `prepare` / `db reset` task or a
 		// watcher re-prepare for this same worktree — they build the same
 		// source databases (issue #28).
-		prepLk := st.LockWorktreePrepare(wtRoot)
-		prepLk.Lock()
-		_, prepErr := prepare.Run(ctx, cfg, wtRoot, sl, st.Store, repoID, wtID, inheritedEnv)
-		prepLk.Unlock()
+		var prepErr error
+		st.withWorktreePrepare(wtRoot, func() {
+			_, prepErr = prepare.Run(ctx, cfg, wtRoot, sl, st.Store, repoID, wtID, inheritedEnv)
+		})
 		// A cancelled context means a concurrent teardown preempted
 		// prepare — a clean stop regardless of whether prepare.Run
 		// surfaced an error on the way out. Mirrors the un-extracted
@@ -754,10 +754,10 @@ func FinalizeWorktreeForWatch(
 		opts.FilterDBs = true
 		opts.OnlyDBIndex = dbIdx
 	}
-	prepLk := st.LockWorktreePrepare(wtRoot)
-	prepLk.Lock()
-	_, prepErr := prepare.RunFiltered(ctx, &cfg, wtRoot, sl, st.Store, repoID, wtID, inheritedEnv, opts)
-	prepLk.Unlock()
+	var prepErr error
+	st.withWorktreePrepare(wtRoot, func() {
+		_, prepErr = prepare.RunFiltered(ctx, &cfg, wtRoot, sl, st.Store, repoID, wtID, inheritedEnv, opts)
+	})
 	if err := prepErr; err != nil {
 		if ctx.Err() != nil {
 			return nil
@@ -852,15 +852,14 @@ func TeardownWorktree(
 		// side. Still honour --force by letting git reap a stale
 		// checkout if one happens to remain on disk.
 		if force {
-			mu := st.LockRepoTeardown(repoPath)
-			mu.Lock()
-			gitArgs := []string{"-C", repoRoot, "worktree", "remove", "--force", wtRoot}
-			_ = lowPriorityCommand(ctx, "git", gitArgs).Run()
-			// RemoveWorktreeTree (not just pruneEmptyParentsBelow) so
-			// untracked bring-in / hook-generated leftovers don't strand
-			// and block the next create — see reap.go's fallback path.
-			wt.RemoveWorktreeTree(wtRoot, worktreesRootOf(cfg.Worktrees.Root, repoRoot))
-			mu.Unlock()
+			st.withRepoTeardown(repoPath, func() {
+				gitArgs := []string{"-C", repoRoot, "worktree", "remove", "--force", wtRoot}
+				_ = lowPriorityCommand(ctx, "git", gitArgs).Run()
+				// RemoveWorktreeTree (not just pruneEmptyParentsBelow) so
+				// untracked bring-in / hook-generated leftovers don't strand
+				// and block the next create — see reap.go's fallback path.
+				wt.RemoveWorktreeTree(wtRoot, worktreesRootOf(cfg.Worktrees.Root, repoRoot))
+			})
 		}
 		return nil
 	}
@@ -905,11 +904,12 @@ func TeardownWorktree(
 	// Acquire the per-repo mutex only for the git operations — they
 	// touch the shared <common>/worktrees/ admin tree and aren't
 	// parallel-safe.
-	mu := st.LockRepoTeardown(repoPath)
-	mu.Lock()
-	trashPath, removeErr := removeWorktreeViaTrash(ctx, repoRoot, wtRoot, worktreesRoot, force)
-	pruneEmptyParentsBelow(wtRoot, worktreesRoot)
-	mu.Unlock()
+	var trashPath string
+	var removeErr error
+	st.withRepoTeardown(repoPath, func() {
+		trashPath, removeErr = removeWorktreeViaTrash(ctx, repoRoot, wtRoot, worktreesRoot, force)
+		pruneEmptyParentsBelow(wtRoot, worktreesRoot)
+	})
 
 	if removeErr != nil && !force {
 		return fmt.Errorf("worktree remove: %w (pass --force to override)", removeErr)
@@ -917,9 +917,9 @@ func TeardownWorktree(
 
 	// Physically drop the port reservations so the freed ports can be
 	// re-used by the next allocation. Soft-deleting the worktree row is
-	// not enough: ListUsedPorts skips them, but the unique index on
-	// (repo_id, name, port) still rejects the re-insert, so the freed
-	// port silently climbs out of the range. Mirror the CLI inline path.
+	// not enough: the row still holds its port (one row per port), so
+	// the freed port silently climbs out of the range. Mirror the CLI
+	// inline path.
 	if err := st.Store.ReleaseWorktreePorts(ctx, wtID); err != nil {
 		slog.Warn("release worktree ports (freed ports stay blocked for reallocation)", "wt", wtRoot, "err", err)
 	}

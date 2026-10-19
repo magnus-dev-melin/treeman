@@ -14,6 +14,7 @@ import (
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"gopkg.in/yaml.v3"
 
+	"github.com/stubbedev/treeman/internal/atomicfile"
 	"github.com/stubbedev/treeman/internal/config"
 	"github.com/stubbedev/treeman/internal/daemonctl"
 	"github.com/stubbedev/treeman/internal/hooks"
@@ -233,9 +234,9 @@ func dbResetTool(ctx context.Context, req *mcpsdk.CallToolRequest, in dbResetIn)
 		}
 		return nil, dbResetOut{DryRun: true, WouldDrop: dbs}, nil
 	}
-	if ok, reason := confirmDestructive(ctx, req, false, in.Ack,
-		"Reset branch_scoped DBs to the base branch? Current branch's working data will be DROPPED."); !ok {
-		return nil, dbResetOut{Refused: reason}, nil
+	if ask, refused := confirmDestructive(req, in.Ack,
+		"Reset branch_scoped DBs to the base branch? Current branch's working data will be DROPPED."); ask != nil || refused != "" {
+		return ask, dbResetOut{Refused: refused}, nil
 	}
 	outs, err := runDbReset(ctx, in.Worktree, in.Repo, strings.ToLower(in.Engine))
 	if err != nil {
@@ -345,7 +346,7 @@ func atomicWrite(repoRoot, path string, data []byte) error {
 			_ = st.Close()
 		}
 	}
-	return yamlpatch.AtomicWrite(path, data)
+	return atomicfile.Write(path, data, 0o600)
 }
 
 // ─── init_repo / schema_install ───────────────────────────────────
@@ -563,10 +564,8 @@ func registryUnregisterTool(
 	if in.DryRun {
 		return nil, registryUnregisterOut{WorktreeID: wtID, Path: path, DryRun: true}, nil
 	}
-	if ok, reason := confirmDestructive(
-		ctx,
+	if ask, refused := confirmDestructive(
 		req,
-		false,
 		in.Ack,
 		fmt.Sprintf(
 			"Mark worktree %q (id=%d, path=%s) deleted in the registry? On-disk path + databases will NOT be touched.",
@@ -574,8 +573,8 @@ func registryUnregisterTool(
 			wtID,
 			path,
 		),
-	); !ok {
-		return nil, registryUnregisterOut{WorktreeID: wtID, Path: path, Refused: reason}, nil
+	); ask != nil || refused != "" {
+		return ask, registryUnregisterOut{WorktreeID: wtID, Path: path, Refused: refused}, nil
 	}
 	if err := st.MarkWorktreeDeleted(ctx, wtID); err != nil {
 		return nil, registryUnregisterOut{}, err
@@ -621,9 +620,9 @@ func repoRemoveTool(
 		}
 		return nil, repoRemoveOut{RepoPath: repoRoot, DryRun: true, WouldDrop: counts}, nil
 	}
-	if ok, reason := confirmDestructive(ctx, req, false, in.Ack,
-		"Remove repo "+repoRoot+" from the registry? Cascades to events/snapshots/hook_runs rows."); !ok {
-		return nil, repoRemoveOut{RepoPath: repoRoot, Refused: reason}, nil
+	if ask, refused := confirmDestructive(req, in.Ack,
+		"Remove repo "+repoRoot+" from the registry? Cascades to events/snapshots/hook_runs rows."); ask != nil || refused != "" {
+		return ask, repoRemoveOut{RepoPath: repoRoot, Refused: refused}, nil
 	}
 	// Prefer the daemon RPC so live watchers stop in-process; fall
 	// back to direct SQLite when the daemon isn't running.
@@ -744,9 +743,9 @@ func snapshotsPurgeTool(
 			WouldDropRows: list.Snapshots,
 		}, nil
 	}
-	if ok, reason := confirmDestructive(ctx, req, false, in.Ack,
-		"Purge ALL cached snapshots for "+repoRoot+"? Every prepare will cold-rebuild from scratch."); !ok {
-		return nil, snapshotsPurgeOut{Repo: repoRoot, Refused: reason}, nil
+	if ask, refused := confirmDestructive(req, in.Ack,
+		"Purge ALL cached snapshots for "+repoRoot+"? Every prepare will cold-rebuild from scratch."); ask != nil || refused != "" {
+		return ask, snapshotsPurgeOut{Repo: repoRoot, Refused: refused}, nil
 	}
 	cfg, err := resolve.LoadResolved(repoRoot)
 	if err != nil {
@@ -821,9 +820,12 @@ func snapshotsPruneTool(
 		}
 		return nil, out, nil
 	}
-	if ok, reason := confirmDestructive(ctx, req, false, in.Ack,
-		"Prune orphan snapshot rows for "+repoRoot+"? Rows whose engine template is gone will be deleted (engines untouched)."); !ok {
-		return nil, snapshotsPruneOut{Repo: repoRoot, Refused: reason}, nil
+	if ask, refused := confirmDestructive(
+		req,
+		in.Ack,
+		"Prune orphan snapshot rows for "+repoRoot+"? Rows whose engine template is gone will be deleted (engines untouched).",
+	); ask != nil || refused != "" {
+		return ask, snapshotsPruneOut{Repo: repoRoot, Refused: refused}, nil
 	}
 	pruned, errs := snapshot.PruneRowOrphans(ctx, &cfg, st, repoID)
 	out := snapshotsPruneOut{Repo: repoRoot, Pruned: pruned, Count: len(pruned)}
@@ -852,15 +854,11 @@ type logsPurgeOut struct {
 }
 
 func logsPurgeTool(ctx context.Context, req *mcpsdk.CallToolRequest, in logsPurgeIn) (*mcpsdk.CallToolResult, logsPurgeOut, error) {
-	// At least one filter required so an empty input can never wipe
-	// the entire events table.
-	if in.Repo == "" && in.Worktree == "" && in.OlderThan == "" && len(in.Levels) == 0 && len(in.EventTypes) == 0 {
-		return nil, logsPurgeOut{}, errors.New("at least one filter (repo, worktree, older_than, levels, event_types) is required")
+	levels, err := store.ParseLevels(in.Levels)
+	if err != nil {
+		return nil, logsPurgeOut{}, err
 	}
-	f := store.EventFilter{
-		Levels:     validateLevels(in.Levels),
-		EventTypes: in.EventTypes,
-	}
+	f := store.EventFilter{Levels: levels, EventTypes: in.EventTypes}
 	if in.OlderThan != "" {
 		t, err := parsePurgeCutoff(in.OlderThan)
 		if err != nil {
@@ -885,10 +883,13 @@ func logsPurgeTool(ctx context.Context, req *mcpsdk.CallToolRequest, in logsPurg
 	}
 	// Quote the matched count in the confirmation so the user sees
 	// the blast radius before approving.
-	matched, _ := st.CountEvents(ctx, f)
-	if ok, reason := confirmDestructive(ctx, req, false, in.Ack,
-		fmt.Sprintf("Purge %d event-log row(s) matching the filter?", matched)); !ok {
-		return nil, logsPurgeOut{Refused: reason}, nil
+	matched, err := st.CountEvents(ctx, f)
+	if err != nil {
+		return nil, logsPurgeOut{}, err
+	}
+	if ask, refused := confirmDestructive(req, in.Ack,
+		fmt.Sprintf("Purge %d event-log row(s) matching the filter?", matched)); ask != nil || refused != "" {
+		return ask, logsPurgeOut{Refused: refused}, nil
 	}
 	n, err := st.PurgeEvents(ctx, f)
 	if err != nil {
@@ -1030,9 +1031,9 @@ func worktreeDeleteTool(
 		}
 		return nil, plan, nil
 	}
-	if ok, reason := confirmDestructive(ctx, req, false, in.Ack,
-		fmt.Sprintf("Delete worktree %q? This drops its databases + removes the on-disk path.", in.Name)); !ok {
-		return nil, worktreeDeleteResult{Refused: reason}, nil
+	if ask, refused := confirmDestructive(req, in.Ack,
+		fmt.Sprintf("Delete worktree %q? This drops its databases + removes the on-disk path.", in.Name)); ask != nil || refused != "" {
+		return ask, worktreeDeleteResult{Refused: refused}, nil
 	}
 	res, err := wt.Delete(ctx, wt.DeleteRequest{
 		RepoRoot: repoRoot,
@@ -1204,23 +1205,24 @@ func configSetTool(ctx context.Context, _ *mcpsdk.CallToolRequest, in configSetI
 	if err := atomicWrite(histRoot, p, body); err != nil {
 		return nil, configSetOut{}, err
 	}
-	prevJSON := decodePrevJSON(prev)
-	newJSON, err := json.Marshal(in.Value)
+	prevJSON := redactJSONAt(in.Path, decodePrevJSON(prev))
+	rawNew, err := json.Marshal(in.Value)
 	if err != nil {
 		return nil, configSetOut{}, fmt.Errorf("marshal value: %w", err)
 	}
+	newJSON := redactJSONAt(in.Path, string(rawNew))
 	writeMCPEvent(context.Background(), store.EvtMCPConfigSet, "patched "+in.Path, 0, map[string]string{
 		"scope":    layer,
 		"file":     p,
 		"path":     in.Path,
-		"new_json": string(newJSON),
+		"new_json": newJSON,
 	})
 	return nil, configSetOut{
 		Path:         in.Path,
 		Scope:        layer,
 		File:         p,
 		PreviousJSON: prevJSON,
-		NewJSON:      string(newJSON),
+		NewJSON:      newJSON,
 		Bytes:        len(body),
 	}, nil
 }

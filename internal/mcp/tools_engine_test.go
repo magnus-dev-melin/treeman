@@ -7,6 +7,7 @@ import (
 
 	"github.com/stubbedev/treeman/internal/config"
 	"github.com/stubbedev/treeman/internal/engine"
+	"github.com/stubbedev/treeman/internal/store"
 )
 
 // TestDropTemplateRejectsNonReservedNames is the trust-boundary
@@ -25,7 +26,7 @@ func TestDropTemplateRejectsNonReservedNames(t *testing.T) {
 	}
 	for _, name := range bad {
 		t.Run(name, func(t *testing.T) {
-			err := dropTemplate(context.Background(), cfg, "mysql", "", name)
+			err := dropTemplate(context.Background(), cfg, store.SnapshotEvictionCandidate{Engine: "mysql", TemplateName: name})
 			if err == nil || !strings.Contains(err.Error(), "treeman-reserved") {
 				t.Fatalf("name %q: want reserved-prefix rejection, got %v", name, err)
 			}
@@ -39,17 +40,17 @@ func TestDropTemplateRejectsNonReservedNames(t *testing.T) {
 // unconfigured connections — that's the expected next failure).
 func TestDropTemplateAcceptsReservedPrefixes(t *testing.T) {
 	cfg := &config.Config{}
-	ok := []string{"_tm_abc", "_tmbs_abc", "tm_abc", "tmbs_abc"}
+	ok := []string{"_tm_abc", "_tm:abc:", "_tmbs_abc", "tm_abc", "tmbs_abc", "/repo/db/_tm_abc.sqlite"}
 	for _, name := range ok {
 		t.Run(name, func(t *testing.T) {
-			err := dropTemplate(context.Background(), cfg, "mysql", "", name)
+			err := dropTemplate(context.Background(), cfg, store.SnapshotEvictionCandidate{Engine: "mysql", TemplateName: name})
 			if err == nil {
 				t.Fatalf("nil cfg should not return nil err")
 			}
 			if strings.Contains(err.Error(), "treeman-reserved") {
 				t.Fatalf("name %q should pass reserved-marker check, got %v", name, err)
 			}
-			if !strings.Contains(err.Error(), "not configured") {
+			if !strings.Contains(err.Error(), "not configured") && !strings.Contains(err.Error(), "must be absolute") {
 				t.Fatalf("name %q: expected 'not configured' connect-time error, got %v", name, err)
 			}
 		})
@@ -65,12 +66,11 @@ func TestDropTemplateCoversEveryKnownEngine(t *testing.T) {
 	cfg := &config.Config{}
 	for _, eng := range engine.Known {
 		t.Run(eng, func(t *testing.T) {
-			err := dropTemplate(context.Background(), cfg, eng, "", "_tm_x")
+			err := dropTemplate(context.Background(), cfg, store.SnapshotEvictionCandidate{Engine: eng, TemplateName: "_tm_x"})
 			if err == nil {
 				t.Fatalf("nil cfg should return an error")
 			}
-			if strings.Contains(err.Error(), "unsupported engine family") ||
-				strings.Contains(err.Error(), "unknown engine") {
+			if strings.Contains(err.Error(), "unsupported engine") {
 				t.Fatalf("engine %q falls into unsupported-engine arm: %v", eng, err)
 			}
 		})

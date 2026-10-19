@@ -91,13 +91,13 @@ test-e2e batch="all" parallel="4":
     set -euo pipefail
 
     declare -A BATCHES
-    BATCHES[engines]="mysql postgres mongo redis elasticsearch s3"
+    BATCHES[engines]="dumpload mysql postgres mongo redis elasticsearch s3"
     BATCHES[fw1]="fw_alembic fw_diesel fw_django fw_flyway fw_laravel fw_rails fw_sqlx"
     BATCHES[fw2]="fw_drizzle fw_golang_migrate fw_knex fw_mikro fw_prisma fw_sequelize fw_typeorm"
     BATCHES[matrix]="matrix_es matrix_mongo matrix_postgres matrix_redis containerref containerref-all conn_forms engine_aliases named_conns"
     BATCHES[watcher]="autofetch branchscoped deltawatch headwatcher hook_cwd lifecycle main_worktree main_worktree_db oncheckout onfilechange onfilechange_redis watcher"
-    BATCHES[features]="clones_auto coldbuild_siblings compression ctrrestart extras fanout log_level logs misc patches poolmax race retention sighup snapshot_gc switchback teardown worktrees_root"
-    BATCHES[cli]="cli cli_engine cli_surface mcp mcp_write mongo_dump"
+    BATCHES[features]="clones_auto coldbuild_siblings compression ctrrestart extras fanout log_level logs misc patches poolmax race recover retention sighup snapshot_gc switchback teardown worktrees_root"
+    BATCHES[cli]="cli cli_engine cli_surface db_query mcp mcp_write mongo_dump"
     BATCHES[lite]="cli_surface logs notifications file_engine"
 
     ORDER=(engines fw1 fw2 matrix watcher features cli)
@@ -163,13 +163,13 @@ e2e-prepull batch:
     set -euo pipefail
 
     declare -A BATCHES
-    BATCHES[engines]="mysql postgres mongo redis elasticsearch s3"
+    BATCHES[engines]="dumpload mysql postgres mongo redis elasticsearch s3"
     BATCHES[fw1]="fw_alembic fw_diesel fw_django fw_flyway fw_laravel fw_rails fw_sqlx"
     BATCHES[fw2]="fw_drizzle fw_golang_migrate fw_knex fw_mikro fw_prisma fw_sequelize fw_typeorm"
     BATCHES[matrix]="matrix_es matrix_mongo matrix_postgres matrix_redis containerref containerref-all conn_forms engine_aliases named_conns"
     BATCHES[watcher]="autofetch branchscoped deltawatch headwatcher hook_cwd lifecycle main_worktree main_worktree_db oncheckout onfilechange onfilechange_redis watcher"
-    BATCHES[features]="clones_auto coldbuild_siblings compression ctrrestart extras fanout log_level logs misc patches poolmax race retention sighup snapshot_gc switchback teardown worktrees_root"
-    BATCHES[cli]="cli cli_engine cli_surface mcp mcp_write mongo_dump"
+    BATCHES[features]="clones_auto coldbuild_siblings compression ctrrestart extras fanout log_level logs misc patches poolmax race recover retention sighup snapshot_gc switchback teardown worktrees_root"
+    BATCHES[cli]="cli cli_engine cli_surface db_query mcp mcp_write mongo_dump"
     BATCHES[lite]="cli_surface logs notifications file_engine"
 
     suites=${BATCHES[{{batch}}]:-}
@@ -200,13 +200,13 @@ e2e-prepull batch:
 test-e2e-list:
     #!/usr/bin/env bash
     set -euo pipefail
-    echo "engines  : mysql postgres mongo redis elasticsearch s3"
+    echo "engines  : dumpload mysql postgres mongo redis elasticsearch s3"
     echo "fw1      : fw_alembic fw_diesel fw_django fw_flyway fw_laravel fw_rails fw_sqlx"
     echo "fw2      : fw_drizzle fw_golang_migrate fw_knex fw_mikro fw_prisma fw_sequelize fw_typeorm"
     echo "matrix   : matrix_es matrix_mongo matrix_postgres matrix_redis containerref containerref-all conn_forms engine_aliases named_conns"
     echo "watcher  : autofetch branchscoped deltawatch headwatcher hook_cwd lifecycle main_worktree main_worktree_db oncheckout onfilechange onfilechange_redis watcher"
-    echo "features : clones_auto coldbuild_siblings compression ctrrestart extras fanout log_level logs misc patches poolmax race retention sighup snapshot_gc switchback teardown worktrees_root"
-    echo "cli      : cli cli_engine cli_surface mcp mcp_write mongo_dump"
+    echo "features : clones_auto coldbuild_siblings compression ctrrestart extras fanout log_level logs misc patches poolmax race recover retention sighup snapshot_gc switchback teardown worktrees_root"
+    echo "cli      : cli cli_engine cli_surface db_query mcp mcp_write mongo_dump"
     echo "lite     : cli_surface logs notifications file_engine (container-free)"
 
 check: lint test sync-schema sync-docs sync-flake

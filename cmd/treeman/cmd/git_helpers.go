@@ -321,7 +321,10 @@ func branchKnown(ctx context.Context, repoRoot, branch string) bool {
 // name / Ctrl+C to enter the branch wizard. The selection lands via
 // `route`, which prints the destination path for the shell `cd` shim.
 func switchInteractive(ctx context.Context, repoRoot string, opts spawnOpts, route switchRoute) error {
-	items, targets := buildSwitchMenu(ctx, repoRoot)
+	items, targets, err := buildSwitchMenu(ctx, repoRoot)
+	if err != nil {
+		return err
+	}
 	if len(items) == 0 {
 		return wizardThenRoute(ctx, repoRoot, "", opts, route)
 	}
@@ -345,14 +348,17 @@ func switchInteractive(ctx context.Context, repoRoot string, opts spawnOpts, rou
 // first) for live worktrees other than the current one, followed by
 // `[branch]   <name>` rows for branches not occupying a worktree. Each
 // target is the branch name goCheckout should route on.
-func buildSwitchMenu(ctx context.Context, repoRoot string) (items, targets []string) {
+func buildSwitchMenu(ctx context.Context, repoRoot string) (items, targets []string, err error) {
 	occ := occupiedWorktrees(ctx, repoRoot)
 	cwdTop := ""
 	if cwd, err := os.Getwd(); err == nil {
 		cwdTop, _ = gitWorktreeRoot(cwd)
 	}
 	// The branch we're already on has nothing to switch to.
-	curBranch := currentBranch(ctx, cmp.Or(cwdTop, repoRoot))
+	curBranch, err := currentBranch(ctx, cmp.Or(cwdTop, repoRoot))
+	if err != nil {
+		return nil, nil, err
+	}
 
 	type wtRow struct {
 		label, branch string
@@ -403,7 +409,7 @@ func buildSwitchMenu(ctx context.Context, repoRoot string) (items, targets []str
 		items = append(items, "[branch]   "+b)
 		targets = append(targets, b)
 	}
-	return items, targets
+	return items, targets, nil
 }
 
 // worktreeMarkers returns " *" (dirty) / " !" (unpushed commits) / " *!"

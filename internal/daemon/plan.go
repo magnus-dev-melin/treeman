@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/stubbedev/treeman/internal/atomicfile"
 	"github.com/stubbedev/treeman/internal/config"
 	"github.com/stubbedev/treeman/internal/engine"
 	"github.com/stubbedev/treeman/internal/gitcmd"
@@ -26,8 +27,8 @@ import (
 	"github.com/stubbedev/treeman/internal/store"
 	"github.com/stubbedev/treeman/internal/wt"
 	"github.com/stubbedev/treeman/internal/wtreg"
-	"github.com/stubbedev/treeman/internal/yamlpatch"
 	"github.com/stubbedev/treeman/pkg/rpc"
+	"github.com/stubbedev/treeman/pkg/safego"
 )
 
 // handleRunPlan executes a submitted plan. The daemon is the sole
@@ -175,7 +176,12 @@ func runOneTask(ctx context.Context, st *State, task rpc.Task) (json.RawMessage,
 		return nil, fmt.Errorf("run_plan: unknown task %q", task.Type)
 	}
 	ctx = gitcmd.WithPath(ctx, task.InheritedEnv["PATH"])
-	return run(ctx, st, task)
+	// A panicking task must surface as a failed result: recovered only
+	// at the lane goroutine it produced no result at all, and the plan
+	// reported success.
+	return safego.Run(lblPlanTask, task.Type, func() (json.RawMessage, error) {
+		return run(ctx, st, task)
+	})
 }
 
 func runTaskWorktreeFinalize(ctx context.Context, st *State, task rpc.Task) (json.RawMessage, error) {
@@ -237,11 +243,13 @@ func runTaskPrepare(ctx context.Context, st *State, task rpc.Task) (json.RawMess
 // finalize pipeline, a watcher re-prepare, or another prepare task
 // building the same source databases (issue #28).
 func lockedPrepare(ctx context.Context, st *State, id taskIdentity, task rpc.Task) ([]prepare.Outcome, error) {
-	prepLk := st.LockWorktreePrepare(task.WorktreePath)
-	prepLk.Lock()
-	defer prepLk.Unlock()
 	opts := prepare.RunOptions{Fresh: rpc.PrepareArgsOf(task).Fresh}
-	return prepare.RunFiltered(ctx, &id.cfg, task.WorktreePath, id.sl, st.Store, id.repoID, id.wtID, task.InheritedEnv, opts)
+	var outs []prepare.Outcome
+	var err error
+	st.withWorktreePrepare(task.WorktreePath, func() {
+		outs, err = prepare.RunFiltered(ctx, &id.cfg, task.WorktreePath, id.sl, st.Store, id.repoID, id.wtID, task.InheritedEnv, opts)
+	})
+	return outs, err
 }
 
 func runTaskDBReset(ctx context.Context, st *State, task rpc.Task) (json.RawMessage, error) {
@@ -253,14 +261,14 @@ func runTaskDBReset(ctx context.Context, st *State, task rpc.Task) (json.RawMess
 	// Reset + rebuild are one unit: dropping the branch-scoped state and
 	// then racing a concurrent build against the same databases is the
 	// collision issue #28 describes, so both run under the lock.
-	prepLk := st.LockWorktreePrepare(task.WorktreePath)
-	prepLk.Lock()
-	resetErr := prepare.ResetBranchScoped(ctx, &id.cfg, task.WorktreePath, id.repoID, id.wtID, st.Store, engineFilter)
 	var outs []prepare.Outcome
-	if resetErr == nil {
-		outs, resetErr = prepare.Run(ctx, &id.cfg, task.WorktreePath, id.sl, st.Store, id.repoID, id.wtID, task.InheritedEnv)
-	}
-	prepLk.Unlock()
+	var resetErr error
+	st.withWorktreePrepare(task.WorktreePath, func() {
+		resetErr = prepare.ResetBranchScoped(ctx, &id.cfg, task.WorktreePath, id.repoID, id.wtID, st.Store, engineFilter)
+		if resetErr == nil {
+			outs, resetErr = prepare.Run(ctx, &id.cfg, task.WorktreePath, id.sl, st.Store, id.repoID, id.wtID, task.InheritedEnv)
+		}
+	})
 	if resetErr != nil {
 		return nil, resetErr
 	}
@@ -469,20 +477,33 @@ func runTaskWorktreeUnregister(ctx context.Context, st *State, task rpc.Task) (j
 func runTaskLogsPurge(ctx context.Context, st *State, task rpc.Task) (json.RawMessage, error) {
 	f := store.EventFilter{}
 	if v := task.Params[rpc.ParamLevels]; v != "" {
-		f.Levels = strings.Split(v, ",")
+		levels, err := store.ParseLevels(strings.Split(v, ","))
+		if err != nil {
+			return nil, err
+		}
+		f.Levels = levels
 	}
 	if v := task.Params[rpc.ParamEventTypes]; v != "" {
 		f.EventTypes = strings.Split(v, ",")
 	}
 	if v := task.Params[rpc.ParamUntilMs]; v != "" {
-		f.UntilMs, _ = strconv.ParseInt(v, 10, 64)
+		until, err := strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("parse %s %q: %w", rpc.ParamUntilMs, v, err)
+		}
+		f.UntilMs = until
 	}
 	// Scope to a repo / worktree by resolving the (CLI-absolutized) paths
 	// to row ids — mirrors the CLI's applyPurgeScope.
 	if repo := task.Params[rpc.ParamRepo]; repo != "" {
-		if rid, err := st.Store.LookupRepoID(ctx, repo); err == nil {
-			f.RepoID = rid
+		rid, err := st.Store.LookupRepoID(ctx, repo)
+		if err != nil {
+			return nil, fmt.Errorf("look up repo %s: %w", repo, err)
 		}
+		if rid == 0 {
+			return nil, fmt.Errorf("repo %s is not enrolled", repo)
+		}
+		f.RepoID = rid
 	}
 	if wtArg := task.Params[rpc.ParamWorktree]; wtArg != "" {
 		wid, err := st.Store.LookupWorktreeID(ctx, f.RepoID, wtArg)
@@ -523,7 +544,7 @@ func runTaskConfigWrite(ctx context.Context, st *State, task rpc.Task) (json.Raw
 	if prev, err := os.ReadFile(path); err == nil {
 		_, _ = st.Store.SnapshotConfig(ctx, task.RepoPath, path, prev)
 	}
-	if err := yamlpatch.AtomicWrite(path, body); err != nil {
+	if err := atomicfile.Write(path, body, 0o600); err != nil {
 		return nil, err
 	}
 	if st.ConfigReloader != nil && task.RepoPath != "" {

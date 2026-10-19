@@ -265,9 +265,15 @@ func GitWorktreePaths(_ context.Context, repoRoot string) ([]string, error) {
 			continue
 		}
 		p := strings.TrimSpace(string(b))
+		// With worktree.useRelativePaths (or `worktree add
+		// --relative-paths`) git writes the path relative to this admin
+		// dir; resolved against the process cwd it would never exist.
+		if !filepath.IsAbs(p) {
+			p = filepath.Join(wtDir, e.Name(), p)
+		}
 		// `gitdir` ends with `<linked-wt>/.git`. Strip the suffix to
 		// recover the worktree's own root.
-		p = strings.TrimSuffix(p, string(filepath.Separator)+".git")
+		p = strings.TrimSuffix(filepath.Clean(p), string(filepath.Separator)+".git")
 		if p == "" || p == repoRoot {
 			continue
 		}

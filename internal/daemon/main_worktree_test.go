@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/stubbedev/treeman/internal/resolve"
+	"github.com/stubbedev/treeman/internal/slug"
 	"github.com/stubbedev/treeman/internal/store"
 )
 
@@ -78,7 +79,7 @@ func TestEnrollMainWorktreeEnableDisableRoundTrip(t *testing.T) {
 	}
 	repoID, _ := s.EnsureRepo(ctx, repo, "repo")
 	row, _ := s.LookupMainWorktree(ctx, repoID)
-	if !row.IsMain || row.Branch != "develop" || row.Slug != "main_develop" {
+	if !row.IsMain || row.Branch != "develop" || row.Slug != slug.ForMain(repo, "develop").Value {
 		t.Errorf("enrolled row mismatch: %+v", row)
 	}
 
@@ -88,8 +89,8 @@ func TestEnrollMainWorktreeEnableDisableRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	row, _ = s.LookupMainWorktree(ctx, repoID)
-	if row.Slug != "main_feature_foo" {
-		t.Errorf("post-checkout slug = %q, want main_feature_foo", row.Slug)
+	if want := slug.ForMain(repo, "feature/foo").Value; row.Slug != want {
+		t.Errorf("post-checkout slug = %q, want %q", row.Slug, want)
 	}
 
 	// Disable — config flips, re-enroll soft-deletes the row.

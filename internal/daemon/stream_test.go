@@ -38,9 +38,8 @@ func shortSocketPath(t *testing.T) string {
 
 // startStreamServer binds a unix socket at a short path, points
 // TREEMAN_SOCKET at it, and serves every accepted connection through
-// DispatchStreaming — the streaming half of cmd/treemand's handleConn,
-// inline to avoid importing the cmd package. Returns the daemon store
-// events are written to.
+// ServeConn, as treemand does. Returns the daemon store events are
+// written to.
 func startStreamServer(ctx context.Context, t *testing.T) *store.Store {
 	t.Helper()
 	sockPath := shortSocketPath(t)
@@ -62,16 +61,7 @@ func startStreamServer(ctx context.Context, t *testing.T) *store.Store {
 			if err != nil {
 				return
 			}
-			go func() {
-				defer func() { _ = conn.Close() }()
-				var req rpc.Request
-				if err := json.NewDecoder(conn).Decode(&req); err != nil {
-					return
-				}
-				if IsStreamingMethod(req.Method) {
-					DispatchStreaming(ctx, st, conn, req)
-				}
-			}()
+			go ServeConn(ctx, conn, st, make(chan struct{}, 1))
 		}
 	}()
 	return s
@@ -215,5 +205,43 @@ func TestSubscribeEvents_HandshakeRequired(t *testing.T) {
 	_, _, err = rpc.SubscribeEvents(ctx, rpc.EventSubscribeArgs{})
 	if err == nil || !strings.Contains(err.Error(), "did not acknowledge") {
 		t.Fatalf("SubscribeEvents against a non-acking peer = %v, want the acknowledge error", err)
+	}
+}
+
+// A subscription whose filter never matches again (a foreground
+// command's run ended) used to stay registered after the client hung
+// up: nothing read the conn and no write ever failed, so the goroutine
+// and event hook leaked for the daemon's lifetime.
+func TestStreamingSubscribeReleasesHookOnHangup(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	s := startStreamServer(ctx, t)
+
+	_, stop, err := rpc.SubscribeEvents(ctx, rpc.EventSubscribeArgs{EventTypes: []string{"never_written"}})
+	if err != nil {
+		t.Fatalf("SubscribeEvents: %v", err)
+	}
+	if n := s.EventHookCount(); n != 1 {
+		t.Fatalf("hooks after subscribe = %d, want 1", n)
+	}
+	stop()
+	deadline := time.Now().Add(2 * time.Second)
+	for s.EventHookCount() != 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("hook still registered after the client hung up (%d hooks)", s.EventHookCount())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// On overflow the oldest queued event goes, so a run's terminal event
+// (always the newest) is never the one dropped.
+func TestOfferNewestDropsOldest(t *testing.T) {
+	ch := make(chan rpc.EventEnvelope, 2)
+	for _, msg := range []string{"a", "b", "plan:end"} {
+		offerNewest(ch, rpc.EventEnvelope{Message: msg})
+	}
+	if got := (<-ch).Message + "," + (<-ch).Message; got != "b,plan:end" {
+		t.Errorf("queue = %s, want b,plan:end", got)
 	}
 }

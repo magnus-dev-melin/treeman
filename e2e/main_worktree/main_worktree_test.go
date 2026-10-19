@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/stubbedev/treeman/internal/daemon"
+	"github.com/stubbedev/treeman/internal/slug"
 	"github.com/stubbedev/treeman/internal/store"
 )
 
@@ -77,14 +78,15 @@ hooks:
 	witness := filepath.Join(witnessDir, "slug")
 	body := waitForFile(t, witness, 15*time.Second)
 	got := strings.TrimSpace(body)
-	if got != "main_feature_x|1" {
-		t.Fatalf("checkout witness = %q, want \"main_feature_x|1\" (dispatcher slug or $TREEMAN_IS_MAIN regressed)", got)
+	wantSlug := slug.ForMain(repoRoot, "feature/x").Value
+	if got != wantSlug+"|1" {
+		t.Fatalf("checkout witness = %q, want %q (dispatcher slug or $TREEMAN_IS_MAIN regressed)", got, wantSlug+"|1")
 	}
 
 	// Row's slug column must reflect the post-checkout branch — and
 	// must stay main_<branch>, not get clobbered with a path-hash
 	// slug by EnsureWorktree in fireTriggerActions.
-	assertMainRow(t, st, repoRoot, "main_feature_x", "feature/x")
+	assertMainRow(t, st, repoRoot, wantSlug, "feature/x")
 }
 
 // TestMainWorktreeOnFileChange runs the file-change variant matrix
@@ -100,14 +102,12 @@ func TestMainWorktreeOnFileChange(t *testing.T) {
 		name         string
 		overlayBlock string // YAML under `main_worktree:` (after `enabled: true`)
 		wantDBPrefix string // TREEMAN_WATCH_DB_NAME prefix the witness must start with
-		wantSlugInDB string // The main row's slug column post-event
 		branch       string // git branch at which the event fires
 	}{
 		{
 			name:         "NoOverlay",
 			overlayBlock: "",
 			wantDBPrefix: "tm_mw_main_",
-			wantSlugInDB: "main_main",
 			branch:       "main",
 		},
 		{
@@ -117,7 +117,6 @@ func TestMainWorktreeOnFileChange(t *testing.T) {
     - name_template: "tm_mw_dev_{slug}"
 `,
 			wantDBPrefix: "tm_mw_dev_main_",
-			wantSlugInDB: "main_main",
 			branch:       "main",
 		},
 		{
@@ -131,7 +130,6 @@ func TestMainWorktreeOnFileChange(t *testing.T) {
         name_template: ""
 `,
 			wantDBPrefix: "tm_mw_full_main_",
-			wantSlugInDB: "main_main",
 			branch:       "main",
 		},
 	}
@@ -195,8 +193,8 @@ hooks:
 			}
 			gotSlug, gotDBName, gotLabel, gotEngine, gotIsMain := parts[0], parts[1], parts[2], parts[3], parts[4]
 
-			if gotSlug != "main_main" {
-				t.Errorf("TREEMAN_SLUG = %q, want main_main (dispatcher used wrong slug for main-wt)", gotSlug)
+			if want := slug.ForMain(repoRoot, tc.branch).Value; gotSlug != want {
+				t.Errorf("TREEMAN_SLUG = %q, want %q (dispatcher used wrong slug for main-wt)", gotSlug, want)
 			}
 			if !strings.HasPrefix(gotDBName, tc.wantDBPrefix) {
 				t.Errorf("TREEMAN_WATCH_DB_NAME = %q, want prefix %q (overlay did not flow into the rendered template)",
@@ -212,7 +210,7 @@ hooks:
 				t.Errorf("TREEMAN_IS_MAIN = %q, want 1 for main-wt-driven file-change", gotIsMain)
 			}
 
-			assertMainRow(t, st, repoRoot, tc.wantSlugInDB, tc.branch)
+			assertMainRow(t, st, repoRoot, slug.ForMain(repoRoot, tc.branch).Value, tc.branch)
 		})
 	}
 }
@@ -352,8 +350,8 @@ hooks:
 	for _, name := range []string{"before", "after"} {
 		path := filepath.Join(witnessDir, name)
 		body := strings.TrimSpace(waitForFile(t, path, 15*time.Second))
-		if body != "main_develop|1" {
-			t.Errorf("create-%s-engines witness = %q, want \"main_develop|1\"", name, body)
+		if want := slug.ForMain(repoRoot, "develop").Value + "|1"; body != want {
+			t.Errorf("create-%s-engines witness = %q, want %q", name, body, want)
 		}
 	}
 }

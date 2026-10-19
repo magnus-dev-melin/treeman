@@ -28,7 +28,7 @@ const (
 	// stable `wt_<blake3(path)[:8]>`.
 	SourcePathHash
 	// SourceMain — derived by ForMain() for a repo's main worktree.
-	// Always branch-driven (`main_<sanitised_branch>`) so a non-ticket
+	// Always branch-driven (`main_<sanitised_branch>_<tag>`) so a non-ticket
 	// branch like `develop` doesn't collapse to the repo's path hash,
 	// which would share a DB across every branch ever checked out at
 	// the repo root.
@@ -127,8 +127,9 @@ func For(worktreePath string, _ string) Slug {
 // slugSuffix carries the optional TREEMAN_SLUG_SUFFIX namespace tag
 // (CI job disambiguation, #62). Read once from the env at package
 // init — the value cannot meaningfully change mid-process, and every
-// For/ForMain call site (CLI, daemon, MCP) must agree on it. Unset
-// means byte-identical slugs to a suffix-less build.
+// For/ForMain call site (CLI, daemon, MCP) must agree on it. It is
+// folded into every slug's tag, so unset means byte-identical slugs to
+// a suffix-less build.
 var slugSuffix string
 
 func init() { SetSlugSuffix(os.Getenv("TREEMAN_SLUG_SUFFIX")) }
@@ -139,82 +140,65 @@ func init() { SetSlugSuffix(os.Getenv("TREEMAN_SLUG_SUFFIX")) }
 //	TREEMAN_SLUG_SUFFIX=$GITHUB_RUN_ID treeman prepare --no-daemon
 //
 // so two jobs for the same branch render distinct database names
-// instead of clobbering each other's `main_<branch>` schemas. The
-// suffix is sanitised like a branch; empty clears it.
-func SetSlugSuffix(s string) { slugSuffix = sanitiseBranch(s) }
+// instead of clobbering each other's `main_<branch>_<tag>` schemas.
+// Empty clears it.
+func SetSlugSuffix(s string) { slugSuffix = s }
 
-// SlugSuffix returns the active namespace suffix ("" when unset).
-func SlugSuffix() string { return slugSuffix }
-
-// pathTag is a stable 8-hex-char blake3 digest of the worktree's
-// canonical absolute path — the collision-proof component of every
-// linked-worktree slug. Falls back to the raw path when Abs fails
-// (e.g. the cwd was removed) so a slug is still produced. The
-// namespace suffix (when set) is folded into the digest so even
-// identical paths land in distinct namespaces.
+// pathTag is the path-keyed tag of every linked-worktree slug. The
+// canonical absolute path is used; it falls back to the raw path when
+// Abs fails (e.g. the cwd was removed) so a slug is still produced.
 func pathTag(worktreePath string) string {
 	canonical, err := filepath.Abs(worktreePath)
 	if err != nil {
 		canonical = worktreePath
 	}
-	sum := blake3.Sum256([]byte(canonical + "\x00" + slugSuffix))
+	return tag(canonical)
+}
+
+// tag is the stable 8-hex-char blake3 digest that ends every slug. The
+// namespace suffix (when set) is folded into the digest so identical
+// inputs land in distinct namespaces. Every slug ending in a fixed-width
+// tag is what makes slugs prefix-free: no slug is a prefix of another,
+// so a prefix drop of one slug's names never reaches a sibling's.
+func tag(s string) string {
+	sum := blake3.Sum256([]byte(s + "\x00" + slugSuffix))
 	return hexEncode(sum[:])[:8]
 }
 
-// composeTicket joins a readable ticket prefix with the path tag inside
-// the 32-char identifier budget every engine's name template must fit.
-// Uniqueness lives in the tag, never the prefix, so truncating an
-// over-long prefix can't collide two distinct paths — their tags still
-// differ.
-func composeTicket(ticket, tag string) string {
-	out := ticket + "_" + tag
+// composeTicket joins a readable prefix with its tag inside the 32-char
+// identifier budget every engine's name template must fit. Uniqueness
+// lives in the tag, never the prefix, so truncating an over-long prefix
+// can't collide two distinct inputs.
+func composeTicket(readable, tag string) string {
+	out := readable + "_" + tag
 	if len(out) <= 32 {
 		return out
 	}
 	keep := max(32-1-len(tag), 1)
-	return ticket[:keep] + "_" + tag
+	return strings.TrimRight(readable[:keep], "_") + "_" + tag
 }
 
 // ForMain derives the slug for a repo's main worktree (the repo root
-// checkout). Unlike For(), the branch is mandatory and there's no
-// path-hash fallback — checking out a non-ticket branch like `develop`
-// at the repo root must produce a branch-specific slug (`main_develop`)
-// so per-branch DBs in the main wt actually diverge instead of all
-// pointing at one shared path-hash slug.
+// checkout). The branch drives it, so checking out a non-ticket branch
+// like `develop` at the repo root gets its own databases instead of
+// sharing one path-hash slug across every branch.
 //
-// Detached HEAD (empty branch) gets `main_detached_<hex>` keyed off
-// the repo path so two detached repos don't collide. Empty branch is
-// the edge case at boot before the daemon has detected HEAD.
+// The readable part is the sanitised branch; the tag is keyed on the
+// raw branch name, so branches that sanitise alike (`feature/foo`,
+// `feature-foo`, `Feature_Foo`) still get distinct slugs.
+//
+// Detached HEAD (empty branch) gets `main_detached_<tag>` keyed off the
+// repo path so two detached repos don't collide. Empty branch is the
+// edge case at boot before the daemon has detected HEAD.
 func ForMain(worktreePath string, branch string) Slug {
 	if branch == "" {
-		sum := blake3.Sum256([]byte(worktreePath + "\x00" + slugSuffix))
-		v := "main_detached_" + hexEncode(sum[:])[:8]
-		return Slug{Value: v, Source: SourceMain}
+		return Slug{Value: "main_detached_" + tag(worktreePath), Source: SourceMain}
 	}
-	sanitised := sanitiseBranch(branch)
-	if sanitised == "" {
-		// Branch was symbol-only (`@`, `###`, etc — git allows it).
-		// Falling through with an empty sanitised string would produce
-		// `main_` which collides for every odd branch in this repo;
-		// hash the raw branch instead so each one gets a stable slug.
-		sum := blake3.Sum256([]byte(branch + "\x00" + slugSuffix))
-		return Slug{Value: "main_sym_" + hexEncode(sum[:])[:8], Source: SourceMain}
+	readable := "main"
+	if s := sanitiseBranch(branch); s != "" {
+		readable += "_" + s
 	}
-	v := "main_" + sanitised
-	if len(v) > 32 {
-		// Same naive-truncation trap as extractTicket: collide-prone
-		// without a hash suffix when the branch name is long.
-		sum := blake3.Sum256([]byte(v))
-		tag := hexEncode(sum[:])[:6]
-		v = v[:32-1-len(tag)] + "_" + tag
-	}
-	if slugSuffix != "" {
-		// CI namespace tag (#62): uniqueness lives in the suffix, so
-		// composeTicket-style truncation may eat the readable part but
-		// never the disambiguator.
-		v = composeTicket(v, slugSuffix)
-	}
-	return Slug{Value: v, Source: SourceMain}
+	return Slug{Value: composeTicket(readable, tag(branch)), Source: SourceMain}
 }
 
 // sanitiseBranch lowercases the branch name and replaces every

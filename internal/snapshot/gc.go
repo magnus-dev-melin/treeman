@@ -247,8 +247,12 @@ func (p *dropPool) drop(ctx context.Context, c store.SnapshotEvictionCandidate) 
 	return nil
 }
 
-// dropTemplate is the single-candidate path: one batch of one.
-func dropTemplate(ctx context.Context, cfg *config.Config, c store.SnapshotEvictionCandidate) error {
+// DropTemplate drops one cached template and its pre-warmed spare
+// family on the server its row names (c.Connection): DropSnapshot, so
+// engine-specific cleanup such as MySQL's staging dir runs, never a
+// prefix drop of the template name. GC's single-candidate path, and
+// what MCP snapshots_drop uses.
+func DropTemplate(ctx context.Context, cfg *config.Config, c store.SnapshotEvictionCandidate) error {
 	pool := newDropPool(cfg, engineconn.Connect)
 	defer pool.close()
 	return pool.drop(ctx, c)
@@ -307,7 +311,7 @@ func SweepBySize(ctx context.Context, cfg *config.Config, st *store.Store) {
 		if IsPinned(c.Fingerprint) {
 			continue
 		}
-		if err := dropTemplate(ctx, cfg, c); err != nil {
+		if err := DropTemplate(ctx, cfg, c); err != nil {
 			slog.Warn("snapshot size sweep drop", "template", c.TemplateName, "err", err)
 			continue
 		}

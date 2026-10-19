@@ -166,31 +166,34 @@ type StageRow struct {
 	ExpandDir bool
 }
 
-// StageRows parses `git status --porcelain` output into the M/A/D rows
-// the interactive stager offers. It looks only at the worktree
+// StageRows parses `git status --porcelain -z` output into the M/A/D
+// rows the interactive stager offers. It looks only at the worktree
 // (second) status column — staged-only changes are already staged and
-// so are skipped — plus untracked entries. Directory expansion for
-// untracked dirs is left to the caller (see ExpandDir) to keep this
+// so are skipped — plus untracked entries. The -z form keeps paths
+// verbatim (no C-style quoting) and every entry's leading status
+// columns intact; a rename or copy carries its original path as the
+// following entry, which is skipped. Directory expansion for untracked
+// dirs is left to the caller (see ExpandDir) to keep this
 // filesystem-free and testable.
-func StageRows(porcelain string) []StageRow {
+func StageRows(porcelainZ string) []StageRow {
 	var rows []StageRow
-	for line := range strings.SplitSeq(porcelain, "\n") {
-		if len(line) < 4 {
+	entries := strings.Split(strings.TrimSuffix(porcelainZ, "\x00"), "\x00")
+	for i := 0; i < len(entries); i++ {
+		e := entries[i]
+		if len(e) < 4 {
 			continue
 		}
-		xy := line[:2]
-		rest := line[3:]
+		xy, path := e[:2], e[3:]
+		if strings.ContainsAny(xy, "RC") {
+			i++
+		}
 		switch {
 		case xy == "??":
-			rows = append(rows, StageRow{Kind: StageAdded, Path: rest, ExpandDir: strings.HasSuffix(rest, "/")})
+			rows = append(rows, StageRow{Kind: StageAdded, Path: path, ExpandDir: strings.HasSuffix(path, "/")})
 		case xy[1] == 'D':
-			rows = append(rows, StageRow{Kind: StageDeleted, Path: rest})
+			rows = append(rows, StageRow{Kind: StageDeleted, Path: path})
 		case xy[1] == 'M':
-			p := rest
-			if i := strings.Index(p, " -> "); i >= 0 {
-				p = p[i+4:] // rename: keep the new name
-			}
-			rows = append(rows, StageRow{Kind: StageModified, Path: p})
+			rows = append(rows, StageRow{Kind: StageModified, Path: path})
 		}
 	}
 	return rows

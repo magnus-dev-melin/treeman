@@ -216,8 +216,24 @@ func inlineTeardown(ctx context.Context, repoRoot, wtPath string, force bool, en
 			})
 	}
 	runTrigger("delete-after-engines", cfg.Hooks.OnDeleteAfterEngines)
-	// Release the per-worktree port reservations back into the pool
-	// so a future `wt create` can re-use them.
+	// Always --force: whether dirty work may be destroyed was settled
+	// before Delete ran (the CLI's confirm, back --remove's and gc's
+	// clean gates, MCP's ack), and the databases are already gone, so
+	// git refusing here would only strand a worktree without them. The
+	// daemon path agrees: it renames the tree into trash. The request's
+	// force flag still means "a stale entry may fail to remove".
+	// Same stdout-discipline rationale as Create's git invocation:
+	// route everything informational to stderr.
+	if err := gitcmd.RunPiped(ctx, repoRoot, os.Stderr, os.Stderr, "worktree", "remove", "--force", wtPath); err != nil && !force {
+		return fmt.Errorf("git worktree remove %s: %w", wtPath, err)
+	}
+	// git worktree remove leaves untracked copies/links bring-in behind
+	// (node_modules, vendored dirs, nested git repos). Nuke it plus the
+	// now-empty parent dirs so a future create at this path doesn't trip
+	// "destination path already exists".
+	RemoveWorktreeTree(wtPath, WorktreesRoot(cfg, repoRoot))
+	// Registry bookkeeping last: a removal that failed above leaves the
+	// row live, so a retry finds it and finishes the teardown.
 	if err := st.ReleaseWorktreePorts(ctx, id.WtID); err != nil {
 		slog.Warn("wt delete: release ports (freed ports stay blocked)", "wt", wtPath, "err", err)
 	}
@@ -228,22 +244,9 @@ func inlineTeardown(ctx context.Context, repoRoot, wtPath string, force bool, en
 	if err := st.ClearActiveBranchesForWorktree(ctx, id.WtID); err != nil {
 		slog.Warn("wt delete: clear active-branch markers (stale markers survive recreate)", "wt", wtPath, "err", err)
 	}
-	_ = st.MarkWorktreeDeleted(ctx, id.WtID)
-	args := []string{"worktree", "remove"}
-	if force {
-		args = append(args, "--force")
+	if err := st.MarkWorktreeDeleted(ctx, id.WtID); err != nil {
+		return fmt.Errorf("mark worktree %s deleted: %w", wtPath, err)
 	}
-	args = append(args, wtPath)
-	// Same stdout-discipline rationale as Create's git invocation:
-	// route everything informational to stderr.
-	if err := gitcmd.RunPiped(ctx, repoRoot, os.Stderr, os.Stderr, args...); err != nil && !force {
-		return fmt.Errorf("git worktree remove: %w", err)
-	}
-	// git worktree remove leaves untracked copies/links bring-in behind
-	// (node_modules, vendored dirs, nested git repos). Nuke it plus the
-	// now-empty parent dirs so a future create at this path doesn't trip
-	// "destination path already exists".
-	RemoveWorktreeTree(wtPath, WorktreesRoot(cfg, repoRoot))
 	_ = sink
 	return nil
 }

@@ -89,7 +89,7 @@ func TestTeardownOrphanDoesNotLockRepoDuringEngineDrop(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("engine drop was not reached")
 	}
-	mu := st.LockRepoTeardown(repoPath)
+	mu := st.repoTeardownLock(repoPath)
 	if !mu.TryLock() {
 		t.Fatal("orphan engine drop holds the repo mutex needed by unrelated worktree removal")
 	}

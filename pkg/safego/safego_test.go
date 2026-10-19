@@ -126,3 +126,15 @@ func TestRecoverLogsStack(t *testing.T) {
 
 // nilMap returns a nil map for TestRecoverLogsStack to panic on.
 func nilMap() map[string]string { return nil }
+
+func TestRunTurnsPanicIntoError(t *testing.T) {
+	v, err := Run("test:run", "", func() (int, error) {
+		panic("boom")
+	})
+	if err == nil || v != 0 || !strings.Contains(err.Error(), "test:run panicked") {
+		t.Fatalf("Run = %d, %v; want 0 and a panic error", v, err)
+	}
+	if v, err := Run("test:run", "", func() (int, error) { return 7, nil }); v != 7 || err != nil {
+		t.Fatalf("Run without panic = %d, %v", v, err)
+	}
+}

@@ -23,13 +23,13 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/stubbedev/treeman/internal/atomicfile"
 	"github.com/stubbedev/treeman/internal/yamlpatch"
 )
 
@@ -79,14 +79,14 @@ func PatchEnvFile(path string, pairs []Pair) (Outcome, error) {
 	if content == original {
 		return Unchanged, nil
 	}
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-		return Updated, fmt.Errorf("write %s: %w", path, err)
+	if err := atomicfile.Write(path, []byte(content), 0o644); err != nil {
+		return Updated, err
 	}
 	return Updated, nil
 }
 
 func patchEnvOne(content, key, value string) string {
-	re := regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(key) + `\s*=.*$`)
+	re := dotenvLine(key)
 	// regexp's Replace expands `$1`, `${name}`, `$$`, etc. in the
 	// replacement string. Use ReplaceAllLiteralString so a slug or
 	// value containing `$` doesn't accidentally pull in match groups.
@@ -120,14 +120,14 @@ func PatchPhpunitFile(path string, pairs []Pair) (Outcome, error) {
 	if content == original {
 		return Unchanged, nil
 	}
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-		return Updated, fmt.Errorf("write %s: %w", path, err)
+	if err := atomicfile.Write(path, []byte(content), 0o644); err != nil {
+		return Updated, err
 	}
 	return Updated, nil
 }
 
 func patchPhpunitOne(content, key, value string) string {
-	re := regexp.MustCompile(`<env name="` + regexp.QuoteMeta(key) + `"[^/]*/>`)
+	re := phpunitEnv(key)
 	replacement := fmt.Sprintf(`<env name="%s" value="%s" force="true"/>`,
 		xmlAttrEscape(key), xmlAttrEscape(value))
 	if re.MatchString(content) {
@@ -179,8 +179,8 @@ func PatchYAMLFile(path string, pairs map[string]string) (Outcome, error) {
 	if err != nil {
 		return Updated, fmt.Errorf("yaml driver: marshal %s: %w", path, err)
 	}
-	if err := os.WriteFile(path, out, 0o644); err != nil {
-		return Updated, fmt.Errorf("write %s: %w", path, err)
+	if err := atomicfile.Write(path, out, 0o644); err != nil {
+		return Updated, err
 	}
 	return Updated, nil
 }
@@ -210,8 +210,8 @@ func PatchJSONFile(path string, pairs map[string]string) (Outcome, error) {
 	if !changed {
 		return Unchanged, nil
 	}
-	if err := os.WriteFile(path, []byte(out), 0o644); err != nil {
-		return Updated, fmt.Errorf("write %s: %w", path, err)
+	if err := atomicfile.Write(path, []byte(out), 0o644); err != nil {
+		return Updated, err
 	}
 	return Updated, nil
 }

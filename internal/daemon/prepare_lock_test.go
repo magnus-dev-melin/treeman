@@ -47,9 +47,9 @@ func TestPrepareCallSitesHoldWorktreeLock(t *testing.T) {
 				continue
 			}
 			found++
-			if !strings.Contains(fn, "LockWorktreePrepare") {
+			if !strings.Contains(fn, "withWorktreePrepare") {
 				name, _, _ := strings.Cut(fn, "(")
-				t.Errorf("%s: func %s calls prepare.Run/RunFiltered without LockWorktreePrepare — "+
+				t.Errorf("%s: func %s calls prepare.Run/RunFiltered without withWorktreePrepare — "+
 					"concurrent builds would collide on the same source databases (issue #28)", f, name)
 			}
 		}
@@ -74,24 +74,24 @@ func callsPrepare(chunk string) bool {
 	return false
 }
 
-// TestLockWorktreePrepareScope — the lock is per worktree: the same path
+// TestWorktreePrepareLockScope — the lock is per worktree: the same path
 // serialises, two different paths don't.
-func TestLockWorktreePrepareScope(t *testing.T) {
+func TestWorktreePrepareLockScope(t *testing.T) {
 	st, cleanup := setup(t)
 	defer cleanup()
-	if got := st.LockWorktreePrepare("/wt/a"); got != st.LockWorktreePrepare("/wt/a") {
+	if got := st.worktreePrepareLock("/wt/a"); got != st.worktreePrepareLock("/wt/a") {
 		t.Error("same worktree path returned two different mutexes")
 	}
-	if st.LockWorktreePrepare("/wt/a") == st.LockWorktreePrepare("/wt/b") {
+	if st.worktreePrepareLock("/wt/a") == st.worktreePrepareLock("/wt/b") {
 		t.Error("different worktree paths share a mutex — parallel builds would serialise")
 	}
 
-	mu := st.LockWorktreePrepare("/wt/a")
+	mu := st.worktreePrepareLock("/wt/a")
 	mu.Lock()
 	released := make(chan struct{})
 	var wg sync.WaitGroup
 	wg.Go(func() {
-		second := st.LockWorktreePrepare("/wt/a")
+		second := st.worktreePrepareLock("/wt/a")
 		second.Lock()
 		defer second.Unlock()
 		close(released)
@@ -103,4 +103,26 @@ func TestLockWorktreePrepareScope(t *testing.T) {
 	}
 	mu.Unlock()
 	wg.Wait()
+}
+
+// A panic inside the critical section used to leave the mutex locked
+// (the unlock was a plain statement after the call), blocking every
+// later prepare of the worktree forever.
+func TestWithWorktreePrepareReleasesOnPanic(t *testing.T) {
+	st, cleanup := setup(t)
+	defer cleanup()
+	func() {
+		defer func() { _ = recover() }()
+		st.withWorktreePrepare("/wt/a", func() { panic("boom") })
+	}()
+	if !st.worktreePrepareLock("/wt/a").TryLock() {
+		t.Fatal("prepare lock still held after a panic")
+	}
+	func() {
+		defer func() { _ = recover() }()
+		st.withRepoTeardown("/repo", func() { panic("boom") })
+	}()
+	if !st.repoTeardownLock("/repo").TryLock() {
+		t.Fatal("teardown lock still held after a panic")
+	}
 }

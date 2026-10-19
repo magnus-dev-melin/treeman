@@ -67,17 +67,21 @@ func (d *Driver) cloneViaDumpRestore(ctx context.Context, source, dest string) e
 	if !d.dumpToolsAvailable(ctx, engineBin, cid) {
 		return fmt.Errorf("%w: mongodump/mongorestore not on PATH in %s", errCloneToolsUnavailable, cid)
 	}
-	uri := d.inContainerURI()
+	cfgPath, removeCfg, err := containerToolConfig(ctx, engineBin, cid, d.inContainerURI())
+	if err != nil {
+		return err
+	}
+	defer removeCfg()
 
 	if isSnapshotTemplate(source) {
-		return d.cloneViaArchive(ctx, cid, engineBin, uri, source, dest)
+		return d.cloneViaArchive(ctx, cid, engineBin, cfgPath, source, dest)
 	}
 
 	// Non-template source (e.g. building the template itself): single
 	// streamed pipe, no scratch file. --drop makes re-runs idempotent.
 	script := fmt.Sprintf(
-		"mongodump --uri=%s --db=%s --archive | mongorestore --uri=%s --archive --nsInclude=%s --nsFrom=%s --nsTo=%s --drop",
-		shQuote(uri), shQuote(source), shQuote(uri),
+		"mongodump --config=%s --db=%s --archive | mongorestore --config=%s --archive --nsInclude=%s --nsFrom=%s --nsTo=%s --drop",
+		shQuote(cfgPath), shQuote(source), shQuote(cfgPath),
 		shQuote(source+".*"), shQuote(source+".*"), shQuote(dest+".*"),
 	)
 	return dockerExecSh(ctx, engineBin, cid, script,
@@ -87,13 +91,14 @@ func (d *Driver) cloneViaDumpRestore(ctx context.Context, source, dest string) e
 // cloneViaArchive dumps `source` to a cached archive once (guarded by
 // sync.Once) then restores it into `dest`, remapping the source.*
 // namespaces onto dest.*. The N-clone fan-out thus pays a single dump.
-func (d *Driver) cloneViaArchive(ctx context.Context, cid, engineBin, uri, source, dest string) error {
+// cfgPath is the in-container tool config carrying the connection.
+func (d *Driver) cloneViaArchive(ctx context.Context, cid, engineBin, cfgPath, source, dest string) error {
 	v, _ := d.archives.LoadOrStore(source, &mongoArchive{})
 	a, _ := v.(*mongoArchive)
 	a.once.Do(func() {
 		path := mongoStageDir + "/" + source + ".archive"
-		dump := fmt.Sprintf("mkdir -p %s && mongodump --uri=%s --db=%s --archive=%s",
-			shQuote(mongoStageDir), shQuote(uri), shQuote(source), shQuote(path))
+		dump := fmt.Sprintf("mkdir -p %s && mongodump --config=%s --db=%s --archive=%s",
+			shQuote(mongoStageDir), shQuote(cfgPath), shQuote(source), shQuote(path))
 		if err := dockerExecSh(ctx, engineBin, cid, dump, "mongodump "+source); err != nil {
 			a.err = err
 			return
@@ -104,8 +109,8 @@ func (d *Driver) cloneViaArchive(ctx context.Context, cid, engineBin, uri, sourc
 		return a.err
 	}
 	restore := fmt.Sprintf(
-		"mongorestore --uri=%s --archive=%s --nsInclude=%s --nsFrom=%s --nsTo=%s --drop",
-		shQuote(uri), shQuote(a.path), shQuote(source+".*"), shQuote(source+".*"), shQuote(dest+".*"),
+		"mongorestore --config=%s --archive=%s --nsInclude=%s --nsFrom=%s --nsTo=%s --drop",
+		shQuote(cfgPath), shQuote(a.path), shQuote(source+".*"), shQuote(source+".*"), shQuote(dest+".*"),
 	)
 	return dockerExecSh(ctx, engineBin, cid, restore,
 		fmt.Sprintf("mongorestore %s→%s", source, dest))
