@@ -60,6 +60,10 @@ func TestMySQLEndToEnd(t *testing.T) {
 
 	assertTablesPresent(t, "127.0.0.1:13306", o1.SourceDB, []string{"products", "orders"})
 	assertRowCount(t, "127.0.0.1:13306", o1.SourceDB, "products", 3)
+	assertViewsReadOwnTables(t, "127.0.0.1:13306", o1.TemplateName)
+	for _, c := range o1.Clones {
+		assertViewsReadOwnTables(t, "127.0.0.1:13306", c)
+	}
 
 	// ── Pass 2: cache hit. Same fingerprint → snapshot cache lookup
 	//          should succeed without rebuilding.
@@ -397,6 +401,7 @@ func TestPhysicalCloneViaContainerExec(t *testing.T) {
 	// physical clone copies — the template must carry the replayed
 	// trigger too (issue #20).
 	assertTriggerCount(t, "127.0.0.1:13306", o.TemplateName, 1)
+	assertViewsReadOwnTables(t, "127.0.0.1:13306", o.TemplateName)
 }
 
 // TestStagedFanoutRestoreParallel proves the physical fan-out no longer
@@ -466,6 +471,7 @@ func TestStagedFanoutRestoreParallel(t *testing.T) {
 		// MySQL triggers, so trigger-dependent tests passed serially
 		// and failed under --parallel.
 		assertTriggerCount(t, "127.0.0.1:13306", name, 1)
+		assertViewsReadOwnTables(t, "127.0.0.1:13306", name)
 	}
 
 	// The staging dir is created only by the physical staged-restore
@@ -663,6 +669,43 @@ func assertTriggerCount(t *testing.T, addr, dbName string, want int) {
 	}
 	if n != want {
 		t.Errorf("%s trigger count = %d, want %d (clone dropped triggers)", dbName, n, want)
+	}
+}
+
+// assertViewsReadOwnTables fails unless dbName carries the seed's two
+// views, defined over dbName's own tables: a view replayed with its
+// source-qualified DDL would fail to create or read the source.
+func assertViewsReadOwnTables(t *testing.T, addr, dbName string) {
+	t.Helper()
+	db := openMySQL(t, addr, dbName)
+	defer db.Close()
+	ctx := context.Background()
+	rows, err := db.QueryContext(ctx,
+		"SELECT TABLE_NAME, VIEW_DEFINITION FROM information_schema.VIEWS WHERE TABLE_SCHEMA = ? ORDER BY TABLE_NAME", dbName)
+	if err != nil {
+		t.Fatalf("list views(%s): %v", dbName, err)
+	}
+	defer rows.Close()
+	var names []string
+	for rows.Next() {
+		var name, def string
+		if err := rows.Scan(&name, &def); err != nil {
+			t.Fatal(err)
+		}
+		names = append(names, name)
+		if !strings.Contains(def, "`"+dbName+"`") {
+			t.Errorf("%s.%s reads another schema: %s", dbName, name, def)
+		}
+	}
+	if strings.Join(names, ",") != "a_cheap,z_priced" {
+		t.Fatalf("%s views = %v, want [a_cheap z_priced]", dbName, names)
+	}
+	var n int
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM a_cheap").Scan(&n); err != nil {
+		t.Fatalf("query %s.a_cheap: %v", dbName, err)
+	}
+	if n != 2 {
+		t.Errorf("%s.a_cheap = %d rows, want 2", dbName, n)
 	}
 }
 

@@ -321,7 +321,7 @@ func (d *Driver) SnapshotCreate(ctx context.Context, source, template string) er
 	}
 	if ok, perr := d.tryPhysicalSnapshotCreate(ctx, source, template); ok {
 		d.setLastStrategy(CloneStrategyPhysical)
-		return d.cloneTriggers(ctx, source, template)
+		return d.cloneDictionaryObjects(ctx, source, template)
 	} else if perr != nil {
 		if skip, ok := errors.AsType[*physicalSkippedError](perr); ok {
 			slog.Debug("mysql physical clone preconditions not met; using logical fallback",
@@ -534,7 +534,7 @@ func (d *Driver) logicalSnapshotCreate(ctx context.Context, source, template str
 		return err
 	}
 
-	tables, views, err := d.listTablesAndViews(ctx, source)
+	tables, _, err := d.listTablesAndViews(ctx, source)
 	if err != nil {
 		return err
 	}
@@ -573,14 +573,7 @@ func (d *Driver) logicalSnapshotCreate(ctx context.Context, source, template str
 		return err
 	}
 
-	// Views need their dependencies in place — defer to a single
-	// serial pass after the parallel table copy finishes.
-	if len(views) > 0 {
-		if err := d.cloneViews(ctx, qsource, qtemplate, views); err != nil {
-			return err
-		}
-	}
-	return d.cloneTriggers(ctx, source, template)
+	return d.cloneDictionaryObjects(ctx, source, template)
 }
 
 // schemaObject is one base table or view enumerated from
@@ -693,10 +686,42 @@ func showCreateTable(ctx context.Context, conn *sql.Conn, qsource, name string) 
 	return createStmt, nil
 }
 
-// cloneViews replays every view from source into the template on a
-// single connection after the table copy finishes, so each CREATE VIEW
-// sees its table / view dependencies already in place.
-func (d *Driver) cloneViews(ctx context.Context, qsource, qtemplate string, views []schemaObject) error {
+// cloneDictionaryObjects replays the schema objects that live only in
+// the server's data dictionary — views, then triggers — from source
+// onto template. No clone path carries them implicitly: the logical
+// path copies CREATE TABLE + INSERT…SELECT and the physical paths copy
+// base-table .ibd files, so it runs after every successful clone, on
+// all three paths.
+func (d *Driver) cloneDictionaryObjects(ctx context.Context, source, template string) error {
+	if err := d.cloneViews(ctx, source, template); err != nil {
+		return err
+	}
+	return d.cloneTriggers(ctx, source, template)
+}
+
+// cloneViews replays every view from source into template on a single
+// connection. SHOW CREATE VIEW runs with source as the current
+// database, as mysqldump does: MySQL then prints the view's own name
+// and its same-schema references unqualified, so the DDL lands in
+// template and reads template's tables. Asked from elsewhere it
+// qualifies both with source, which re-creates the view in source
+// (ERROR 1050) or, worse, points the clone at source's data. Each
+// view runs under the client charset and collation it was defined
+// with. Views that read a view not created yet are retried in a later
+// pass, so definition order doesn't matter.
+func (d *Driver) cloneViews(ctx context.Context, source, template string) error {
+	_, views, err := d.listTablesAndViews(ctx, source)
+	if err != nil || len(views) == 0 {
+		return err
+	}
+	qsource, err := ident.QuoteMySQL(source)
+	if err != nil {
+		return err
+	}
+	qtemplate, err := ident.QuoteMySQL(template)
+	if err != nil {
+		return err
+	}
 	conn, err := d.DB.Conn(ctx)
 	if err != nil {
 		return err
@@ -705,38 +730,79 @@ func (d *Driver) cloneViews(ctx context.Context, qsource, qtemplate string, view
 	if err := applyCloneSession(ctx, conn); err != nil {
 		return err
 	}
+	defs := make([]viewDef, 0, len(views))
+	if _, err := conn.ExecContext(ctx, "USE "+qsource); err != nil {
+		return fmt.Errorf("USE %s: %w", qsource, err)
+	}
 	for _, v := range views {
-		qv, err := ident.QuoteMySQL(v.name)
+		def, err := showCreateView(ctx, conn, v.name)
 		if err != nil {
-			return err
+			return fmt.Errorf("%s: %w", qsource, err)
 		}
-		row := conn.QueryRowContext(ctx, "SHOW CREATE VIEW "+qsource+"."+qv)
-		var name, createStmt string
-		// SHOW CREATE VIEW returns four columns; scan into
-		// dummies for the extras.
-		var charset, collation string
-		if err := row.Scan(&name, &createStmt, &charset, &collation); err != nil {
-			return fmt.Errorf("SHOW CREATE VIEW %s.%s: %w", qsource, qv, err)
+		defs = append(defs, def)
+	}
+	if _, err := conn.ExecContext(ctx, "USE "+qtemplate); err != nil {
+		return fmt.Errorf("USE %s: %w", qtemplate, err)
+	}
+	for len(defs) > 0 {
+		var pending []viewDef
+		var lastErr error
+		for _, def := range defs {
+			if err := createView(ctx, conn, def); err != nil {
+				if !isNoSuchTable(err) {
+					return fmt.Errorf("recreate view %s in %s: %w", def.name, qtemplate, err)
+				}
+				pending, lastErr = append(pending, def), err
+			}
 		}
-		if _, err := conn.ExecContext(ctx, "USE "+qtemplate); err != nil {
-			return fmt.Errorf("USE %s: %w", qtemplate, err)
+		if len(pending) == len(defs) {
+			return fmt.Errorf("recreate views in %s: %d left with unresolvable dependencies: %w", qtemplate, len(pending), lastErr)
 		}
-		if _, err := conn.ExecContext(ctx, createStmt); err != nil {
-			return fmt.Errorf("recreate view %s: %w", qv, err)
-		}
+		defs = pending
 	}
 	return nil
 }
 
+type viewDef struct{ name, create, charset, collation string }
+
+func showCreateView(ctx context.Context, conn *sql.Conn, name string) (viewDef, error) {
+	qv, err := ident.QuoteMySQL(name)
+	if err != nil {
+		return viewDef{}, err
+	}
+	def := viewDef{name: name}
+	var gotName string
+	if err := conn.QueryRowContext(ctx, "SHOW CREATE VIEW "+qv).Scan(&gotName, &def.create, &def.charset, &def.collation); err != nil {
+		return viewDef{}, fmt.Errorf("SHOW CREATE VIEW %s: %w", qv, err)
+	}
+	return def, nil
+}
+
+func createView(ctx context.Context, conn *sql.Conn, def viewDef) error {
+	if _, err := conn.ExecContext(
+		ctx,
+		"SET SESSION character_set_client = ?, collation_connection = ?",
+		def.charset,
+		def.collation,
+	); err != nil {
+		return fmt.Errorf("set view charset %s/%s: %w", def.charset, def.collation, err)
+	}
+	_, err := conn.ExecContext(ctx, def.create)
+	return err
+}
+
+// isNoSuchTable reports MySQL's ER_NO_SUCH_TABLE (1146): a view's
+// dependency doesn't exist yet.
+func isNoSuchTable(err error) bool {
+	me, ok := errors.AsType[*gomysql.MySQLError](err)
+	return ok && me.Number == 1146
+}
+
 // cloneTriggers replays every trigger from `source` onto `template`.
-// Triggers live in the server's data dictionary — not in table rows or
-// InnoDB tablespaces — so no clone path carries them implicitly: the
-// logical path copies CREATE TABLE + INSERT…SELECT and the physical
-// path copies .ibd files. Without this replay every clone silently
-// loses its triggers (issue #20: trigger-dependent tests pass serially
-// against the source and fail on the paratest worker clones — same bug
-// class as the ES clone dropping aliases). Runs after every successful
-// clone, on all three paths.
+// Without this replay every clone silently loses its triggers (issue
+// #20: trigger-dependent tests pass serially against the source and
+// fail on the paratest worker clones — same bug class as the ES clone
+// dropping aliases).
 //
 // Replay follows ACTION_ORDER so multi-trigger chains declared with
 // FOLLOWS/PRECEDES land in the same firing order without needing the
@@ -1052,7 +1118,7 @@ func (d *Driver) SnapshotRestoreStaged(ctx context.Context, template, target str
 		rerr := d.physicalRestoreFromStage(ctx, st, target)
 		if rerr == nil {
 			d.setLastStrategy(CloneStrategyPhysical)
-			return d.cloneTriggers(ctx, template, target)
+			return d.cloneDictionaryObjects(ctx, template, target)
 		}
 		slog.Warn("mysql physical restore-from-stage failed; using logical restore",
 			"template", template, "target", target, "error", rerr)
