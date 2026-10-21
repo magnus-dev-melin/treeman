@@ -114,7 +114,7 @@ jobs:
                   echo "Packagist is in sync: ${WHAT}"
                   exit 0
                 fi
-                # Master moved on while we polled (the flake.nix
+                # Master moved on while we polled (the vendorHash
                 # auto-bump does exactly this, and pushes [skip ci] so
                 # no later run covers for us). Packagist sitting on a
                 # descendant of this commit means the sync worked and

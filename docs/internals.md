@@ -135,6 +135,6 @@ just sync-flake [VERSION]
 just release-{patch,minor,major}   # tag + push, GH Actions builds + publishes
 ```
 
-The `sync-flake` recipe rewrites `flake.nix` `vendorHash` and
+The `sync-flake` recipe rewrites `nix/package.nix` `vendorHash` and
 `version` to match the current `go.sum` / tag. Called automatically
 from the release recipes so the flake build never drifts.

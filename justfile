@@ -266,9 +266,9 @@ nix-build:
 nix-check:
     nix flake check --print-build-logs
 
-# Keep flake.nix's `vendorHash` aligned with the current go.sum.
+# Keep nix/package.nix's `vendorHash` aligned with the current go.sum.
 #
-# A sha256 of go.sum is embedded as a `# go-sum:` line in flake.nix.
+# A sha256 of go.sum is embedded as a `# go-sum:` line in nix/package.nix.
 # When the cached digest matches go.sum on disk, sync-flake returns
 # immediately without running `nix build`. That makes it cheap
 # enough to run on every `just check`, so a dev `go get` flow can
@@ -276,8 +276,8 @@ nix-check:
 #
 # By default this does NOT touch the version string — release-only
 # concern. Pass an explicit `version` argument to also rewrite
-# `version = "…"` + the `-X .../Version=…` ldflag (used by the
-# release recipes). Pass `--force` to bypass the cache and re-run
+# `version = "…"`, which the `-X .../Version=…` ldflag reads (used by
+# the release recipes). Pass `--force` to bypass the cache and re-run
 # the nix build even if go.sum looks unchanged.
 sync-flake version="":
     #!/usr/bin/env bash
@@ -292,8 +292,8 @@ sync-flake version="":
     esac
 
     GO_SUM_HASH=$(sha256sum go.sum | awk '{print $1}')
-    CACHED_HASH=$(awk -F': ' '/^[[:space:]]*#[[:space:]]*go-sum:/ {print $2; exit}' flake.nix | tr -d ' ')
-    CURRENT_VERSION=$(awk -F'"' '/^[[:space:]]*version = "/ {print $2; exit}' flake.nix)
+    CACHED_HASH=$(awk -F': ' '/^[[:space:]]*#[[:space:]]*go-sum:/ {print $2; exit}' nix/package.nix | tr -d ' ')
+    CURRENT_VERSION=$(awk -F'"' '/^[[:space:]]*version = "/ {print $2; exit}' nix/package.nix)
 
     NEED_HASH=0
     NEED_VERSION=0
@@ -309,7 +309,7 @@ sync-flake version="":
 
     if [ "$NEED_HASH" = "1" ]; then
         SENTINEL="sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
-        sed -i -E 's|^(\s*vendorHash = )"sha256-[^"]*";|\1"'"$SENTINEL"'";|' flake.nix
+        sed -i -E 's|^(\s*vendorHash = )"sha256-[^"]*";|\1"'"$SENTINEL"'";|' nix/package.nix
         set +e
         OUT=$(nix build .#treeman --no-link 2>&1)
         BUILD_STATUS=$?
@@ -325,27 +325,26 @@ sync-flake version="":
             echo "sync-flake: nix build failed without printing 'got: sha256-…'" >&2
             exit 1
         fi
-        sed -i -E 's|^(\s*vendorHash = )"sha256-[^"]*";|\1"'"$NEW_HASH"'";|' flake.nix
-        if grep -q '^[[:space:]]*# go-sum:' flake.nix; then
-            sed -i -E 's|^(\s*# go-sum:).*|\1 '"$GO_SUM_HASH"'|' flake.nix
+        sed -i -E 's|^(\s*vendorHash = )"sha256-[^"]*";|\1"'"$NEW_HASH"'";|' nix/package.nix
+        if grep -q '^[[:space:]]*# go-sum:' nix/package.nix; then
+            sed -i -E 's|^(\s*# go-sum:).*|\1 '"$GO_SUM_HASH"'|' nix/package.nix
         else
-            sed -i -E 's|^(\s*vendorHash = )|          # go-sum: '"$GO_SUM_HASH"'\n\1|' flake.nix
+            sed -i -E 's|^(\s*)(vendorHash = )|\1# go-sum: '"$GO_SUM_HASH"'\n\1\2|' nix/package.nix
         fi
         echo "sync-flake: vendorHash=$NEW_HASH go-sum=$GO_SUM_HASH"
     fi
 
-    # Hard guard: refuse to leave the sentinel in flake.nix. If we
+    # Hard guard: refuse to leave the sentinel in nix/package.nix. If we
     # somehow get here with it still present, the working tree is
     # broken and CI will fail on hash mismatch — fail loudly here so
     # the dev catches it before push.
-    if grep -q '^\s*vendorHash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="' flake.nix; then
-        echo "sync-flake: refusing to leave sentinel vendorHash in flake.nix" >&2
+    if grep -q '^\s*vendorHash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="' nix/package.nix; then
+        echo "sync-flake: refusing to leave sentinel vendorHash in nix/package.nix" >&2
         exit 1
     fi
 
     if [ "$NEED_VERSION" = "1" ]; then
-        sed -i -E 's|^(\s*version = )"[^"]*";|\1"'"$VERSION"'";|' flake.nix
-        sed -i -E 's|(-X github.com/stubbedev/treeman/internal/version.Version=)[^"]*|\1'"$VERSION"'|' flake.nix
+        sed -i -E 's|^(\s*version = )"[^"]*";|\1"'"$VERSION"'";|' nix/package.nix
         echo "sync-flake: version=$VERSION"
     fi
 
@@ -402,14 +401,14 @@ _release bump:
         patch) NEW="${MAJOR}.${MINOR}.$((PATCH + 1))" ;;
         *) echo "unknown bump kind: {{bump}}"; exit 1 ;;
     esac
-    # Always sync flake.nix vendorHash + version BEFORE tagging.
-    # Even when go.sum hasn't changed, the version + ldflags strings
+    # Always sync nix/package.nix vendorHash + version BEFORE tagging.
+    # Even when go.sum hasn't changed, the version string
     # must reflect v${NEW} or `nix profile install` will report a
     # stale version. sync-flake re-validates the build at the end.
     just sync-flake "${NEW}"
-    if [ -n "$(git status --porcelain flake.nix)" ]; then
-        git add flake.nix
-        git commit -m "chore: bump flake.nix to v${NEW}"
+    if [ -n "$(git status --porcelain nix/package.nix)" ]; then
+        git add nix/package.nix
+        git commit -m "chore: bump nix/package.nix to v${NEW}"
     fi
     git tag -a "v${NEW}" -m "v${NEW}"
     git push origin HEAD
