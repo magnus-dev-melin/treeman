@@ -44,29 +44,29 @@ type LifecycleWatcher struct {
 	pendingCreate map[string]*time.Timer
 }
 
-// StartLifecycleWatcher subscribes to a repo's `<common-dir>/worktrees/`
-// directory and runs an initial reconcile pass against the DB. Idempotent
-// per repoPath via the daemon state's watcher registry: a second call
-// cancels the prior watcher first.
-func StartLifecycleWatcher(ctx context.Context, st *State, repoID int64, repoPath string) (*LifecycleWatcher, error) {
+// startLifecycleWatcher subscribes to a repo's git common dir and its
+// `worktrees/` directory and runs an initial reconcile pass against the
+// DB. A second call for the same repoPath cancels the prior watcher.
+func startLifecycleWatcher(ctx context.Context, st *State, repoID int64, repoPath string) error {
 	if repoPath == "" {
-		return nil, errors.New("lifecycle: empty repo_path")
+		return errors.New("lifecycle: empty repo_path")
 	}
 	commonDir, err := resolveGitCommonDir(repoPath)
 	if err != nil {
-		return nil, fmt.Errorf("lifecycle: resolve common-dir: %w", err)
+		return fmt.Errorf("lifecycle: resolve common-dir: %w", err)
 	}
 	adminRoot := filepath.Join(commonDir, "worktrees")
-	if err := os.MkdirAll(adminRoot, 0o755); err != nil {
-		return nil, fmt.Errorf("lifecycle: mkdir %s: %w", adminRoot, err)
-	}
 	fsw, err := fsnotify.NewWatcher()
 	if err != nil {
-		return nil, fmt.Errorf("lifecycle: fsnotify new: %w", err)
+		return fmt.Errorf("lifecycle: fsnotify new: %w", err)
 	}
-	if err := fsw.Add(adminRoot); err != nil {
+	if err := fsw.Add(commonDir); err != nil {
 		_ = fsw.Close()
-		return nil, fmt.Errorf("lifecycle: add %s: %w", adminRoot, err)
+		return fmt.Errorf("lifecycle: add %s: %w", commonDir, err)
+	}
+	if err := fsw.Add(adminRoot); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		_ = fsw.Close()
+		return fmt.Errorf("lifecycle: add %s: %w", adminRoot, err)
 	}
 
 	lw := &LifecycleWatcher{
@@ -95,7 +95,31 @@ func StartLifecycleWatcher(ctx context.Context, st *State, repoID int64, repoPat
 	st.RegisterLifecycleWatcher(repoPath, entry)
 	safeGo(lblLifecycle, repoPath, func() { lw.loop(wctx) })
 	slog.Info("lifecycle watcher started", "repo", repoPath, "admin_root", adminRoot)
-	return lw, nil
+	return nil
+}
+
+func EnsureLifecycleWatcher(ctx context.Context, st *State, repoID int64, repoPath string) error {
+	if st.HasLifecycleWatcher(repoPath) {
+		return nil
+	}
+	return startLifecycleWatcher(ctx, st, repoID, repoPath)
+}
+
+func (lw *LifecycleWatcher) rearmAdminRoot(ctx context.Context) {
+	if err := lw.fsw.Add(lw.adminRoot); err != nil {
+		slog.Warn("lifecycle: re-watch admin root", "repo", lw.repoPath, "admin_root", lw.adminRoot, "err", err)
+		return
+	}
+	entries, err := os.ReadDir(lw.adminRoot)
+	if err != nil {
+		slog.Warn("lifecycle: read admin root", "repo", lw.repoPath, "admin_root", lw.adminRoot, "err", err)
+		return
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			lw.scheduleCreate(ctx, filepath.Join(lw.adminRoot, e.Name()))
+		}
+	}
 }
 
 // loop drains the fsnotify channel, filtering to direct subdirs of
@@ -108,6 +132,12 @@ func (lw *LifecycleWatcher) loop(ctx context.Context) {
 		case ev, ok := <-lw.fsw.Events:
 			if !ok {
 				return
+			}
+			if ev.Name == lw.adminRoot {
+				if ev.Op&fsnotify.Create != 0 {
+					lw.rearmAdminRoot(ctx)
+				}
+				continue
 			}
 			if filepath.Dir(ev.Name) != lw.adminRoot {
 				continue
@@ -270,7 +300,7 @@ func (lw *LifecycleWatcher) onRemove(ctx context.Context, adminDir string) {
 // is gated on `deleted_at IS NULL`.
 func (lw *LifecycleWatcher) reconcile(ctx context.Context) error {
 	entries, err := os.ReadDir(lw.adminRoot)
-	if err != nil {
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("read %s: %w", lw.adminRoot, err)
 	}
 	onDisk := map[string]string{}

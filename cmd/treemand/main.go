@@ -328,7 +328,7 @@ func resumeLifecycleWatchers(ctx context.Context, s *store.Store, st *daemon.Sta
 				"repo", r.Path, "err", err)
 			continue
 		}
-		if _, err := daemon.StartLifecycleWatcher(ctx, st, r.ID, r.Path); err != nil {
+		if err := daemon.EnsureLifecycleWatcher(ctx, st, r.ID, r.Path); err != nil {
 			slog.Warn("resume lifecycle watcher failed",
 				"repo", r.Path, "err", err)
 			continue

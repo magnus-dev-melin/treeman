@@ -644,10 +644,8 @@ func startRepoWatcher(ctx context.Context, st *State, repoPath string) error {
 	// Lifecycle watcher: always on. Worktree add/remove events outside
 	// of the treeman CLI need the daemon to react regardless of any
 	// opt-in toggle.
-	if !st.HasLifecycleWatcher(repoPath) {
-		if _, err := StartLifecycleWatcher(ctx, st, repoID, repoPath); err != nil {
-			slog.Warn("lifecycle watcher start failed", "repo", repoPath, "err", err)
-		}
+	if err := EnsureLifecycleWatcher(ctx, st, repoID, repoPath); err != nil {
+		slog.Warn("lifecycle watcher start failed", "repo", repoPath, "err", err)
 	}
 
 	slog.Info("repo watcher started", "repo", repoPath)
