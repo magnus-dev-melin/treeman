@@ -15,7 +15,6 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -413,9 +412,7 @@ func TestPhysicalCloneViaContainerExec(t *testing.T) {
 //   - all N clones exist and carry byte-for-byte the same row counts as
 //     the source (staged IMPORT TABLESPACE produced correct data under
 //     concurrent fan-out), and
-//   - the staging dir was actually created under secure_file_priv — the
-//     logical fallback never creates it, so its presence proves the
-//     staged physical path ran rather than silently degrading.
+//   - the per-driver staging dir is removed once the prepare is done.
 func TestStagedFanoutRestoreParallel(t *testing.T) {
 	harness.SkipIfNoDocker(t)
 	t.Setenv("TREEMAN_MYSQL_PHYSICAL_MIN_BYTES", "0") // force physical staging on small fixtures
@@ -474,18 +471,7 @@ func TestStagedFanoutRestoreParallel(t *testing.T) {
 		assertViewsReadOwnTables(t, "127.0.0.1:13306", name)
 	}
 
-	// The staging dir is created only by the physical staged-restore
-	// path; the logical fallback never touches it. Its presence (with a
-	// subdir per staged template) is direct proof the fan-out imported
-	// from staging rather than degrading to logical INSERT…SELECT.
-	out, err := exec.Command("docker", "exec", "treeman-e2e-mysql",
-		"ls", "/var/lib/mysql-files/_tm_stage").CombinedOutput()
-	listing := strings.TrimSpace(string(out))
-	t.Logf("staging dir /var/lib/mysql-files/_tm_stage (err=%v): %q", err, listing)
-	if err != nil || listing == "" {
-		t.Errorf("staging dir empty/absent — fan-out fell back to logical "+
-			"instead of staged physical restore (ls err=%v, out=%q)", err, listing)
-	}
+	assertNoStageLeft(t, o.TemplateName)
 
 	// Pass 2 — cache hit: identical inputs must restore source + clones
 	// from the cached template (staged physical restore on the hit path)

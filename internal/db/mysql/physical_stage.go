@@ -2,9 +2,12 @@ package mysql
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os/exec"
 	"strings"
 	"sync"
@@ -118,7 +121,7 @@ func (d *Driver) resolveStageTarget(ctx context.Context, template string) (
 			reason: "secure_file_priv empty; no mysql-owned staging dir for exported tablespaces",
 		}, nil
 	}
-	stageDir = strings.TrimRight(secureDir.String, "/") + "/_tm_stage/" + template
+	stageDir = stageDirFor(secureDir.String, template, newStageID())
 
 	tables, terr := listInnoDBTables(ctx, d.DB, template)
 	if terr != nil {
@@ -148,7 +151,6 @@ func (d *Driver) stageTemplate(ctx context.Context, st *templateStage, template 
 
 	// Fresh staging dir, owned by the in-container mysql user so the
 	// later `cp` lands files mysqld can read for IMPORT.
-	_ = dockerExecRoot(ctx, engineBin, cid, "rm", "-rf", stageDir)
 	if err := dockerExecMysql(ctx, engineBin, cid, "mkdir", "-p", stageDir); err != nil {
 		st.err = fmt.Errorf("mkdir staging dir: %w", err)
 		return
@@ -426,8 +428,39 @@ func (d *Driver) dropStage(ctx context.Context, template string) {
 	if !secureDir.Valid || strings.TrimSpace(secureDir.String) == "" {
 		return
 	}
-	stageDir := strings.TrimRight(secureDir.String, "/") + "/_tm_stage/" + template
+	stageDir := templateStageRoot(secureDir.String, template)
 	_ = dockerExecRoot(ctx, engineBin, cid, "rm", "-rf", stageDir)
+}
+
+func templateStageRoot(secureFilePriv, template string) string {
+	return strings.TrimRight(secureFilePriv, "/") + "/_tm_stage/" + template
+}
+
+func stageDirFor(secureFilePriv, template, stageID string) string {
+	return templateStageRoot(secureFilePriv, template) + "/" + stageID
+}
+
+func newStageID() string {
+	var b [8]byte
+	_, _ = rand.Read(b[:])
+	return hex.EncodeToString(b[:])
+}
+
+func (d *Driver) removeStages() {
+	d.stagesMu.Lock()
+	stages := d.stages
+	d.stages = nil
+	d.stagesMu.Unlock()
+	for template, st := range stages {
+		if st.dir == "" {
+			continue
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		if err := dockerExecRoot(ctx, st.engineBin, st.cid, "rm", "-rf", st.dir); err != nil {
+			slog.Warn("mysql: remove staging dir", "template", template, "dir", st.dir, "err", err)
+		}
+		cancel()
+	}
 }
 
 // dockerExecMysql runs `<engine> exec --user mysql <cid> <args…>`.

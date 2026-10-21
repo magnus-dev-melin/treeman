@@ -146,8 +146,10 @@ func connDSN(cfg config.MysqlConn) (string, error) {
 	return mc.FormatDSN(), nil
 }
 
-// Close shuts down the pool.
-func (d *Driver) Close() error { return d.DB.Close() }
+func (d *Driver) Close() error {
+	d.removeStages()
+	return d.DB.Close()
+}
 
 // EngineVersion → `SELECT VERSION()`.
 func (d *Driver) EngineVersion(ctx context.Context) (string, error) {
