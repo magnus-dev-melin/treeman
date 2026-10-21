@@ -29,14 +29,18 @@ package shellenv
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"maps"
 	"os"
 	"os/exec"
 	"os/user"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 )
 
 // BaseEnv returns the foundational env map: daemon floor, overlaid with
@@ -119,22 +123,59 @@ func probeLoginShellPATH() string {
 	// interactive reads ~/.bashrc; POSIX sh reads $ENV when interactive.
 	// To capture the superset, probe an interactive login shell first
 	// (`-ilc`), then fall back to flag sets that pickier shells accept.
-	// `printf %s "$PATH"` keeps stdout clean of any rc-file noise.
 	var lastErr error
 	for _, flags := range [][]string{{"-ilc"}, {"-lc"}, {"-ic"}, {"-c"}} {
-		args := append(append([]string{}, flags...), `printf %s "$PATH"`)
+		args := append(append([]string{}, flags...), pathProbeCommand)
 		out, err := exec.CommandContext(ctx, shell, args...).Output()
 		if err != nil {
 			lastErr = err
 			continue
 		}
-		if p := strings.TrimSpace(string(out)); p != "" {
-			return p
+		p, err := parseProbedPATH(out)
+		if err != nil {
+			lastErr = err
+			slog.Warn("shellenv: discarding login-shell PATH probe output",
+				"shell", shell, "flags", flags, "err", err, "raw", string(out))
+			continue
 		}
+		return p
 	}
 	slog.Warn("shellenv: login-shell PATH probe failed; hooks run without the user's profile PATH (will retry)",
 		"shell", shell, "err", lastErr)
 	return ""
+}
+
+const (
+	pathProbeBegin = "__TREEMAN_PATH_BEGIN__"
+	pathProbeEnd   = "__TREEMAN_PATH_END__"
+)
+
+const pathProbeCommand = `printf '\n` + pathProbeBegin + `%s` + pathProbeEnd + `\n' "$PATH"`
+
+func parseProbedPATH(out []byte) (string, error) {
+	_, framed, found := strings.CutLast(string(out), pathProbeBegin)
+	if !found {
+		return "", errors.New("probe output has no PATH begin sentinel")
+	}
+	p, _, found := strings.Cut(framed, pathProbeEnd)
+	if !found {
+		return "", errors.New("probe output has no PATH end sentinel")
+	}
+	if p == "" {
+		return "", errors.New("probed PATH is empty")
+	}
+	for dir := range strings.SplitSeq(p, string(os.PathListSeparator)) {
+		if dir == "" {
+			continue
+		}
+		if !filepath.IsAbs(dir) {
+			return "", fmt.Errorf("probed PATH entry %q is not absolute", dir)
+		}
+		if strings.ContainsFunc(dir, unicode.IsControl) {
+			return "", fmt.Errorf("probed PATH entry %q contains control characters", dir)
+		}
+	}
+	return p, nil
 }
 
 // userLoginShell resolves the login shell of the user running this

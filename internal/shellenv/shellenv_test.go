@@ -1,9 +1,68 @@
 package shellenv
 
 import (
+	"os"
+	"os/exec"
+	"path/filepath"
 	"testing"
 	"time"
 )
+
+func TestParseProbedPATH(t *testing.T) {
+	frame := func(p string) string { return "\n" + pathProbeBegin + p + pathProbeEnd + "\n" }
+	cases := []struct {
+		name, out, want string
+		wantErr         bool
+	}{
+		{"clean", frame("/a:/b"), "/a:/b", false},
+		{
+			"rc noise before the frame is ignored (#133)",
+			"\x1b[33mfzftab module needs to be rebuild, rebuild now?[Y/n]\n\x1b[39m" + frame("/nix-profile/bin:/usr/bin"),
+			"/nix-profile/bin:/usr/bin", false,
+		},
+		{"noise after the frame is ignored", frame("/a") + "bye\n", "/a", false},
+		{"no sentinels", "/a:/b", "", true},
+		{"missing end sentinel", "\n" + pathProbeBegin + "/a", "", true},
+		{"empty PATH", frame(""), "", true},
+		{"relative entry", frame("bin:/usr/bin"), "", true},
+		{"control character entry", frame("/usr/bin\x1b[39m:/bin"), "", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := parseProbedPATH([]byte(c.out))
+			if (err != nil) != c.wantErr {
+				t.Fatalf("err = %v, wantErr %v", err, c.wantErr)
+			}
+			if got != c.want {
+				t.Errorf("got %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+func TestPathProbeCommandSurvivesRcNoise(t *testing.T) {
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("no sh on PATH")
+	}
+	rc := filepath.Join(t.TempDir(), "rc")
+	if err := os.WriteFile(rc, []byte("echo 'rebuild now?[Y/n]'\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(sh, "-c", ". \"$RC\"; "+pathProbeCommand)
+	cmd.Env = []string{"RC=" + rc, "PATH=/probe/bin:/usr/bin:/bin"}
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := parseProbedPATH(out)
+	if err != nil {
+		t.Fatalf("parse %q: %v", out, err)
+	}
+	if got != "/probe/bin:/usr/bin:/bin" {
+		t.Errorf("got %q", got)
+	}
+}
 
 func TestMergePaths(t *testing.T) {
 	cases := []struct {
