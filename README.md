@@ -67,7 +67,7 @@ protocol).
   ready, fails, or starts/finishes preparing; configurable per status
   bucket, hot-reloaded without a restart.
 - **Single static binary** per platform — no CGo, no system libraries;
-  CI cross-builds `{linux,darwin}` × `{amd64,arm64}`.
+  CI cross-builds linux `{amd64,arm64}` and darwin arm64.
 
 See [docs/](docs/) for the deep dives — CLI reference, configuration
 schema, AI integration, internals.
@@ -127,7 +127,7 @@ allowlisted regular files. Subsequent invocations verify the cached binary
 hashes and execute directly, preserving arguments, working directory, signals,
 and exit status. The verified exact-version cache entry is prepended to `PATH`
 so daemon startup finds its matching `treemand`; the original `PATH` follows
-unchanged, and other environment variables are preserved. Linux/macOS amd64 and arm64 are supported;
+unchanged, and other environment variables are preserved. Linux amd64 and arm64 and macOS arm64 are supported;
 Windows and 32-bit platforms are not.
 
 ### Platform support
@@ -173,8 +173,8 @@ Prebuilt tarballs for every tagged release. The asset filename
 embeds the version, so resolve the latest tag first:
 
 ```sh
-# linux/amd64 example — substitute the platform (darwin-amd64,
-# darwin-arm64, linux-arm64) you need.
+# linux/amd64 example — substitute the platform (darwin-arm64,
+# linux-arm64) you need.
 VER=$(curl -fsSL https://api.github.com/repos/stubbedev/treeman/releases/latest | grep '"tag_name":' | cut -d'"' -f4 | sed 's/^v//')
 curl -L -o /tmp/treeman.tgz \
   "https://github.com/stubbedev/treeman/releases/download/v${VER}/treeman-${VER}-linux-amd64.tar.gz"

@@ -10,6 +10,7 @@ use Throwable;
 final class Bootstrap
 {
     private const MAX_ARCHIVE = 268435456;
+    private const PLATFORMS = ['linux-amd64', 'linux-arm64', 'darwin-arm64'];
 
     public static function version(string $packageRoot): string
     {
@@ -50,10 +51,11 @@ final class Bootstrap
         $arches = ['x86_64' => 'amd64', 'amd64' => 'amd64', 'aarch64' => 'arm64', 'arm64' => 'arm64'];
         $os = strtolower($os);
         $arch = strtolower($arch);
-        if (!isset($oses[$os], $arches[$arch])) {
-            throw new RuntimeException("Unsupported platform $os/$arch; releases support Linux/macOS on amd64/arm64.");
+        $platform = isset($oses[$os], $arches[$arch]) ? $oses[$os] . '-' . $arches[$arch] : null;
+        if (!in_array($platform, self::PLATFORMS, true)) {
+            throw new RuntimeException("Unsupported platform $os/$arch; releases support Linux on amd64/arm64 and macOS on arm64.");
         }
-        return $oses[$os] . '-' . $arches[$arch];
+        return $platform;
     }
 
     public static function cacheRoot(): string
@@ -79,7 +81,7 @@ final class Bootstrap
     public static function ensure(string $version, string $platform, string $cache, bool $offline, ?callable $download = null): string
     {
         $version = self::releaseVersion($version);
-        if (!in_array($platform, ['linux-amd64', 'linux-arm64', 'darwin-amd64', 'darwin-arm64'], true)) {
+        if (!in_array($platform, self::PLATFORMS, true)) {
             throw new RuntimeException('Unsupported release platform: ' . $platform);
         }
         clearstatcache();

@@ -83,11 +83,14 @@ function removeTree(string $path): void
 
 try {
     test('platform matrix and unsupported systems', static function (): void {
-        foreach (['Linux' => 'linux', 'Darwin' => 'darwin'] as $os => $expected) {
-            foreach (['x86_64' => 'amd64', 'amd64' => 'amd64', 'aarch64' => 'arm64', 'arm64' => 'arm64'] as $arch => $want) {
-                check(Bootstrap::platform($os, $arch) === "$expected-$want", 'Platform mapping');
-            }
+        foreach (['x86_64' => 'amd64', 'amd64' => 'amd64', 'aarch64' => 'arm64', 'arm64' => 'arm64'] as $arch => $want) {
+            check(Bootstrap::platform('Linux', $arch) === "linux-$want", 'Platform mapping');
         }
+        foreach (['aarch64', 'arm64'] as $arch) {
+            check(Bootstrap::platform('Darwin', $arch) === 'darwin-arm64', 'Platform mapping');
+        }
+        fails(fn () => Bootstrap::platform('Darwin', 'x86_64'), 'Unsupported');
+        fails(fn () => Bootstrap::platform('Darwin', 'amd64'), 'Unsupported');
         fails(fn () => Bootstrap::platform('Windows', 'AMD64'), 'Unsupported');
         fails(fn () => Bootstrap::platform('Linux', 'i686'), 'Unsupported');
     });
