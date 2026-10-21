@@ -95,13 +95,14 @@ func resolveWorktree(ctx context.Context, path string) (wt, branch string, err e
 		// Default to the request's workspace root (HTTP header / MCP
 		// roots) and only then the process cwd — see resolveRepo.
 		path, _ = requestCwd(ctx)
-		wt, _ = filepath.Abs(path)
+		wt = canonicalDir(path)
 		return wt, detectBranch(wt), nil
 	}
 	wt, _ = filepath.Abs(path)
-	// An existing directory is an explicit path the caller chose —
-	// honour it verbatim.
+	// An existing directory is an explicit path the caller chose;
+	// only symlinks are resolved so it matches git's repo root.
 	if fi, statErr := os.Stat(wt); statErr == nil && fi.IsDir() {
+		wt = canonicalDir(wt)
 		return wt, detectBranch(wt), nil
 	}
 	// Not an on-disk path: try resolving it as a registered worktree
@@ -119,6 +120,14 @@ func resolveWorktree(ctx context.Context, path string) (wt, branch string, err e
 	// way logs_query does instead of handing back <cwd>/<name>, which
 	// queues work against a path that never existed.
 	return wt, detectBranch(wt), fmt.Errorf("no worktree matches %q (try worktree_list)", path)
+}
+
+func canonicalDir(path string) string {
+	abs, _ := filepath.Abs(path)
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		return resolved
+	}
+	return abs
 }
 
 func detectBranch(worktree string) string {

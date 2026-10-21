@@ -283,15 +283,25 @@ databases:
 	if err := os.WriteFile(filepath.Join(repo, ".treeman.yaml"), []byte(cfg), 0o644); err != nil {
 		t.Fatal(err)
 	}
-
-	plan, err := PrepareDryRunPlan(context.Background(), repo, repo)
+	realRepo, err := filepath.EvalSymlinks(repo)
 	if err != nil {
-		t.Fatalf("PrepareDryRunPlan: %v", err)
+		t.Fatal(err)
 	}
-	if len(plan.Databases) != 1 || plan.Databases[0].SourceDB != "kontainer_testing" {
-		t.Fatalf("dry run must render the main_worktree overlay name, got %+v", plan.Databases)
+	link := filepath.Join(t.TempDir(), "repo-link")
+	if err := os.Symlink(repo, link); err != nil {
+		t.Fatal(err)
 	}
-	if want := slug.ForMain(repo, "main").Value; plan.Slug != want {
-		t.Errorf("slug = %q, want main slug %q", plan.Slug, want)
+
+	for _, worktree := range []string{repo, link} {
+		plan, err := PrepareDryRunPlan(context.Background(), worktree, repo)
+		if err != nil {
+			t.Fatalf("PrepareDryRunPlan(%s): %v", worktree, err)
+		}
+		if len(plan.Databases) != 1 || plan.Databases[0].SourceDB != "kontainer_testing" {
+			t.Fatalf("dry run of %s must render the main_worktree overlay name, got %+v", worktree, plan.Databases)
+		}
+		if want := slug.ForMain(realRepo, "main").Value; plan.Slug != want {
+			t.Errorf("slug of %s = %q, want main slug %q", worktree, plan.Slug, want)
+		}
 	}
 }
