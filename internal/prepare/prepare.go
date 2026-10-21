@@ -79,7 +79,7 @@ func emitRunnerError(ctx context.Context, st *store.Store, repoID, worktreeID in
 		return
 	}
 	_ = st.WriteEvent(ctx, store.LevelError, store.EvtPrepareError,
-		fmt.Sprintf("%s/%s phase=%s exit=%d", engine, sourceDB, label, out.ExitCode),
+		engine+"/"+runner.FormatError("phase="+label, sourceDB, out),
 		repoID, worktreeID, label, 0, map[string]string{
 			"engine":      engine,
 			"source_db":   sourceDB,
@@ -88,6 +88,13 @@ func emitRunnerError(ctx context.Context, st *store.Store, repoID, worktreeID in
 			"stdout_tail": out.StdoutTail,
 			"log_path":    out.LogPath,
 		})
+}
+
+func runnerStepFailure(phase, target string, out runner.Outcome, err error) string {
+	if err != nil {
+		return fmt.Sprintf("%s %s: %v", phase, target, err)
+	}
+	return runner.FormatError(phase, target, out)
 }
 
 // emitPhaseDone writes a `prepare_phase` event tagged with the step
@@ -2091,7 +2098,7 @@ func tryRollbackIncrementalBuild(
 		if out.ExitCode != 0 {
 			emitRunnerError(ctx, st, repoID, worktreeID, d.Engine, source, "rollback", out)
 		}
-		rollbackFallback(fmt.Sprintf("rollback exit=%d err=%v", out.ExitCode, err))
+		rollbackFallback(runnerStepFailure("rollback", source, out, err))
 		return Outcome{}, false, nil
 	}
 	emitPhaseDone(ctx, st, repoID, worktreeID, d.Engine, source, "rollback", rbStart)
@@ -2104,7 +2111,7 @@ func tryRollbackIncrementalBuild(
 		if out.ExitCode != 0 {
 			emitRunnerError(ctx, st, repoID, worktreeID, d.Engine, source, "migrate", out)
 		}
-		rollbackFallback(fmt.Sprintf("re-migrate exit=%d err=%v", out.ExitCode, err))
+		rollbackFallback(runnerStepFailure("re-migrate", source, out, err))
 		return Outcome{}, false, nil
 	}
 	emitPhaseDone(ctx, st, repoID, worktreeID, d.Engine, source, "migrate", mgStart)
@@ -2118,7 +2125,7 @@ func tryRollbackIncrementalBuild(
 			if out.ExitCode != 0 {
 				emitRunnerError(ctx, st, repoID, worktreeID, d.Engine, source, "seed", out)
 			}
-			rollbackFallback(fmt.Sprintf("seed exit=%d err=%v", out.ExitCode, err))
+			rollbackFallback(runnerStepFailure("seed", source, out, err))
 			return Outcome{}, false, nil
 		}
 		emitPhaseDone(ctx, st, repoID, worktreeID, d.Engine, source, "seed", sdStart)
