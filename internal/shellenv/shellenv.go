@@ -41,6 +41,8 @@ import (
 	"sync"
 	"time"
 	"unicode"
+
+	"github.com/stubbedev/treeman/internal/detach"
 )
 
 // BaseEnv returns the foundational env map: daemon floor, overlaid with
@@ -126,7 +128,12 @@ func probeLoginShellPATH() string {
 	var lastErr error
 	for _, flags := range [][]string{{"-ilc"}, {"-lc"}, {"-ic"}, {"-c"}} {
 		args := append(append([]string{}, flags...), pathProbeCommand)
-		out, err := exec.CommandContext(ctx, shell, args...).Output()
+		probe := exec.CommandContext(ctx, shell, args...)
+		if err := detach.NewSession(probe); err != nil {
+			lastErr = err
+			break
+		}
+		out, err := probe.Output()
 		if err != nil {
 			lastErr = err
 			continue

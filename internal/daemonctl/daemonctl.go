@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/stubbedev/treeman/internal/detach"
 	"github.com/stubbedev/treeman/pkg/rpc"
 )
 
@@ -56,8 +57,8 @@ func Start(ctx context.Context) (int, error) {
 		return 0, fmt.Errorf("treemand not on PATH: %w", err)
 	}
 	cmd := exec.Command(binPath) //nolint:noctx // detached daemon fork; must outlive caller ctx
-	if err := detach(cmd); err != nil {
-		return 0, err
+	if err := detach.NewSession(cmd); err != nil {
+		return 0, fmt.Errorf("start treemand detached: %w", err)
 	}
 	cmd.Env = daemonEnvironment(os.Environ())
 	devNull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
