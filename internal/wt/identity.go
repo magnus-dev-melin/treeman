@@ -49,6 +49,25 @@ func ResolveIdentity(
 	repoPath, wtPath, branch string,
 	repoID int64,
 ) (Identity, error) {
+	id, err := PlanIdentity(ctx, st, cfg, repoPath, wtPath, branch, repoID)
+	if err != nil {
+		return Identity{}, err
+	}
+	if id.IsMain {
+		id.WtID, err = st.EnsureMainWorktree(ctx, repoID, wtPath, id.Slug.Value, branch)
+	} else {
+		id.WtID, err = st.EnsureWorktree(ctx, repoID, wtPath, id.Slug.Value, branch)
+	}
+	return id, err
+}
+
+func PlanIdentity(
+	ctx context.Context,
+	st *store.Store,
+	cfg *config.Config,
+	repoPath, wtPath, branch string,
+	repoID int64,
+) (Identity, error) {
 	// Guard against registering a path that is not actually a worktree.
 	// Every legitimate caller passes either the repo root (the main
 	// worktree) or an existing git-linked worktree directory. A mistyped
@@ -67,10 +86,8 @@ func ResolveIdentity(
 		}
 	}
 	if isMain {
-		sl := slug.ForMain(wtPath, branch)
 		config.ApplyMainWorktreeOverlay(cfg)
-		wtID, err := st.EnsureMainWorktree(ctx, repoID, wtPath, sl.Value, branch)
-		return Identity{Slug: sl, WtID: wtID, Branch: branch, IsMain: true}, err
+		return Identity{Slug: slug.ForMain(wtPath, branch), Branch: branch, IsMain: true}, nil
 	}
 	// A linked worktree's slug is keyed off its PATH, not its current
 	// branch: the directory is fixed for the worktree's lifetime, so
@@ -80,7 +97,5 @@ func ResolveIdentity(
 	// foundation `branch_scoped` swapping relies on. For the common
 	// case (the worktree directory was named after its branch at
 	// `wt create`) this is identical to `slug.For(wtPath, branch)`.
-	sl := slug.For(wtPath, "")
-	wtID, err := st.EnsureWorktree(ctx, repoID, wtPath, sl.Value, branch)
-	return Identity{Slug: sl, WtID: wtID, Branch: branch, IsMain: false}, err
+	return Identity{Slug: slug.For(wtPath, ""), Branch: branch}, nil
 }

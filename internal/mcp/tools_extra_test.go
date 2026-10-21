@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
 
 	"github.com/stubbedev/treeman/internal/runid"
+	"github.com/stubbedev/treeman/internal/slug"
 	"github.com/stubbedev/treeman/internal/store"
 )
 
@@ -254,4 +256,42 @@ func enrolledRepoDir(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return repo
+}
+
+func TestPrepareDryRunPlanAppliesMainWorktreeOverlay(t *testing.T) {
+	repo := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("TREEMAN_DB_PATH", filepath.Join(t.TempDir(), "t.db"))
+	for _, args := range [][]string{
+		{"init", "-q", "-b", "main"},
+		{"-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "init"},
+	} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repo
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	cfg := `main_worktree:
+  enabled: true
+  databases:
+    - name_template: "kontainer_testing"
+databases:
+  - engine: mysql
+    name_template: "kontainer_testing_{slug}"
+`
+	if err := os.WriteFile(filepath.Join(repo, ".treeman.yaml"), []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	plan, err := PrepareDryRunPlan(context.Background(), repo, repo)
+	if err != nil {
+		t.Fatalf("PrepareDryRunPlan: %v", err)
+	}
+	if len(plan.Databases) != 1 || plan.Databases[0].SourceDB != "kontainer_testing" {
+		t.Fatalf("dry run must render the main_worktree overlay name, got %+v", plan.Databases)
+	}
+	if want := slug.ForMain(repo, "main").Value; plan.Slug != want {
+		t.Errorf("slug = %q, want main slug %q", plan.Slug, want)
+	}
 }

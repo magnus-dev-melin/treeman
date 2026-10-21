@@ -22,9 +22,9 @@ import (
 	"github.com/stubbedev/treeman/internal/gitcmd"
 	"github.com/stubbedev/treeman/internal/prepare"
 	"github.com/stubbedev/treeman/internal/resolve"
-	"github.com/stubbedev/treeman/internal/slug"
 	"github.com/stubbedev/treeman/internal/store"
 	"github.com/stubbedev/treeman/internal/template"
+	wtpkg "github.com/stubbedev/treeman/internal/wt"
 	"github.com/stubbedev/treeman/pkg/rpc"
 )
 
@@ -822,8 +822,11 @@ func inputsFingerprintTool(
 	}
 	defer func() { _ = st.Close() }()
 
-	sl := slug.For(wt, "")
-	tplCtx := template.FromSlug(sl)
+	id, err := planWorktreeIdentity(ctx, st, &cfg, repoRoot, wt)
+	if err != nil {
+		return nil, inputsFingerprintOut{}, err
+	}
+	tplCtx := template.FromSlug(id.Slug)
 
 	out := inputsFingerprintOut{Repo: repoRoot, WorktreePath: wt}
 	indices := []int{}
@@ -955,13 +958,29 @@ func PrepareDryRunPlan(ctx context.Context, worktree, repoOverride string) (Prep
 		return prepareDryRunOut{}, err
 	}
 	defer func() { _ = st.Close() }()
-	sl := slug.For(wt, "")
-	tplCtx := template.FromSlug(sl)
-	out := prepareDryRunOut{WorktreePath: wt, Repo: repoRoot, Slug: sl.Value}
+	id, err := planWorktreeIdentity(ctx, st, &cfg, repoRoot, wt)
+	if err != nil {
+		return prepareDryRunOut{}, err
+	}
+	tplCtx := template.FromSlug(id.Slug)
+	out := prepareDryRunOut{WorktreePath: wt, Repo: repoRoot, Slug: id.Slug.Value}
 	for i, d := range cfg.Databases {
 		out.Databases = append(out.Databases, planOneDatabase(ctx, st, d, i, wt, tplCtx))
 	}
 	return out, nil
+}
+
+func planWorktreeIdentity(
+	ctx context.Context,
+	st *store.Store,
+	cfg *config.Config,
+	repoRoot, wt string,
+) (wtpkg.Identity, error) {
+	repoID, err := st.LookupRepoID(ctx, repoRoot)
+	if err != nil {
+		return wtpkg.Identity{}, fmt.Errorf("look up repo %s: %w", repoRoot, err)
+	}
+	return wtpkg.PlanIdentity(ctx, st, cfg, repoRoot, wt, detectBranch(wt), repoID)
 }
 
 // planOneDatabase renders the dry-run plan for one configured database.

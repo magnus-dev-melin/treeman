@@ -316,3 +316,45 @@ func mkRepoOnBranch(t *testing.T, path, branch string) {
 		}
 	}
 }
+
+func TestPlanIdentityAppliesOverlayWithoutWritingRows(t *testing.T) {
+	ctx := context.Background()
+	tmp := t.TempDir()
+	repo := filepath.Join(tmp, "repo")
+	mkRepoOnBranch(t, repo, "main")
+
+	s, err := store.Open(ctx, filepath.Join(tmp, "tm.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+	repoID, err := s.EnsureRepo(ctx, repo, "repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{
+		MainWorktree: config.MainWorktreeConfig{
+			Enabled:   true,
+			Databases: []config.DatabaseOverlay{{NameTemplate: "app_testing"}},
+		},
+		Databases: []config.DatabaseConfig{{Engine: "mysql", NameTemplate: "app_{slug}"}},
+	}
+
+	id, err := PlanIdentity(ctx, s, cfg, repo, repo, "main", repoID)
+	if err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	if !id.IsMain || id.WtID != 0 || id.Slug.Value != slug.ForMain(repo, "main").Value {
+		t.Errorf("unexpected identity %+v", id)
+	}
+	if cfg.Databases[0].NameTemplate != "app_testing" {
+		t.Errorf("overlay not applied: %q", cfg.Databases[0].NameTemplate)
+	}
+	var rows int
+	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM worktrees WHERE repo_id = ?`, repoID).Scan(&rows); err != nil {
+		t.Fatal(err)
+	}
+	if rows != 0 {
+		t.Errorf("PlanIdentity wrote %d worktree rows; it must be read-only", rows)
+	}
+}
