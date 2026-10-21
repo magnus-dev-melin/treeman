@@ -169,6 +169,26 @@ type inFlightFinalize struct {
 	// while this finalize ran, keyed by database index (-1 = every
 	// database). They are handed back by UnmarkFinalizeInFlight.
 	watchReruns map[int]WatchRerun
+	// headRerun is the latest HEAD / git-op change that arrived while
+	// this finalize ran. Its full finalize supersedes watchReruns.
+	headRerun *HeadRerun
+}
+
+// HeadRerun is a HEAD-triggered finalize that found another finalize
+// of its worktree in flight. The in-flight run may have read a tree
+// that the checkout or merge has since replaced (#168), so it is
+// replayed once that run releases instead of being dropped.
+type HeadRerun struct {
+	RepoPath string
+	Env      map[string]string
+	RunID    string
+}
+
+// QueuedReruns is what a finalize hands back on release: a full
+// HEAD-triggered finalize, or the per-database watch re-prepares.
+type QueuedReruns struct {
+	Head  *HeadRerun
+	Watch []WatchRerun
 }
 
 // WatchRerun is a watch-triggered re-prepare that found another
@@ -358,23 +378,37 @@ func (st *State) MarkFinalizeInFlight(wtPath string, cancel context.CancelFunc) 
 // UnmarkFinalizeInFlight, so a rerun can never be queued on a finalize
 // that has already handed its queue back.
 func (st *State) MarkFinalizeInFlightOrQueue(wtPath string, cancel context.CancelFunc, r WatchRerun) bool {
+	return st.markFinalizeOrQueue(wtPath, cancel, func(entry *inFlightFinalize) {
+		_, all := entry.watchReruns[-1]
+		switch {
+		case all:
+			r.DBIndex = -1
+		case r.DBIndex == -1:
+			clear(entry.watchReruns)
+		}
+		if entry.watchReruns == nil {
+			entry.watchReruns = map[int]WatchRerun{}
+		}
+		entry.watchReruns[r.DBIndex] = r
+	})
+}
+
+// MarkFinalizeInFlightOrQueueHead is MarkFinalizeInFlightOrQueue for
+// HEAD-triggered finalizes: a busy slot keeps only the latest r.
+func (st *State) MarkFinalizeInFlightOrQueueHead(wtPath string, cancel context.CancelFunc, r HeadRerun) bool {
+	return st.markFinalizeOrQueue(wtPath, cancel, func(entry *inFlightFinalize) {
+		entry.headRerun = &r
+	})
+}
+
+func (st *State) markFinalizeOrQueue(wtPath string, cancel context.CancelFunc, queue func(*inFlightFinalize)) bool {
 	st.inFlightMu.Lock()
 	defer st.inFlightMu.Unlock()
 	if st.markFinalizeLocked(wtPath, cancel) {
 		return true
 	}
 	entry := st.inFlightFinalizes[wtPath]
-	_, all := entry.watchReruns[-1]
-	switch {
-	case all:
-		r.DBIndex = -1
-	case r.DBIndex == -1:
-		clear(entry.watchReruns)
-	}
-	if entry.watchReruns == nil {
-		entry.watchReruns = map[int]WatchRerun{}
-	}
-	entry.watchReruns[r.DBIndex] = r
+	queue(&entry)
 	st.inFlightFinalizes[wtPath] = entry
 	return false
 }
@@ -391,15 +425,20 @@ func (st *State) markFinalizeLocked(wtPath string, cancel context.CancelFunc) bo
 }
 
 // UnmarkFinalizeInFlight clears the in-flight marker for wtPath and
-// returns the watch reruns queued on it, ordered by database index.
-func (st *State) UnmarkFinalizeInFlight(wtPath string) []WatchRerun {
+// returns the reruns queued on it. A queued HEAD rerun runs a full
+// finalize, so it absorbs the watch reruns; otherwise they come back
+// ordered by database index.
+func (st *State) UnmarkFinalizeInFlight(wtPath string) QueuedReruns {
 	st.inFlightMu.Lock()
 	entry := st.inFlightFinalizes[wtPath]
 	delete(st.inFlightFinalizes, wtPath)
 	st.inFlightMu.Unlock()
+	if entry.headRerun != nil {
+		return QueuedReruns{Head: entry.headRerun}
+	}
 	reruns := slices.Collect(maps.Values(entry.watchReruns))
 	slices.SortFunc(reruns, func(a, b WatchRerun) int { return cmp.Compare(a.DBIndex, b.DBIndex) })
-	return reruns
+	return QueuedReruns{Watch: reruns}
 }
 
 // MarkCreateInFlight records that a worktree_create task is running

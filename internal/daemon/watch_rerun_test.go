@@ -19,7 +19,7 @@ func TestWatchRerunQueuesOnlyBehindInFlightFinalize(t *testing.T) {
 	if !st.MarkFinalizeInFlightOrQueue("/wt", nil, WatchRerun{DBIndex: 0}) {
 		t.Fatal("free slot: want the watch run to claim it")
 	}
-	if got := st.UnmarkFinalizeInFlight("/wt"); len(got) != 0 {
+	if got := st.UnmarkFinalizeInFlight("/wt"); len(got.Watch) != 0 || got.Head != nil {
 		t.Fatalf("claiming run queued itself: %+v", got)
 	}
 }
@@ -40,7 +40,7 @@ func TestWatchRerunCoalescesPerDatabase(t *testing.T) {
 			t.Fatalf("busy slot claimed by %+v", r)
 		}
 	}
-	got := st.UnmarkFinalizeInFlight("/wt")
+	got := st.UnmarkFinalizeInFlight("/wt").Watch
 	if idx := rerunIndexes(got); len(idx) != 2 || idx[0] != 0 || idx[1] != 1 {
 		t.Fatalf("queued db indexes = %v, want [0 1]", idx)
 	}
@@ -62,7 +62,41 @@ func TestWatchRerunAllDatabasesAbsorbsPerDatabase(t *testing.T) {
 	for _, idx := range []int{0, -1, 2} {
 		st.MarkFinalizeInFlightOrQueue("/wt", nil, WatchRerun{DBIndex: idx})
 	}
-	if idx := rerunIndexes(st.UnmarkFinalizeInFlight("/wt")); len(idx) != 1 || idx[0] != -1 {
+	if idx := rerunIndexes(st.UnmarkFinalizeInFlight("/wt").Watch); len(idx) != 1 || idx[0] != -1 {
 		t.Fatalf("queued db indexes = %v, want [-1]", idx)
+	}
+}
+
+func TestHeadRerunQueuesLatestAndAbsorbsWatchReruns(t *testing.T) {
+	st, cleanup := setup(t)
+	defer cleanup()
+
+	if !st.MarkFinalizeInFlight("/wt", nil) {
+		t.Fatal("mark in-flight")
+	}
+	st.MarkFinalizeInFlightOrQueue("/wt", nil, WatchRerun{DBIndex: 0})
+	for _, id := range []string{"merge-start", "merge-commit"} {
+		if st.MarkFinalizeInFlightOrQueueHead("/wt", nil, HeadRerun{RunID: id}) {
+			t.Fatalf("busy slot claimed by head rerun %s", id)
+		}
+	}
+	got := st.UnmarkFinalizeInFlight("/wt")
+	if got.Head == nil || got.Head.RunID != "merge-commit" {
+		t.Fatalf("head rerun = %+v, want the latest (merge-commit)", got.Head)
+	}
+	if len(got.Watch) != 0 {
+		t.Errorf("a queued full finalize must absorb watch reruns, got %+v", got.Watch)
+	}
+}
+
+func TestHeadRerunClaimsFreeSlot(t *testing.T) {
+	st, cleanup := setup(t)
+	defer cleanup()
+
+	if !st.MarkFinalizeInFlightOrQueueHead("/wt", nil, HeadRerun{}) {
+		t.Fatal("free slot: want the head run to claim it")
+	}
+	if got := st.UnmarkFinalizeInFlight("/wt"); got.Head != nil {
+		t.Fatalf("claiming run queued itself: %+v", got)
 	}
 }

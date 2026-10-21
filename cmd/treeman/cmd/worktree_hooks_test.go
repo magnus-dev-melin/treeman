@@ -55,3 +55,24 @@ func TestWorktreeShowNonFatalHookFailure(t *testing.T) {
 		t.Fatalf("stale warning after retry: %s", line)
 	}
 }
+
+func TestWorktreeShowFailedFinalizeNamesTheRetryCommand(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "treeman.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+	repoID, _ := st.EnsureRepo(ctx, "/tmp/repo", "repo")
+	wtID, _ := st.EnsureWorktree(ctx, repoID, "/tmp/repo/wt", "slug", "feature")
+	if err := st.WriteEvent(ctx, store.LevelError, store.EvtWorktreeCreateError,
+		"create-before-engines: hook exited 4", repoID, wtID, "", 0, nil); err != nil {
+		t.Fatal(err)
+	}
+	line := finalizeStatusLine(ctx, st, wtID)
+	for _, want := range []string{"error", "hook exited 4", "treeman wt finalize"} {
+		if !strings.Contains(line, want) {
+			t.Fatalf("missing %q in %s", want, line)
+		}
+	}
+}

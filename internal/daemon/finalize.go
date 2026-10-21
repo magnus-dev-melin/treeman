@@ -112,6 +112,34 @@ func FinalizeWorktree(
 	st *State,
 	repoPath, worktreePath string,
 	inheritedEnv map[string]string, skipPrepare bool,
+) error {
+	return finalizeWorktree(ctx, st, repoPath, worktreePath, inheritedEnv, skipPrepare,
+		func(cancel context.CancelFunc) bool { return st.MarkFinalizeInFlight(worktreePath, cancel) })
+}
+
+// FinalizeWorktreeForHead is FinalizeWorktree for a HEAD or git-op
+// change: when another finalize of the worktree is running, the change
+// is queued and replayed after it instead of being dropped, since the
+// running finalize may have read the tree the change replaced.
+func FinalizeWorktreeForHead(ctx context.Context, st *State, repoPath, worktreePath string, inheritedEnv map[string]string) error {
+	ctx = withTrigger(ctx, trigger{Source: triggerHeadChange})
+	rerun := HeadRerun{RepoPath: repoPath, Env: inheritedEnv, RunID: runid.From(ctx)}
+	return finalizeWorktree(ctx, st, repoPath, worktreePath, inheritedEnv, false,
+		func(cancel context.CancelFunc) bool {
+			claimed := st.MarkFinalizeInFlightOrQueueHead(worktreePath, cancel, rerun)
+			if !claimed {
+				slog.Info("head-triggered finalize queued behind in-flight finalize", "wt", worktreePath)
+			}
+			return claimed
+		})
+}
+
+func finalizeWorktree(
+	ctx context.Context,
+	st *State,
+	repoPath, worktreePath string,
+	inheritedEnv map[string]string, skipPrepare bool,
+	claim func(context.CancelFunc) bool,
 ) (err error) {
 	repoRoot, wtRoot := repoPath, worktreePath
 	// Captured by the terminal-event defer below. Populated once the
@@ -184,7 +212,7 @@ func FinalizeWorktree(
 	// slips through (e.g. an explicit `treeman worktree finalize` while
 	// one is still running), it returns immediately instead of
 	// re-running setup hooks in parallel.
-	release, err := beginFinalize(ctx, st, wtRoot, st.MarkFinalizeInFlight(wtRoot, cancel))
+	release, err := beginFinalize(ctx, st, wtRoot, claim(cancel))
 	if release == nil {
 		return err
 	}
@@ -260,6 +288,12 @@ func FinalizeWorktree(
 		return err
 	}
 
+	// Watch HEAD and the git-op markers for the whole run, not only
+	// after it succeeds: a merge started while a setup hook runs must
+	// re-run finalize once it is committed, including when that hook
+	// fails against the half-merged tree (#168).
+	ensureWorktreeWatcher(ctx, st, repoRoot, wtRoot, repoID, wtID)
+
 	// Bring in worktrees.links / worktrees.copies. Offloaded from the CLI
 	// (`wt create`) to here so the CLI returns immediately instead of
 	// blocking on a recursive copy of e.g. a vendor/ tree. Idempotent —
@@ -328,18 +362,21 @@ func FinalizeWorktree(
 		return nil
 	}
 
-	// Start (or keep) the per-worktree fsnotify watcher so subsequent
-	// migration edits inside the worktree trigger a prepare rerun.
-	if err := startWorktreeWatcher(ctx, st, repoRoot, wtRoot); err != nil {
-		slog.Warn("start worktree watcher", "wt", wtRoot, "err", err)
-	} else {
-		_ = st.Store.WriteEvent(ctx, store.LevelDebug, store.EvtWatchStart,
-			"per-worktree fsnotify watcher active",
-			repoID, wtID, "", 0, nil)
-	}
-
 	summary.emit(ctx, st.Store, repoID, wtID)
 	return nil
+}
+
+func ensureWorktreeWatcher(ctx context.Context, st *State, repoRoot, wtRoot string, repoID, wtID int64) {
+	if st.HasWtWatcher(wtRoot) {
+		return
+	}
+	if err := startWorktreeWatcher(ctx, st, repoRoot, wtRoot); err != nil {
+		slog.Warn("start worktree watcher", "wt", wtRoot, "err", err)
+		return
+	}
+	_ = st.Store.WriteEvent(ctx, store.LevelDebug, store.EvtWatchStart,
+		"per-worktree fsnotify watcher active",
+		repoID, wtID, "", 0, nil)
 }
 
 // saveInheritedEnv caches the user's shell env per-worktree so
@@ -601,23 +638,33 @@ func beginFinalize(ctx context.Context, st *State, wtRoot string, claimed bool) 
 	if err == nil {
 		return func() {
 			unlock()
-			replayWatchReruns(st, wtRoot, st.UnmarkFinalizeInFlight(wtRoot))
+			replayReruns(st, wtRoot, st.UnmarkFinalizeInFlight(wtRoot))
 		}, nil
 	}
-	replayWatchReruns(st, wtRoot, st.UnmarkFinalizeInFlight(wtRoot))
+	replayReruns(st, wtRoot, st.UnmarkFinalizeInFlight(wtRoot))
 	return nil, unlessCancelled(ctx, err)
 }
 
-// replayWatchReruns runs, in order and off the releasing goroutine,
-// the watch re-prepares that were queued behind a finalize of wtRoot.
-// A teardown that started meanwhile drops them, the same way the
-// watch dispatcher drops events during a teardown.
-func replayWatchReruns(st *State, wtRoot string, reruns []WatchRerun) {
-	if len(reruns) == 0 {
+// replayReruns runs, off the releasing goroutine, the reruns that were
+// queued behind a finalize of wtRoot. A teardown that started
+// meanwhile drops them, the same way the dispatchers drop events
+// during a teardown.
+func replayReruns(st *State, wtRoot string, q QueuedReruns) {
+	if q.Head == nil && len(q.Watch) == 0 {
 		return
 	}
 	safeGo(lblWatchFinalize, wtRoot, func() {
-		for _, r := range reruns {
+		if q.Head != nil {
+			if st.IsTeardownInFlight(wtRoot) {
+				return
+			}
+			ctx := runid.With(st.BgCtx, q.Head.RunID)
+			if err := FinalizeWorktreeForHead(ctx, st, q.Head.RepoPath, wtRoot, q.Head.Env); err != nil {
+				slog.Warn("queued head-triggered finalize", "wt", wtRoot, "err", err)
+			}
+			return
+		}
+		for _, r := range q.Watch {
 			if st.IsTeardownInFlight(wtRoot) {
 				return
 			}

@@ -663,7 +663,7 @@ func finalizeStateDetail(last store.Event) string {
 		return "— " + last.Message
 	case store.EvtWorktreeCreateError:
 		if finalizeFailed(last) {
-			return "— " + last.Message
+			return "— " + last.Message + " (retry: treeman wt finalize)"
 		}
 	}
 	return ""
