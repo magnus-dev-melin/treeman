@@ -7,6 +7,7 @@ import (
 
 	"github.com/stubbedev/treeman/internal/config"
 	"github.com/stubbedev/treeman/internal/hooks"
+	"github.com/stubbedev/treeman/internal/ports"
 	"github.com/stubbedev/treeman/internal/prepare"
 	"github.com/stubbedev/treeman/internal/slug"
 	"github.com/stubbedev/treeman/internal/store"
@@ -71,7 +72,13 @@ func RunLocalFinalize(
 		if err := BringInFiles(ctx, repoRoot, wtPath, cfg.Worktrees.Copies, "copy", sink); err != nil {
 			return err
 		}
-		portMap, _ := st.LoadWorktreePorts(ctx, wtID)
+		if _, err := ports.New().Allocate(ctx, st, cfg, repoID, wtID); err != nil {
+			return fmt.Errorf("allocate ports for %s: %w", wtPath, err)
+		}
+		portMap, err := st.LoadWorktreePorts(ctx, wtID)
+		if err != nil {
+			return fmt.Errorf("load ports for %s: %w", wtPath, err)
+		}
 		tplCtx := template.FromSlug(sl).WithPorts(portMap)
 		if err := applyPatches(ctx, cfg.Patches, wtPath, tplCtx, sink); err != nil {
 			return err

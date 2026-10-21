@@ -3,6 +3,7 @@ package wt
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -95,6 +96,42 @@ func TestRunLocalFinalizeFailsOnPrepareError(t *testing.T) {
 	}
 	if _, serr := os.Stat(after); serr == nil {
 		t.Fatal("create-after-engines ran after a failed prepare")
+	}
+}
+
+func TestRunLocalFinalizeAllocatesPortsBeforePatching(t *testing.T) {
+	f := newFinalizeFixture(t)
+	l, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr, ok := l.Addr().(*net.TCPAddr)
+	if !ok {
+		t.Fatalf("listener addr %T is not TCP", l.Addr())
+	}
+	port := uint16(addr.Port) //nolint:gosec // a live listener port is always 0-65535
+	_ = l.Close()
+	if err := os.WriteFile(filepath.Join(f.wt, ".env"), []byte("WEBPACK_DEV_SERVER_PORT=0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{
+		Ports: map[string]config.PortSpec{"webpack": {Range: config.PortRange{Min: port, Max: port}}},
+		Patches: []config.Patch{
+			{File: ".env", Set: map[string]string{"WEBPACK_DEV_SERVER_PORT": "{port_webpack}"}},
+		},
+	}
+
+	err = RunLocalFinalize(context.Background(), cfg, t.TempDir(), f.wt,
+		slug.Slug{Value: "wtslug", Source: slug.SourceTicket}, false, f.st, f.repoID, f.wtID, nil, false, nil)
+	if err != nil {
+		t.Fatalf("finalize --local on an unallocated worktree: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(f.wt, ".env"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := fmt.Sprintf("WEBPACK_DEV_SERVER_PORT=%d", port); !strings.Contains(string(got), want) {
+		t.Errorf(".env = %q, want %q", got, want)
 	}
 }
 
