@@ -11,6 +11,11 @@ import (
 
 type hookSummaryKey struct{}
 
+const (
+	finalizeCompleteMessage       = "daemon-detached setup + prepare complete"
+	watchRePrepareCompleteMessage = "watch re-prepare complete"
+)
+
 type hookWarning struct {
 	Phase    string `json:"phase"`
 	Command  string `json:"command"`
@@ -35,9 +40,8 @@ func (s *hookSummary) record(phase string, out hooks.RunOutcome, runIDs []int64)
 	}
 }
 
-func (s *hookSummary) emit(ctx context.Context, st *store.Store, repoID, wtID int64) {
+func (s *hookSummary) emit(ctx context.Context, st *store.Store, repoID, wtID int64, message string) {
 	level := store.LevelInfo
-	message := "daemon-detached setup + prepare complete"
 	var payload map[string]any
 	if len(s.warnings) > 0 {
 		level = store.LevelWarn

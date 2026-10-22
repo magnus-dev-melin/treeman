@@ -12,6 +12,7 @@ const (
 	triggerRPC              triggerSource = "rpc"
 	triggerHeadChange       triggerSource = "head_change"
 	triggerWorktreeAppeared triggerSource = "worktree_appeared"
+	triggerFileChange       triggerSource = "file_change"
 )
 
 type trigger struct {

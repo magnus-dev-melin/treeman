@@ -82,7 +82,7 @@ func TestRollbackFallbackReportsTheFailingStepsOutput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(errEvs) != 1 || !strings.Contains(errEvs[0].Message, "Column not found: dead_column") {
-		t.Errorf("prepare:error must carry the migrate stderr, got %+v", errEvs)
+	if len(errEvs) != 0 {
+		t.Errorf("a recovered rollback step must not emit a terminal prepare:error, got %+v", errEvs)
 	}
 }

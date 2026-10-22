@@ -83,7 +83,7 @@ func TestPipelineContinueOnError(t *testing.T) {
 			if !wantSuccess {
 				return
 			}
-			summary.emit(ctx, st.Store, repoID, wtID)
+			summary.emit(ctx, st.Store, repoID, wtID, finalizeCompleteMessage)
 			assertHookWarningSummary(ctx, t, st.Store, wtID, failedID)
 		})
 	}
@@ -142,8 +142,14 @@ func TestHookSummaryCleanRetry(t *testing.T) {
 	ctx := context.Background()
 	repoID, _ := st.Store.EnsureRepo(ctx, t.TempDir(), "repo")
 	wtID, _ := st.Store.EnsureWorktree(ctx, repoID, t.TempDir(), "slug", "feature")
-	(&hookSummary{warnings: []hookWarning{{Phase: "create-before-engines", ExitCode: 1}}}).emit(ctx, st.Store, repoID, wtID)
-	(&hookSummary{}).emit(ctx, st.Store, repoID, wtID)
+	(&hookSummary{warnings: []hookWarning{{Phase: "create-before-engines", ExitCode: 1}}}).emit(
+		ctx,
+		st.Store,
+		repoID,
+		wtID,
+		finalizeCompleteMessage,
+	)
+	(&hookSummary{}).emit(ctx, st.Store, repoID, wtID, finalizeCompleteMessage)
 	events, err := st.Store.QueryEvents(
 		ctx,
 		store.EventFilter{WorktreeID: wtID, EventTypes: []string{store.EvtWorktreeCreateEnd}, Limit: 1},
@@ -174,7 +180,7 @@ func TestHookSummaryEmitWithoutWarnings(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	(&hookSummary{}).emit(ctx, st.Store, repoID, wtID)
+	(&hookSummary{}).emit(ctx, st.Store, repoID, wtID, finalizeCompleteMessage)
 
 	events, err := st.Store.QueryEvents(ctx, store.EventFilter{
 		WorktreeID: wtID,

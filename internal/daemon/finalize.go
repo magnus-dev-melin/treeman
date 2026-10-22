@@ -362,7 +362,7 @@ func finalizeWorktree(
 		return nil
 	}
 
-	summary.emit(ctx, st.Store, repoID, wtID)
+	summary.emit(ctx, st.Store, repoID, wtID, finalizeCompleteMessage)
 	return nil
 }
 
@@ -720,10 +720,20 @@ func FinalizeWorktreeForWatch(
 	repoPath, worktreePath string,
 	dbIdx int,
 	inheritedEnv map[string]string,
-) error {
+) (err error) {
 	repoRoot := repoPath
 	wtRoot := worktreePath
+	var cfg config.Config
+	failure := finalizeFailure{repoRoot: repoRoot, wtRoot: wtRoot}
+	defer func() {
+		if err == nil {
+			return
+		}
+		failure.err = err
+		recordFinalizeFailure(ctx, st, &cfg, failure)
+	}()
 
+	ctx = withTrigger(ctx, trigger{Source: triggerFileChange})
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	// Same PATH pin as FinalizeWorktree — this watcher path re-applies
@@ -745,7 +755,7 @@ func FinalizeWorktreeForWatch(
 	}
 	defer release()
 
-	cfg, err := resolve.LoadResolvedForWorktree(repoRoot, wtRoot)
+	cfg, err = resolve.LoadResolvedForWorktree(repoRoot, wtRoot)
 	if err != nil {
 		return err
 	}
@@ -765,6 +775,7 @@ func FinalizeWorktreeForWatch(
 		return err
 	}
 	sl, wtID := id.Slug, id.WtID
+	failure.repoID, failure.wtID, failure.slugVal = repoID, wtID, sl.Value
 
 	// Same defer guard as FinalizeWorktree: a merge/rebase writes
 	// conflict markers into tracked input files, which trips this
@@ -790,9 +801,17 @@ func FinalizeWorktreeForWatch(
 	if len(cfg.Databases) == 0 {
 		return nil
 	}
-	if err := ctx.Err(); err != nil {
+	if ctx.Err() != nil {
 		return nil
 	}
+	// Bracketed by the same finalize lifecycle events as a full
+	// finalize: the clones stay stale until the re-prepare lands, so the
+	// worktree must read `preparing`, then `ready` or `error`, never a
+	// `ready` that hides a rebuild in flight or one that failed (#169).
+	_ = st.Store.WriteEvent(ctx, store.LevelInfo, store.EvtWorktreeCreateStart,
+		"watch re-prepare beginning", repoID, wtID, "", 0, triggerPayload(ctx))
+	summary := &hookSummary{}
+	ctx = context.WithValue(ctx, hookSummaryKey{}, summary)
 	// The fingerprint hashes every declared input + dump + the
 	// migrate/seed run-strings. If anything changed, prepare cold-
 	// builds; otherwise cache-hits. No separate force-rebuild knob.
@@ -802,14 +821,15 @@ func FinalizeWorktreeForWatch(
 		opts.OnlyDBIndex = dbIdx
 	}
 	var prepErr error
+	failure.enginesTouched = true
 	st.withWorktreePrepare(wtRoot, func() {
 		_, prepErr = prepare.RunFiltered(ctx, &cfg, wtRoot, sl, st.Store, repoID, wtID, inheritedEnv, opts)
 	})
-	if err := prepErr; err != nil {
+	if prepErr != nil {
 		if ctx.Err() != nil {
 			return nil
 		}
-		return fmt.Errorf("prepare (watch-trigger): %w", err)
+		return fmt.Errorf("prepare (watch-trigger): %w", prepErr)
 	}
 	// Post-engine hooks fire on this path too: a watcher-driven
 	// re-prepare mutates DB content just like the full finalize, so
@@ -823,6 +843,7 @@ func FinalizeWorktreeForWatch(
 		id.IsMain, repoID, wtID, inheritedEnv); err != nil {
 		return fmt.Errorf("post-hooks (watch-trigger): %w", err)
 	}
+	summary.emit(ctx, st.Store, repoID, wtID, watchRePrepareCompleteMessage)
 	return nil
 }
 

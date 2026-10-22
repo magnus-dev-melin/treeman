@@ -2028,8 +2028,10 @@ func tryDumpOnlyBuild(
 // (a source ahead of the branch, a removed file) are rejected by
 // FindRollbackAncestor — unwinding them would silently no-op ("Migration
 // not found") and poison the cached template. ANY rollback/migrate/seed
-// error hard-falls-back to a full cold build (returns (Outcome{}, false,
-// nil); the cold build drops the dirty source first).
+// error falls through to the dump-only or cold build (returns
+// (Outcome{}, false, nil); both rebuild the source from the dump). The
+// failure is recorded as a warn-level prepare:rollback:fallback, never
+// a prepare:error: the run recovers, so it must not read as terminal.
 //
 // WARNING: rollback runs the migration's CURRENT down(), not the one
 // that matched the applied schema — see the config doc on Rollback.
@@ -2095,9 +2097,6 @@ func tryRollbackIncrementalBuild(
 	rbStart := time.Now()
 	out, err := runner.Run(ctx, rbSpec, worktreePath, source, tplCtx, inheritedEnv)
 	if err != nil || out.ExitCode != 0 {
-		if out.ExitCode != 0 {
-			emitRunnerError(ctx, st, repoID, worktreeID, d.Engine, source, "rollback", out)
-		}
 		rollbackFallback(runnerStepFailure("rollback", source, out, err))
 		return Outcome{}, false, nil
 	}
@@ -2108,9 +2107,6 @@ func tryRollbackIncrementalBuild(
 	mgStart := time.Now()
 	out, err = runner.Run(ctx, mgSpec, worktreePath, source, tplCtx, inheritedEnv)
 	if err != nil || out.ExitCode != 0 {
-		if out.ExitCode != 0 {
-			emitRunnerError(ctx, st, repoID, worktreeID, d.Engine, source, "migrate", out)
-		}
 		rollbackFallback(runnerStepFailure("re-migrate", source, out, err))
 		return Outcome{}, false, nil
 	}
@@ -2122,9 +2118,6 @@ func tryRollbackIncrementalBuild(
 		sdStart := time.Now()
 		out, err = runner.Run(ctx, sdSpec, worktreePath, source, tplCtx, inheritedEnv)
 		if err != nil || out.ExitCode != 0 {
-			if out.ExitCode != 0 {
-				emitRunnerError(ctx, st, repoID, worktreeID, d.Engine, source, "seed", out)
-			}
 			rollbackFallback(runnerStepFailure("seed", source, out, err))
 			return Outcome{}, false, nil
 		}
