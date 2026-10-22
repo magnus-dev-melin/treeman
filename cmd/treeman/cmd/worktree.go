@@ -1124,7 +1124,7 @@ func enrichWtRows(ctx context.Context, st *store.Store, all []wtRow, withStatus,
 		for i := range all {
 			ids[i] = all[i].ID
 		}
-		latest, _ := st.LatestEventPerWorktree(ctx, ids, finalizeStateEventTypes)
+		latest, _ := st.LatestEventPerWorktree(ctx, ids, store.WorktreeStateEventTypes)
 		for i := range all {
 			all[i].FinalState = finalizeStateLabel(latest[all[i].ID])
 		}
@@ -1886,8 +1886,9 @@ func failedSetup(ctx context.Context, path string) (string, bool) {
 	if err != nil || row.ID == 0 {
 		return "", false
 	}
-	last := latestFinalizeEvent(ctx, st, row.ID)
-	return last.Message, finalizeFailed(last)
+	last := latestStateEvent(ctx, st, row.ID)
+	state, _ := store.DeriveWorktreeState(last)
+	return last.Message, state == store.StateError
 }
 
 // registryWorktreeForBranch finds the live worktree on <branch> for

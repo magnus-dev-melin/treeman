@@ -78,7 +78,7 @@ func TestCacheHitRestoreAndFanoutFoldsSource(t *testing.T) {
 	// `app` is both the source and (deliberately) one of the clone names
 	// to exercise dedup.
 	clones := []string{"app_t1", "app_t2", "app"}
-	if err := cacheHitRestoreAndFanout(ctx, s, repoID, wtID, restore, d,
+	if _, err := cacheHitRestoreAndFanout(ctx, s, repoID, wtID, templateExists(true), restore, d,
 		"_tm_abc", "app", clones, 0, "fp123"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -97,10 +97,20 @@ func TestCacheHitRestoreAndFanoutFoldsSource(t *testing.T) {
 	}
 }
 
-// TestCacheHitRestoreAndFanoutFallbackDropsRow verifies the merged
-// fallback path: any restore failure drops the suspect snapshot row and
-// surfaces the error so the engine cold-builds.
-func TestCacheHitRestoreAndFanoutFallbackDropsRow(t *testing.T) {
+func templateExists(alive bool) func(context.Context, string) (bool, error) {
+	return func(context.Context, string) (bool, error) { return alive, nil }
+}
+
+func restoreFailingSource(boom error) cloneRestorer {
+	return func(_ context.Context, _, target string) error {
+		if target == "app" {
+			return boom
+		}
+		return nil
+	}
+}
+
+func TestCacheHitRestoreAndFanoutFallbackDropsRowWhenTemplateGone(t *testing.T) {
 	ctx := context.Background()
 	s, err := store.Open(ctx, filepath.Join(t.TempDir(), "t.db"))
 	if err != nil {
@@ -118,22 +128,48 @@ func TestCacheHitRestoreAndFanoutFallbackDropsRow(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	boom := errors.New("template vanished")
-	restore := func(_ context.Context, _, target string) error {
-		if target == "app" {
-			return boom
-		}
-		return nil
-	}
-
 	d := config.DatabaseConfig{Engine: "postgres"}
-	err = cacheHitRestoreAndFanout(ctx, s, repoID, wtID, restore, d,
-		"_tm_abc", "app", []string{"app_t1"}, 0, fp)
-	if err == nil {
-		t.Fatal("expected an error from the failed restore")
+	gone, err := cacheHitRestoreAndFanout(ctx, s, repoID, wtID, templateExists(false),
+		restoreFailingSource(errors.New("Unknown database '_tm_abc'")), d, "_tm_abc", "app", []string{"app_t1"}, 0, fp)
+	if err != nil || !gone {
+		t.Fatalf("a vanished template must report templateGone for a rebuild: gone=%v err=%v", gone, err)
 	}
 	rec, _ := s.LookupSnapshot(ctx, fp)
 	if rec != nil {
-		t.Fatal("snapshot row should be deleted on fallback so the engine cold-builds")
+		t.Fatal("snapshot row should be deleted on fallback so the engine rebuilds")
+	}
+}
+
+func TestCacheHitRestoreAndFanoutKeepsLiveTemplate(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(ctx, filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+	repoID, _ := s.EnsureRepo(ctx, "/r/foo", "foo")
+	wtID, _ := s.EnsureWorktree(ctx, repoID, "/r/foo/.wt/x", "x", "main")
+
+	const fp = "fp-live"
+	if err := s.RecordSnapshot(ctx, store.SnapshotRecord{
+		Fingerprint: fp, Engine: "mysql", SourceDB: "app",
+		TemplateName: "_tm_abc", RepoID: repoID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	boom := errors.New("pin mysql connection: Error 1040: Too many connections")
+	d := config.DatabaseConfig{Engine: "mysql"}
+	gone, err := cacheHitRestoreAndFanout(ctx, s, repoID, wtID, templateExists(true),
+		restoreFailingSource(boom), d, "_tm_abc", "app", []string{"app_t1"}, 0, fp)
+	if gone || !errors.Is(err, boom) {
+		t.Fatalf("a restore failure against a live template must surface, not rebuild: gone=%v err=%v", gone, err)
+	}
+	if rec, _ := s.LookupSnapshot(ctx, fp); rec == nil {
+		t.Fatal("a live template's snapshot row must survive a failed restore")
+	}
+	evs, err := s.QueryEvents(ctx, store.EventFilter{WorktreeID: wtID, EventTypes: []string{store.EvtSnapshotsCacheFallback}})
+	if err != nil || len(evs) != 0 {
+		t.Fatalf("no rebuild fallback may be announced for a live template: %v %v", evs, err)
 	}
 }

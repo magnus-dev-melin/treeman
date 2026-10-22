@@ -99,6 +99,46 @@ func TestRunLocalFinalizeFailsOnPrepareError(t *testing.T) {
 	}
 }
 
+func (f finalizeFixture) latestStateEvent(t *testing.T) store.Event {
+	t.Helper()
+	evs, err := f.st.QueryEvents(context.Background(), store.EventFilter{
+		WorktreeID: f.wtID, EventTypes: store.WorktreeStateEventTypes, Limit: 1,
+	})
+	if err != nil || len(evs) != 1 {
+		t.Fatalf("latest state event: %v %v", evs, err)
+	}
+	return evs[0]
+}
+
+func TestRunLocalFinalizeSuccessClearsEarlierError(t *testing.T) {
+	f := newFinalizeFixture(t)
+	ctx := context.Background()
+	if err := f.st.WriteEvent(ctx, store.LevelError, store.EvtWorktreeCreateError,
+		"prepare: restore _tm_x: Unknown database", f.repoID, f.wtID, "", 0, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.run(ctx, &config.Config{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	last := f.latestStateEvent(t)
+	if state, _ := store.DeriveWorktreeState(last); state != store.StateReady || last.EventType != store.EvtWorktreeCreateEnd {
+		t.Fatalf("a successful finalize --local must clear the error state, got %s %+v", state, last)
+	}
+}
+
+func TestRunLocalFinalizeFailureRecordsErrorState(t *testing.T) {
+	f := newFinalizeFixture(t)
+	cfg := &config.Config{Databases: []config.DatabaseConfig{
+		{Engine: "sqlite", NameTemplate: "data/fail_{slug}.db", Migrate: &config.Step{Run: "exit 1"}},
+	}}
+	if err := f.run(context.Background(), cfg, nil); err == nil {
+		t.Fatal("want the prepare failure")
+	}
+	if state, _ := store.DeriveWorktreeState(f.latestStateEvent(t)); state != store.StateError {
+		t.Fatalf("a failed finalize --local must leave the error state, got %s", state)
+	}
+}
+
 func TestRunLocalFinalizeAllocatesPortsBeforePatching(t *testing.T) {
 	f := newFinalizeFixture(t)
 	l, err := net.Listen("tcp4", "127.0.0.1:0")

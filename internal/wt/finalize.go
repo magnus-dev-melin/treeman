@@ -46,6 +46,30 @@ func RunLocalFinalize(
 		return fmt.Errorf("wait for running finalize: %w", err)
 	}
 	defer unlock()
+	_ = st.WriteEvent(ctx, store.LevelInfo, store.EvtWorktreeCreateStart,
+		"local setup + prepare beginning", repoID, wtID, "", 0, nil)
+	if err := runLocalFinalizeSteps(ctx, cfg, repoRoot, wtPath, sl, isMain, st, repoID, wtID, env, skipPrepare, sink); err != nil {
+		_ = st.WriteEvent(context.WithoutCancel(ctx), store.LevelError, store.EvtWorktreeCreateError,
+			err.Error(), repoID, wtID, "", 0, nil)
+		return err
+	}
+	_ = st.WriteEvent(ctx, store.LevelInfo, store.EvtWorktreeCreateEnd,
+		"local setup + prepare complete", repoID, wtID, "", 0, nil)
+	return nil
+}
+
+func runLocalFinalizeSteps(
+	ctx context.Context,
+	cfg *config.Config,
+	repoRoot, wtPath string,
+	sl slug.Slug,
+	isMain bool,
+	st *store.Store,
+	repoID, wtID int64,
+	env map[string]string,
+	skipPrepare bool,
+	sink Sink,
+) error {
 	runTrigger := func(trigger string, actions []config.Action) error {
 		if len(actions) == 0 {
 			return nil

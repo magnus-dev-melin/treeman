@@ -17,16 +17,6 @@ import (
 	"github.com/stubbedev/treeman/internal/ui"
 )
 
-// The four buckets every active worktree falls into. `up`/`down` are
-// transient (finalize / teardown in flight); `stable` and `failed`
-// are the resting states.
-const (
-	bucketStable = "stable"
-	bucketUp     = "up"
-	bucketDown   = "down"
-	bucketFailed = "failed"
-)
-
 // defaultIconFormat is the built-in `icon` line when the user hasn't
 // declared a `status.formats.icon` override. Rendered through the same
 // `{key}` engine as a custom format so the two paths can't diverge.
@@ -221,21 +211,21 @@ func collectStatus(ctx context.Context, repoFilter string) (statusData, error) {
 	}
 	// One query for every row's latest lifecycle event — the bar widget
 	// used to pay one QueryEvents per worktree per tick.
-	latest, err := st.LatestEventPerWorktree(ctx, ids, statusEventTypes)
+	latest, err := st.LatestEventPerWorktree(ctx, ids, store.WorktreeStateEventTypes)
 	if err != nil {
 		return statusData{}, err
 	}
 	for _, r := range scanned {
-		state, bucket := statusBucket(latest[r.id])
+		state, bucket := store.DeriveWorktreeState(latest[r.id])
 		data.Total++
 		switch bucket {
-		case bucketStable:
+		case store.BucketStable:
 			data.Stable++
-		case bucketUp:
+		case store.BucketUp:
 			data.Up++
-		case bucketDown:
+		case store.BucketDown:
 			data.Down++
-		case bucketFailed:
+		case store.BucketFailed:
 			data.Failed++
 		}
 		rs, ok := byRepo[r.repoPath]
@@ -263,50 +253,6 @@ type statusWtWithID struct {
 	wt       statusWt
 	id       int64
 	repoPath string
-}
-
-// statusEventTypes is the lifecycle set behind the status buckets (see
-// statusBucket).
-var statusEventTypes = []string{
-	store.EvtWorktreeCreateStart, store.EvtWorktreeCreateEnd, store.EvtWorktreeCreateError,
-	store.EvtWorktreeCreateDeferred,
-	store.EvtWorktreeDeleteStart, store.EvtWorktreeDeleteEnd,
-	store.EvtWorktreeReapStart, store.EvtWorktreeReapEnd,
-	// A standalone prepare_run (manual or via repair) emits prepare:*
-	// but no worktree:create:end, so a successful recovery after a
-	// prior create error must be read off the prepare terminal events
-	// too — otherwise the stale error pins the worktree to "failed"
-	// forever.
-	store.EvtPrepareEnd, store.EvtPrepareError,
-}
-
-// statusBucket maps a worktree's most recent lifecycle event (zero
-// Event = none yet) to a (state, bucket) pair. Mirrors finalizeState
-// but also folds in the teardown events so an in-flight teardown
-// surfaces as `down`. A worktree with no events yet is treated as
-// ready/stable.
-func statusBucket(last store.Event) (state, bucket string) {
-	if last.ID == 0 {
-		return "ready", bucketStable
-	}
-	switch last.EventType {
-	case store.EvtWorktreeCreateStart:
-		return "preparing", bucketUp
-	case store.EvtWorktreeCreateDeferred:
-		// Prepare on hold for an in-progress merge/rebase — healthy,
-		// not failed. Distinct state, stable bucket.
-		return "deferred", bucketStable
-	case store.EvtWorktreeCreateError, store.EvtPrepareError:
-		if last.Level == store.LevelError {
-			return "error", bucketFailed
-		}
-		return "ready", bucketStable
-	case store.EvtWorktreeDeleteStart, store.EvtWorktreeReapStart:
-		return "teardown", bucketDown
-	default:
-		// worktree:create:end / worktree:delete:end / worktree:reap:end.
-		return "ready", bucketStable
-	}
 }
 
 // worstClass is the waybar `class` (and `{class}` token): the most
@@ -354,10 +300,10 @@ func renderStatus(format string, d statusData, cfg config.StatusConfig) (string,
 // ui.Table's width math, so NO_COLOR stays aligned too.
 func renderStatusTable(d statusData, cfg config.StatusConfig) string {
 	icons := map[string]string{
-		bucketStable: cfg.Icons.Stable,
-		bucketUp:     cfg.Icons.Up,
-		bucketDown:   cfg.Icons.Down,
-		bucketFailed: cfg.Icons.Failed,
+		store.BucketStable: cfg.Icons.Stable,
+		store.BucketUp:     cfg.Icons.Up,
+		store.BucketDown:   cfg.Icons.Down,
+		store.BucketFailed: cfg.Icons.Failed,
 	}
 	tbl := ui.NewTable("", "STATE", "BRANCH", "SLUG", "AGE", "REPO")
 	for _, repo := range d.Repos {
@@ -454,13 +400,13 @@ func repoTokens(r statusRepo) map[string]string {
 	var stable, up, down, failed int
 	for _, wt := range r.Worktrees {
 		switch wt.Bucket {
-		case bucketStable:
+		case store.BucketStable:
 			stable++
-		case bucketUp:
+		case store.BucketUp:
 			up++
-		case bucketDown:
+		case store.BucketDown:
 			down++
-		case bucketFailed:
+		case store.BucketFailed:
 			failed++
 		}
 	}
@@ -483,7 +429,7 @@ func wtTokens(wt statusWt, cfg config.StatusConfig) map[string]string {
 		main = cfg.MainMarker
 	}
 	suffix := ""
-	if wt.Bucket != bucketStable {
+	if wt.Bucket != store.BucketStable {
 		suffix = " (" + wt.State + ")"
 	}
 	return map[string]string{
@@ -501,11 +447,11 @@ func wtTokens(wt statusWt, cfg config.StatusConfig) map[string]string {
 // bucketIcon returns the configured glyph for a single bucket.
 func bucketIcon(bucket string, cfg config.StatusConfig) string {
 	switch bucket {
-	case bucketUp:
+	case store.BucketUp:
 		return cfg.Icons.Up
-	case bucketDown:
+	case store.BucketDown:
 		return cfg.Icons.Down
-	case bucketFailed:
+	case store.BucketFailed:
 		return cfg.Icons.Failed
 	default:
 		return cfg.Icons.Stable

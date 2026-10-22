@@ -400,13 +400,13 @@ func statusOverviewTool(ctx context.Context, _ *mcpsdk.CallToolRequest, _ struct
 		state, bucket := deriveStatusBucket(ctx, st, wid)
 		out.Total++
 		switch bucket {
-		case "stable":
+		case store.BucketStable:
 			out.Stable++
-		case "up":
+		case store.BucketUp:
 			out.Up++
-		case "down":
+		case store.BucketDown:
 			out.Down++
-		case "failed":
+		case store.BucketFailed:
 			out.Failed++
 		}
 		out.Worktrees = append(out.Worktrees, statusWorktree{
@@ -418,47 +418,17 @@ func statusOverviewTool(ctx context.Context, _ *mcpsdk.CallToolRequest, _ struct
 }
 
 // deriveStatusBucket maps a worktree's latest lifecycle event to a
-// (state, bucket) pair. Mirrors the CLI status widget's logic.
+// (state, bucket) pair.
 func deriveStatusBucket(ctx context.Context, st *store.Store, wtID int64) (state, bucket string) {
 	rows, _ := st.QueryEvents(ctx, store.EventFilter{
 		WorktreeID: wtID,
-		EventTypes: []string{
-			store.EvtWorktreeCreateStart, store.EvtWorktreeCreateEnd, store.EvtWorktreeCreateError,
-			store.EvtWorktreeCreateDeferred,
-			store.EvtWorktreeDeleteStart, store.EvtWorktreeDeleteEnd,
-			store.EvtWorktreeReapStart, store.EvtWorktreeReapEnd,
-			// A standalone prepare_run (manual or via repair) emits
-			// prepare:* but no worktree:create:end, so a successful
-			// recovery after a prior create error must be read off the
-			// prepare terminal events too — otherwise the stale error
-			// pins the worktree to "failed" forever.
-			store.EvtPrepareEnd, store.EvtPrepareError,
-		},
-		Limit: 1,
+		EventTypes: store.WorktreeStateEventTypes,
+		Limit:      1,
 	})
 	if len(rows) == 0 {
-		return "ready", "stable"
+		return store.DeriveWorktreeState(store.Event{})
 	}
-	switch last := rows[0]; last.EventType {
-	case store.EvtWorktreeCreateStart:
-		return "preparing", "up"
-	case store.EvtWorktreeCreateDeferred:
-		// Prepare is intentionally on hold while a merge/rebase is in
-		// progress — not a failure. Surfaces as a distinct state but a
-		// healthy (stable) bucket; the HEAD watcher re-runs on clear.
-		return "deferred", "stable"
-	case store.EvtWorktreeCreateError, store.EvtPrepareError:
-		if last.Level == store.LevelError {
-			return "error", "failed"
-		}
-		return "ready", "stable"
-	case store.EvtWorktreeDeleteStart, store.EvtWorktreeReapStart:
-		return "teardown", "down"
-	default:
-		// worktree:create:end / *:delete:end / *:reap:end / prepare:end
-		// — the most recent lifecycle signal is a success.
-		return "ready", "stable"
-	}
+	return store.DeriveWorktreeState(rows[0])
 }
 
 // ─── notify_test ───────────────────────────────────────────────────

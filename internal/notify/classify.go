@@ -6,21 +6,11 @@ import (
 	"github.com/stubbedev/treeman/internal/store"
 )
 
-// The four `treeman status` buckets a worktree can fall into. Kept in
-// sync with the constants in cmd/treeman/cmd/status.go — these are the
-// user-facing names the `notifications.events:` config lists.
-const (
-	BucketStable = "stable"
-	BucketUp     = "up"
-	BucketDown   = "down"
-	BucketFailed = "failed"
-)
-
 // Bucket maps a store event (its type + level) to the status bucket a
 // notification would announce, or "" when the event is not a lifecycle
 // status transition worth notifying on.
 //
-// Mirrors deriveStatusBucket in cmd/treeman/cmd/status.go, but operates
+// Mirrors store.DeriveWorktreeState, but operates
 // per-event (the moment of transition) rather than by replaying the
 // newest event for a worktree:
 //
@@ -37,19 +27,19 @@ const (
 func Bucket(eventType, level string) string {
 	switch eventType {
 	case store.EvtWorktreeCreateStart:
-		return BucketUp
+		return store.BucketUp
 	case store.EvtWorktreeCreateEnd:
-		return BucketStable
+		return store.BucketStable
 	case store.EvtWorktreeCreateError:
 		// Only ever written as the terminal error event (see
 		// finalize.go / stale_finalize.go); gate on level so a future
 		// non-error use can't masquerade as a failure.
 		if level == store.LevelError {
-			return BucketFailed
+			return store.BucketFailed
 		}
 		return ""
 	case store.EvtWorktreeDeleteStart, store.EvtWorktreeReapStart:
-		return BucketDown
+		return store.BucketDown
 	default:
 		return ""
 	}
@@ -58,7 +48,7 @@ func Bucket(eventType, level string) string {
 // urgencyForBucket maps a bucket to its notification urgency. Only a
 // failed finalize is critical; everything else is informational.
 func urgencyForBucket(bucket string) Urgency {
-	if bucket == BucketFailed {
+	if bucket == store.BucketFailed {
 		return UrgencyCritical
 	}
 	return UrgencyNormal
@@ -90,16 +80,16 @@ func Compose(bucket, repo, target, detail string) Notification {
 
 	var title, body string
 	switch bucket {
-	case BucketStable:
+	case store.BucketStable:
 		title = "treeman: ready"
 		body = subject + " finished preparing"
-	case BucketUp:
+	case store.BucketUp:
 		title = "treeman: preparing"
 		body = subject + " is being prepared"
-	case BucketDown:
+	case store.BucketDown:
 		title = "treeman: tearing down"
 		body = subject + " is being torn down"
-	case BucketFailed:
+	case store.BucketFailed:
 		title = "treeman: failed"
 		base := subject + " failed to prepare"
 		hint := ""

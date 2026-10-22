@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/stubbedev/treeman/internal/config"
+	"github.com/stubbedev/treeman/internal/store"
 	"github.com/stubbedev/treeman/internal/ui"
 )
 
@@ -23,8 +24,8 @@ func TestRenderStatusTable(t *testing.T) {
 		Repos: []statusRepo{{
 			Repo: "proj",
 			Worktrees: []statusWt{
-				{Branch: "feature/x", Slug: "s_one", State: "ready", Bucket: bucketStable, AgeTs: age4m},
-				{Branch: "fix", Slug: "s_two", State: "error", Bucket: bucketFailed, AgeTs: age2h},
+				{Branch: "feature/x", Slug: "s_one", State: "ready", Bucket: store.BucketStable, AgeTs: age4m},
+				{Branch: "fix", Slug: "s_two", State: "error", Bucket: store.BucketFailed, AgeTs: age2h},
 			},
 		}},
 	}

@@ -534,22 +534,26 @@ func fanOutLimit(override uint32, maxConns, numClones int, eng string) (limit in
 // hit — and post-v5 (content-only fingerprint) a cache hit is the common
 // path for every fresh worktree of a known repo/branch.
 //
-// On any failure the whole cache hit is abandoned: the helper emits
-// snapshot_cache_fallback, drops the now-suspect snapshot row, and
-// returns the error so the engine falls through to a cold build. This
-// merges the previously-separate restore-fail and fanout-fail fallbacks
-// into one path with identical semantics.
+// A failed restore only condemns the cached template when the template
+// itself is gone: then the helper emits snapshot_cache_fallback, drops
+// the stale row and reports templateGone so the engine rebuilds. While
+// the template still exists the failure lies with a target or the
+// server (Too many connections, say) and is returned as is: rebuilding
+// a fingerprint whose template is alive re-creates that template under
+// every sibling worktree restoring from it, failing their restores
+// with Unknown database (#170).
 func cacheHitRestoreAndFanout(
 	ctx context.Context,
 	st *store.Store,
 	repoID, worktreeID int64,
+	exists func(context.Context, string) (bool, error),
 	restore cloneRestorer,
 	d config.DatabaseConfig,
 	template, source string,
 	clones []string,
 	maxConns int,
 	fingerprint string,
-) error {
+) (templateGone bool, err error) {
 	targets := make([]string, 0, len(clones)+1)
 	targets = append(targets, source)
 	for _, c := range clones {
@@ -557,24 +561,32 @@ func cacheHitRestoreAndFanout(
 			targets = append(targets, c)
 		}
 	}
-	if err := fanOutClones(ctx, st, repoID, worktreeID, restore, template, targets, d.Engine, d.Fanout, maxConns); err != nil {
-		// A cancellation is peer-collateral, not a suspect snapshot: don't
-		// warn a bogus cold-build fallback and don't evict a good cached
-		// template just because another engine failed mid-run.
-		if st != nil && !isCancellation(err) {
-			_ = st.WriteEvent(ctx, store.LevelWarn, store.EvtSnapshotsCacheFallback,
-				fmt.Sprintf("restore/fanout failed, falling back to cold build: %v", err),
-				repoID, worktreeID, "", 0, map[string]string{
-					"engine":      d.Engine,
-					"template":    template,
-					"fingerprint": fingerprint,
-					"error":       err.Error(),
-				})
-			_ = st.DeleteSnapshot(ctx, fingerprint)
-		}
-		return err
+	fanoutErr := fanOutClones(ctx, st, repoID, worktreeID, restore, template, targets, d.Engine, d.Fanout, maxConns)
+	if fanoutErr == nil {
+		return false, nil
 	}
-	return nil
+	if isCancellation(fanoutErr) {
+		return false, fanoutErr
+	}
+	alive, existsErr := exists(ctx, template)
+	if existsErr != nil {
+		return false, fmt.Errorf("restore from %s: %w (probe template: %w)", template, fanoutErr, existsErr)
+	}
+	if alive {
+		return false, fmt.Errorf("restore from cached template %s: %w", template, fanoutErr)
+	}
+	if st != nil {
+		_ = st.WriteEvent(ctx, store.LevelWarn, store.EvtSnapshotsCacheFallback,
+			fmt.Sprintf("template gone mid-restore, rebuilding: %v", fanoutErr),
+			repoID, worktreeID, "", 0, map[string]string{
+				"engine":      d.Engine,
+				"template":    template,
+				"fingerprint": fingerprint,
+				"error":       fanoutErr.Error(),
+			})
+		_ = st.DeleteSnapshot(ctx, fingerprint)
+	}
+	return true, nil
 }
 
 // Run drives prepare for every database declared by cfg.Databases.
@@ -1194,11 +1206,16 @@ func cacheHitGeneric(
 	// repopulated in parallel with the clones rather than serially first.
 	//
 	// If the template disappears mid-flight (race with EvictExcess
-	// between the existence probe and the restore/fanout), fall through
-	// to cold build instead of failing worktree:create:error.
-	if err := cacheHitRestoreAndFanout(ctx, st, repoID, worktreeID, restore,
-		d, rec.TemplateName, sourceDB, clones, maxConns, key.Fingerprint()); err != nil {
-		return Outcome{}, false, buildFlight{}, nil //nolint:nilerr // cache-miss fallback: the helper already logged + dropped the stale row; returning the (Outcome{}, false, nil) sentinel makes the engine cold-build
+	// between the existence probe and the restore/fanout), rebuild it
+	// under a build flight so sibling worktrees wait for the rebuild
+	// instead of racing their own.
+	templateGone, err := cacheHitRestoreAndFanout(ctx, st, repoID, worktreeID, exists, restore,
+		d, rec.TemplateName, sourceDB, clones, maxConns, key.Fingerprint())
+	if err != nil {
+		return Outcome{}, false, buildFlight{}, err
+	}
+	if templateGone {
+		return Outcome{}, false, beginBuild(d.Engine, key.Fingerprint()), nil
 	}
 	_ = st.SetTemplateBuilt(ctx, worktreeID, sourceDB, d.Engine, d.Connection, key.Fingerprint())
 	ms := time.Since(started).Milliseconds()
