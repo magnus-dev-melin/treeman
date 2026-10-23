@@ -453,6 +453,17 @@
       ],
       "description": "Source dump(s). Accepts a bare path string, a single mapping, or an ordered array of either."
     },
+    "DurablesConfig": {
+      "properties": {
+        "max_age_days": {
+          "type": "integer",
+          "description": "MaxAgeDays drops a durable not captured or used to seed\na child branch within N days, on the daemon's GC sweep\n(`snapshots.gc_interval_minutes`). The durable a live worktree's\nactive namespace currently mirrors is never dropped. Negative\nkeeps durables forever. Default 30."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "DurablesConfig — `durables:` block. A branch_scoped durable is\ndropped as soon as its local branch is gone; this bounds the ones\nwhose branch lingers. Dropping one discards the branch's saved\ndatabase state: checking the branch out again re-seeds it from the\nparent branch, the base branch's durable or the dump, then migrates."
+    },
     "EsConn": {
       "oneOf": [
         {
@@ -1176,6 +1187,10 @@
     "connections": {
       "$ref": "#/$defs/ConnectionsConfig",
       "description": "Connection blocks per supported engine (MySQL, Postgres,\nMongoDB, Redis, Elasticsearch). Treeman dials these to create\nper-worktree clone databases, run migrations."
+    },
+    "durables": {
+      "$ref": "#/$defs/DurablesConfig",
+      "description": "Retention for branch_scoped durable copies: how long a branch's\npreserved databases survive unused while the branch still exists."
     },
     "worktrees": {
       "$ref": "#/$defs/WorktreesConfig",

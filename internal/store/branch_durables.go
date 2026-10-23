@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 
 	"github.com/stubbedev/treeman/internal/engine"
 )
@@ -108,6 +109,44 @@ func (s *Store) ListBranchDurables(ctx context.Context, repoID int64) ([]BranchD
 	if err != nil {
 		return nil, err
 	}
+	return scanBranchDurables(rows, out)
+}
+
+// TouchBranchDurable marks a durable as used now, so the age sweep
+// keeps a base-branch durable that keeps seeding child branches.
+// Idempotent; a durable with no tracking row is left alone.
+func (s *Store) TouchBranchDurable(ctx context.Context, repoID int64, durableName string) error {
+	_, err := s.DB.ExecContext(ctx,
+		`UPDATE branch_durables SET last_used_at = ? WHERE repo_id = ? AND durable_name = ?`,
+		nowMillis(), repoID, durableName)
+	return err
+}
+
+// ListBranchDurablesUnusedSince returns repoID's durables last used
+// before cutoffMs, oldest first. A durable that a worktree's active
+// namespace currently mirrors (an active_branch_db marker for the same
+// db_key and branch) is left out: the next branch switch may skip its
+// capture because the durable exists, so dropping it would lose that
+// branch's data.
+func (s *Store) ListBranchDurablesUnusedSince(ctx context.Context, repoID, cutoffMs int64) ([]BranchDurableRow, error) {
+	rows, err := s.DB.QueryContext(ctx, `
+		SELECT d.repo_id, COALESCE(d.worktree_id, 0), d.engine, d.db_key, d.branch,
+		       d.durable_name, d.created_at, d.last_used_at
+		FROM branch_durables d
+		WHERE d.repo_id = ? AND d.last_used_at < ?
+		  AND NOT EXISTS (
+			SELECT 1 FROM active_branch_db a
+			WHERE a.repo_id = d.repo_id AND a.db_key = d.db_key AND a.branch = d.branch)
+		ORDER BY d.last_used_at, d.durable_name`, repoID, cutoffMs)
+	if err != nil {
+		return nil, err
+	}
+	return scanBranchDurables(rows, nil)
+}
+
+// scanBranchDurables appends every row of a query selecting the
+// branch_durables columns in BranchDurableRow order, and closes rows.
+func scanBranchDurables(rows *sql.Rows, out []BranchDurableRow) ([]BranchDurableRow, error) {
 	defer func() { _ = rows.Close() }()
 	for rows.Next() {
 		var r BranchDurableRow

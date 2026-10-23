@@ -82,3 +82,35 @@ func TestBranchDurablesEngineCanonicalised(t *testing.T) {
 		t.Fatalf("engine = %q, want canonical mysql", got[0].Engine)
 	}
 }
+
+func TestListBranchDurablesUnusedSince(t *testing.T) {
+	ctx := context.Background()
+	st, repoID, wtID := openTestStoreWithWt(t)
+	for _, r := range []BranchDurableRow{
+		{Branch: "old", DurableName: "_tmbs_old"},
+		{Branch: "mirrored", DurableName: "_tmbs_mirrored"},
+		{Branch: "touched", DurableName: "_tmbs_touched"},
+	} {
+		r.RepoID, r.WorktreeID, r.Engine, r.DBKey = repoID, wtID, "mysql", "app_a"
+		if err := st.RecordBranchDurable(ctx, r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := st.DB.ExecContext(ctx, `UPDATE branch_durables SET last_used_at = 1`); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetActiveBranch(ctx, repoID, wtID, "app_a", "mirrored", "mysql"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.TouchBranchDurable(ctx, repoID, "_tmbs_touched"); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := st.ListBranchDurablesUnusedSince(ctx, repoID, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].DurableName != "_tmbs_old" {
+		t.Fatalf("unused = %+v, want only _tmbs_old", got)
+	}
+}

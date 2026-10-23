@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"maps"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -185,20 +187,65 @@ func ReapOrphanDurables(ctx context.Context, cfg *config.Config, st *store.Store
 		return
 	}
 
-	// Group orphans by engine so each engine connects at most once.
+	var orphans []store.BranchDurableRow
+	for _, d := range durables {
+		if _, alive := live[d.Branch]; !alive {
+			orphans = append(orphans, d)
+		}
+	}
+	dropTrackedDurables(ctx, cfg, st, repoID, orphans, "orphan_branch_gone",
+		func(d store.BranchDurableRow) string {
+			return fmt.Sprintf("%s: dropped orphan durable for absent branch %q (active=%s)", d.Engine, d.Branch, d.DBKey)
+		})
+}
+
+// ReapExpiredDurables drops every tracked durable of repoID unused for
+// cfg.Durables.MaxAgeDays, even though its branch still exists. The
+// branch-gone reapers never touch those, so a long-lived local branch
+// kept its databases forever. The durable a live worktree's active
+// namespace mirrors is exempt (see ListBranchDurablesUnusedSince), and
+// the caller must not run this while a finalize is in flight: a
+// prepare may be about to resume one of these durables.
+func ReapExpiredDurables(ctx context.Context, cfg *config.Config, st *store.Store, repoID int64, now time.Time) {
+	if cfg.Durables.MaxAgeDays < 0 {
+		return
+	}
+	maxAge := time.Duration(cfg.Durables.MaxAgeDays) * 24 * time.Hour
+	expired, err := st.ListBranchDurablesUnusedSince(ctx, repoID, now.Add(-maxAge).UnixMilli())
+	if err != nil {
+		slog.Warn("reap expired durables: list", "repo_id", repoID, "err", err)
+		return
+	}
+	dropTrackedDurables(ctx, cfg, st, repoID, expired, "expired",
+		func(d store.BranchDurableRow) string {
+			return fmt.Sprintf("%s: dropped durable for branch %q unused for over %d days (active=%s)",
+				d.Engine, d.Branch, cfg.Durables.MaxAgeDays, d.DBKey)
+		})
+}
+
+// dropTrackedDurables drops each tracked durable by its recorded name
+// and deletes its tracking row, connecting each engine once. Engines
+// are visited in sorted order so runs are reproducible. describe
+// writes the branch_reap event message; reason is its payload reason.
+func dropTrackedDurables(
+	ctx context.Context,
+	cfg *config.Config,
+	st *store.Store,
+	repoID int64,
+	durables []store.BranchDurableRow,
+	reason string,
+	describe func(store.BranchDurableRow) string,
+) {
 	byEngine := map[string][]store.BranchDurableRow{}
 	for _, d := range durables {
-		if _, alive := live[d.Branch]; alive {
-			continue
-		}
 		byEngine[d.Engine] = append(byEngine[d.Engine], d)
 	}
-	for eng, rows := range byEngine {
-		// Reap only touches hash-derived durable namespaces by exact name —
-		// no sibling filter needed.
+	engines := slices.Sorted(maps.Keys(byEngine))
+	for _, eng := range engines {
+		// Drops go by exact recorded name, so no sibling filter is needed.
 		be, closeEng, cerr := connectBranchEngine(ctx, cfg, eng, "", nil, nil)
 		if cerr != nil {
-			slog.Warn("reap orphan durables: connect engine", "engine", eng, "err", cerr)
+			slog.Warn("drop tracked durables: connect engine", "engine", eng, "reason", reason, "err", cerr)
 			closeEng()
 			continue
 		}
@@ -206,21 +253,20 @@ func ReapOrphanDurables(ctx context.Context, cfg *config.Config, st *store.Store
 			closeEng()
 			continue
 		}
-		for _, d := range rows {
+		for _, d := range byEngine[eng] {
 			if err := be.drv.DropDurable(ctx, d.DurableName); err != nil {
-				slog.Warn("reap orphan durables: drop", "engine", eng,
+				slog.Warn("drop tracked durables: drop", "engine", eng, "reason", reason,
 					"durable", d.DurableName, "branch", d.Branch, "err", err)
 				continue
 			}
 			_ = st.DeleteBranchDurable(ctx, repoID, d.DurableName)
-			_ = st.WriteEvent(ctx, store.LevelInfo, store.EvtBranchReap,
-				fmt.Sprintf("%s: dropped orphan durable for absent branch %q (active=%s)", eng, d.Branch, d.DBKey),
+			_ = st.WriteEvent(ctx, store.LevelInfo, store.EvtBranchReap, describe(d),
 				repoID, d.WorktreeID, "", 0, map[string]string{
 					"engine":  eng,
 					"branch":  d.Branch,
 					"durable": d.DurableName,
 					"active":  d.DBKey,
-					"reason":  "orphan_branch_gone",
+					"reason":  reason,
 				})
 		}
 		closeEng()

@@ -61,6 +61,7 @@ func TestFieldScopesCoversEveryTopLevelKey(t *testing.T) {
 		"auto_fetch":    "both",
 		"ports":         "both",
 		"include":       "both",
+		"durables":      "both",
 	}
 	if len(scopes) != len(want) {
 		t.Errorf("FieldScopes has %d keys, want %d: %v", len(scopes), len(want), scopes)

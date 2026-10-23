@@ -47,6 +47,10 @@ type Config struct {
 	// max total size, GC cadence.
 	Snapshots SnapshotsConfig `yaml:"snapshots,omitempty" scope:"global"`
 
+	// Retention for branch_scoped durable copies: how long a branch's
+	// preserved databases survive unused while the branch still exists.
+	Durables DurablesConfig `yaml:"durables,omitempty" scope:"both"`
+
 	// Worktree creation behaviour: root path, symlinked mirrors
 	// (links), and copied files (copies).
 	Worktrees WorktreesConfig `yaml:"worktrees,omitempty" scope:"both"`
@@ -368,6 +372,20 @@ type DatabaseOverlay struct {
 	KeyPrefix    string          `yaml:"key_prefix,omitempty"`
 	TestClones   *TestClonesSpec `yaml:"test_clones,omitempty"`
 	Fanout       *uint32         `yaml:"fanout,omitempty"`
+}
+
+// DurablesConfig — `durables:` block. A branch_scoped durable is
+// dropped as soon as its local branch is gone; this bounds the ones
+// whose branch lingers. Dropping one discards the branch's saved
+// database state: checking the branch out again re-seeds it from the
+// parent branch, the base branch's durable or the dump, then migrates.
+type DurablesConfig struct {
+	// MaxAgeDays drops a durable not captured or used to seed
+	// a child branch within N days, on the daemon's GC sweep
+	// (`snapshots.gc_interval_minutes`). The durable a live worktree's
+	// active namespace currently mirrors is never dropped. Negative
+	// keeps durables forever. Default 30.
+	MaxAgeDays int `yaml:"max_age_days,omitempty"`
 }
 
 // LogsConfig — `logs:` block. One knob: how long to keep events +
@@ -2410,6 +2428,9 @@ func applyDefaults(cfg *Config) {
 	}
 	if cfg.DebounceMs == 0 {
 		cfg.DebounceMs = 500
+	}
+	if cfg.Durables.MaxAgeDays == 0 {
+		cfg.Durables.MaxAgeDays = 30
 	}
 	if cfg.AutoFetch.IntervalMinutes == 0 {
 		cfg.AutoFetch.IntervalMinutes = 15

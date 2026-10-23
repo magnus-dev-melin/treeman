@@ -7,6 +7,7 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
+	"github.com/stubbedev/treeman/internal/prepare"
 	"github.com/stubbedev/treeman/internal/resolve"
 	"github.com/stubbedev/treeman/internal/snapshot"
 )
@@ -23,7 +24,8 @@ import (
 //     apply).
 //  3. Retry the database teardown of deleted worktrees whose
 //     teardown failed.
-//  4. Run snapshot.EvictExcess against the repo's CapPerRepo.
+//  4. Drop branch_scoped durables unused for durables.max_age_days.
+//  5. Run snapshot.EvictExcess against the repo's CapPerRepo.
 //
 // Errors are logged and the loop continues — one flaky repo
 // shouldn't break GC for the others.
@@ -75,6 +77,11 @@ func runGCSweep(ctx context.Context, st *State) {
 		}
 		g.Go(func() error {
 			retryPendingTeardowns(gctx, st, &cfg, repoID)
+			// A finalize may be about to resume one of the expired
+			// durables; the next sweep catches up.
+			if len(st.SnapshotInFlightFinalizes()) == 0 {
+				prepare.ReapExpiredDurables(gctx, &cfg, st.Store, repoID, time.Now())
+			}
 			snapshot.EvictExcess(gctx, &cfg, st.Store, repoID)
 			return nil
 		})

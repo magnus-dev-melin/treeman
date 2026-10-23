@@ -54,6 +54,13 @@ an event so you can see what went and why:
 | `snapshots.max_age_days` | 30 | a template is older than N days | `snapshots:evict:age` |
 | `snapshots.max_total_gb` | 50 | total cached size exceeds N GB (largest-first) | `snapshots:evict:size` |
 
+The same sweep retries the database teardown of deleted worktrees whose
+earlier teardown failed (`db:teardown:retry`), and drops branch_scoped
+durables that have gone unused for `durables.max_age_days` (default 30;
+negative keeps them forever) even though their branch still exists
+(`branch:reap`, reason `expired`). The durable a worktree's active
+namespace currently mirrors is never dropped.
+
 Eviction also runs inline right after a new template is recorded (the
 `cap_per_repo` check), so disk stays bounded without waiting for the
 sweep. See the full event list in [events.md](events.md).

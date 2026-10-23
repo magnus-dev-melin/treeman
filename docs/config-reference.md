@@ -26,6 +26,7 @@ Later layers override earlier ones. Each top-level key has a **scope** that dete
 | `daemon` | global |
 | `connections` | both |
 | `snapshots` | global |
+| `durables` | both |
 | `worktrees` | both |
 | `env_sources` | repo |
 | `patches` | repo |
@@ -80,6 +81,9 @@ snapshots:
     max_age_days: 0
     max_total_gb: 0
     gc_interval_minutes: 0
+# Retention for branch_scoped durable copies: how long a branch's
+durables:
+    max_age_days: 0
 # Worktree creation behaviour: root path, symlinked mirrors
 worktrees:
     root: '...'
@@ -170,6 +174,9 @@ connections:
         container_network: '...'
     sqlite:
         base_dir: '...'
+# Retention for branch_scoped durable copies: how long a branch's
+durables:
+    max_age_days: 0
 # Worktree creation behaviour: root path, symlinked mirrors
 worktrees:
     root: '...'
@@ -330,6 +337,11 @@ per-worktree clone databases, run migrations.
 Snapshot retention/eviction policy for cached post-migration
 template snapshots: per-repo cap, per-source keep, max age,
 max total size, GC cadence.
+
+### `durables` *([DurablesConfig](#durablesconfig))* _[both]_
+
+Retention for branch_scoped durable copies: how long a branch's
+preserved databases survive unused while the branch still exists.
 
 ### `worktrees` *([WorktreesConfig](#worktreesconfig))* _[both]_
 
@@ -911,6 +923,22 @@ Field semantics:
 ### DumpList
 
 Source dump(s). Accepts a bare path string, a single mapping, or an ordered array of either.
+
+### DurablesConfig
+
+DurablesConfig — `durables:` block. A branch_scoped durable is
+dropped as soon as its local branch is gone; this bounds the ones
+whose branch lingers. Dropping one discards the branch's saved
+database state: checking the branch out again re-seeds it from the
+parent branch, the base branch's durable or the dump, then migrates.
+
+#### `max_age_days` *(integer)*
+
+MaxAgeDays drops a durable not captured or used to seed
+a child branch within N days, on the daemon's GC sweep
+(`snapshots.gc_interval_minutes`). The durable a live worktree's
+active namespace currently mirrors is never dropped. Negative
+keeps durables forever. Default 30.
 
 ### EsConn
 

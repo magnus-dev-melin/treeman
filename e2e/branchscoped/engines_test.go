@@ -695,6 +695,80 @@ func TestReapBranchDurablesMySQL(t *testing.T) {
 	assertItems(t, active, "develop-data", "feature-data")
 }
 
+// ─── TestReapExpiredDurablesMySQL ────────────────────────────────────
+//
+// durables.max_age_days drops a durable unused for too long even though
+// its branch still exists (#172), but never the durable the worktree's
+// active namespace currently mirrors, and never the active namespace.
+func TestReapExpiredDurablesMySQL(t *testing.T) {
+	harness.SkipIfNoDocker(t)
+	waitMySQL(t)
+
+	ctx := context.Background()
+	wtPath := t.TempDir()
+	st := openStore(t)
+	repoID, wtID := registerWorktree(t, st, wtPath)
+
+	cfg := &config.Config{
+		Connections: config.ConnectionsConfig{
+			Mysql: &config.MysqlConn{Host: "127.0.0.1", Port: 13390, User: "root", Password: "rootpw"},
+		},
+		Databases: []config.DatabaseConfig{{
+			Engine:       "mysql",
+			NameTemplate: "tm_bsexp_{slug}",
+			BranchScoped: true,
+		}},
+		Durables: config.DurablesConfig{MaxAgeDays: 30},
+	}
+
+	active := drivePrepare(t, st, cfg, wtPath, repoID, wtID, "develop")
+	t.Cleanup(func() { dropMySQL(t, active) })
+	mustExec(t, active, "CREATE TABLE items (id INT AUTO_INCREMENT PRIMARY KEY, v VARCHAR(32))")
+	mustExec(t, active, "INSERT INTO items(v) VALUES('develop-data')")
+
+	before := listMySQLDBsWithPrefix(t, "_tmbs_")
+	drivePrepare(t, st, cfg, wtPath, repoID, wtID, "feature")
+	mustExec(t, active, "INSERT INTO items(v) VALUES('feature-data')")
+	drivePrepare(t, st, cfg, wtPath, repoID, wtID, "develop")
+	durables := diffStrings(listMySQLDBsWithPrefix(t, "_tmbs_"), before)
+	if len(durables) != 2 {
+		t.Fatalf("expected develop's and feature's durables, got %v", durables)
+	}
+	for _, d := range durables {
+		t.Cleanup(func() { dropMySQL(t, d) })
+	}
+
+	later := time.Now().Add(31 * 24 * time.Hour)
+	disabled := *cfg
+	disabled.Durables.MaxAgeDays = -1
+	prepare.ReapExpiredDurables(ctx, &disabled, st, repoID, later)
+	if got := diffStrings(listMySQLDBsWithPrefix(t, "_tmbs_"), before); len(got) != 2 {
+		t.Fatalf("max_age_days < 0 must keep every durable, left %v", got)
+	}
+
+	prepare.ReapExpiredDurables(ctx, cfg, st, repoID, time.Now())
+	if got := diffStrings(listMySQLDBsWithPrefix(t, "_tmbs_"), before); len(got) != 2 {
+		t.Fatalf("fresh durables must survive, left %v", got)
+	}
+
+	prepare.ReapExpiredDurables(ctx, cfg, st, repoID, later)
+	left := diffStrings(listMySQLDBsWithPrefix(t, "_tmbs_"), before)
+	if len(left) != 1 {
+		t.Fatalf("expected only the durable develop's active namespace mirrors to survive, left %v", left)
+	}
+	tracked, err := st.ListBranchDurables(ctx, repoID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tracked) != 1 || tracked[0].Branch != "develop" || tracked[0].DurableName != left[0] {
+		t.Fatalf("tracked durables = %+v, want only develop's %s", tracked, left[0])
+	}
+	if !mysqlDBExists(t, active) {
+		t.Fatal("the expiry sweep must never drop the active namespace")
+	}
+	assertItems(t, active, "develop-data")
+}
+
 // ─── TestWorktreeDeleteKeepsDurablePostgres ──────────────────────────
 //
 // Postgres mirror of TestWorktreeDeleteKeepsDurableMySQL: `wt delete`

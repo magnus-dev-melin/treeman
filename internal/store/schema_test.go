@@ -54,7 +54,7 @@ func TestFreshDBHasExpectedSchema(t *testing.T) {
 	wantIndexes := []string{
 		"idx_active_branch_db_repo",
 		"idx_branch_durables_branch",
-		"idx_branch_durables_repo",
+		"idx_branch_durables_repo_lru",
 		"idx_config_generations_repo",
 		"idx_events_repo",
 		"idx_events_ts",

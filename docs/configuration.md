@@ -131,6 +131,9 @@ snapshots:
 logs:
   keep_days: 14                            # daemon prunes the shared event log; 0 keeps forever
 
+durables:                                  # scope "both" — a repo may override
+  max_age_days: 30                         # drop branch_scoped durables unused this long; negative keeps forever
+
 auto_fetch:                                # scope "both" — global default cadence; a repo may opt out
   enabled: true
   interval_minutes: 15

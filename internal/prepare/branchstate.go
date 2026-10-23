@@ -1025,6 +1025,7 @@ func (a branchScopedArgs) fill(ctx context.Context, active, branch string, useDu
 			return false, "", fmt.Errorf("seed %q from base branch %q durable snapshot %q: %w",
 				active, base, snap, err)
 		}
+		_ = a.st.TouchBranchDurable(ctx, a.repoID, snap)
 		return true, "parent-snapshot", nil
 	}
 	// Last resort: the main worktree's live DB. It holds whatever branch
