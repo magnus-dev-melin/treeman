@@ -216,8 +216,6 @@ func TestWorktreeDelete_DryRunHasPlan(t *testing.T) {
 // tool must return status=not-running with an Error, not a transport
 // error. Otherwise agents lose the structured payload.
 func TestDaemonStateTool_DaemonDown(t *testing.T) {
-	// Point at a non-existent socket so rpc.Call fails fast.
-	t.Setenv("TREEMAN_SOCKET", filepath.Join(t.TempDir(), "no-such.sock"))
 	_, out, err := daemonStateTool(context.Background(), nil, daemonStateIn{})
 	if err != nil {
 		t.Fatalf("transport error: %v", err)
@@ -234,7 +232,6 @@ func TestDaemonStateTool_DaemonDown(t *testing.T) {
 // the tool's collectDaemonState helper; verify it returns valid JSON
 // in the not-running state (no error, no panic).
 func TestDaemonStateResource_DaemonDown(t *testing.T) {
-	t.Setenv("TREEMAN_SOCKET", filepath.Join(t.TempDir(), "no-such.sock"))
 	out := collectDaemonState(context.Background())
 	if out.Status != "not-running" {
 		t.Errorf("Status = %q, want 'not-running'", out.Status)
@@ -282,11 +279,6 @@ func TestWorktreeRepair_NoPortsNoSnapshots(t *testing.T) {
 	repo := newTempRepo(t)
 	dbFile := filepath.Join(t.TempDir(), "t.db")
 	t.Setenv("TREEMAN_DB_PATH", dbFile)
-	// Point at a non-existent socket so the finalize-dispatch sees
-	// the daemon as unreachable (skipped action). Without this the
-	// host's running treemand would queue the finalize and the action
-	// would come back "fixed".
-	t.Setenv("TREEMAN_SOCKET", filepath.Join(t.TempDir(), "no-such.sock"))
 	s, err := store.Open(ctx, dbFile)
 	if err != nil {
 		t.Fatal(err)
