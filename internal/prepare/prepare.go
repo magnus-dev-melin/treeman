@@ -3886,13 +3886,23 @@ func resolveCloneNames(p *config.TestClonesSpec, tplCtx template.Context, repoRo
 }
 
 // TeardownDatabases drops every per-worktree namespace declared by
-// cfg.Databases. Errors per-engine are logged + swallowed so a
-// missing redis doesn't block dropping mysql.
+// cfg.Databases and returns every engine's failure, joined in config
+// order. One engine failing doesn't stop the others: a missing redis
+// must not block dropping mysql.
 //
 // Engines tear down in parallel: each one drives a different driver
 // (mysql + mongo + redis + ES) so there's no shared connection pool
 // to contend on, and a slow ES delete-by-prefix shouldn't gate the
 // fast mysql DROP DATABASE.
+//
+// With a worktree id, the outcome is recorded on the worktree row. A
+// failure is kept as its teardown_error, and the daemon retries it
+// after the row is marked deleted. The worktree's active-branch
+// markers stay, so the retry still captures each branch_scoped
+// namespace into its durable before dropping it. A success clears the
+// error and every marker, including markers for databases since
+// removed from config, so a worktree re-created at the same path
+// starts clean.
 func TeardownDatabases(
 	ctx context.Context,
 	cfg *config.Config,
@@ -3902,17 +3912,43 @@ func TeardownDatabases(
 ) error {
 	tplCtx := template.FromSlug(slug.Slug{Value: sl, Source: slug.SourceTicket})
 
-	g, gctx := errgroup.WithContext(ctx)
-	for _, d := range cfg.Databases {
-		g.Go(func() error {
-			if err := teardownOne(gctx, cfg, d, tplCtx, sl, repoID, worktreeID, st); err != nil {
-				_ = st.WriteEvent(gctx, store.LevelWarn, store.EvtDBTeardownError,
-					err.Error(), repoID, worktreeID, "", 0, nil)
+	errs := make([]error, len(cfg.Databases))
+	var wg sync.WaitGroup
+	for i, d := range cfg.Databases {
+		wg.Go(func() {
+			err := teardownOne(ctx, cfg, d, tplCtx, sl, repoID, worktreeID, st)
+			if err == nil {
+				return
 			}
-			return nil
+			_ = st.WriteEvent(ctx, store.LevelWarn, store.EvtDBTeardownError,
+				err.Error(), repoID, worktreeID, "", 0, nil)
+			errs[i] = fmt.Errorf("teardown %s database %d (slug %s): %w", d.Engine, i, sl, err)
 		})
 	}
-	return g.Wait()
+	wg.Wait()
+	err := errors.Join(errs...)
+	if worktreeID <= 0 {
+		return err
+	}
+	return errors.Join(err, recordTeardownOutcome(ctx, st, worktreeID, err))
+}
+
+// recordTeardownOutcome stores a worktree's teardown result: the error
+// to retry, or on success no pending error and no active-branch markers.
+func recordTeardownOutcome(ctx context.Context, st *store.Store, worktreeID int64, teardownErr error) error {
+	if teardownErr != nil {
+		if err := st.SetTeardownError(ctx, worktreeID, teardownErr.Error()); err != nil {
+			return fmt.Errorf("record teardown error for worktree %d: %w", worktreeID, err)
+		}
+		return nil
+	}
+	if err := st.ClearActiveBranchesForWorktree(ctx, worktreeID); err != nil {
+		return fmt.Errorf("clear active-branch markers for worktree %d: %w", worktreeID, err)
+	}
+	if err := st.ClearTeardownError(ctx, worktreeID); err != nil {
+		return fmt.Errorf("clear teardown error for worktree %d: %w", worktreeID, err)
+	}
+	return nil
 }
 
 // connPool holds one live connection per (engine family, connection

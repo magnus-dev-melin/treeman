@@ -21,7 +21,9 @@ import (
 //  1. Enumerate every repo from the SQLite registry.
 //  2. Load the repo's layered config (so .treeman.yaml overrides
 //     apply).
-//  3. Run snapshot.EvictExcess against the repo's CapPerRepo.
+//  3. Retry the database teardown of deleted worktrees whose
+//     teardown failed.
+//  4. Run snapshot.EvictExcess against the repo's CapPerRepo.
 //
 // Errors are logged and the loop continues — one flaky repo
 // shouldn't break GC for the others.
@@ -72,6 +74,7 @@ func runGCSweep(ctx context.Context, st *State) {
 			continue
 		}
 		g.Go(func() error {
+			retryPendingTeardowns(gctx, st, &cfg, repoID)
 			snapshot.EvictExcess(gctx, &cfg, st.Store, repoID)
 			return nil
 		})

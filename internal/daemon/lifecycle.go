@@ -444,15 +444,12 @@ func teardownOrphan(ctx context.Context, st *State, repoPath, wtPath string) err
 	}
 	runOrphan("delete-after-engines", cfg.Hooks.OnDeleteAfterEngines)
 
-	// Physically release the port reservations and active-branch markers,
+	// Physically release the port reservations,
 	// same as the CLI delete path. A bare MarkWorktreeDeleted leaves the
 	// worktree_ports rows in place; the unique index on (repo_id, name,
 	// port) then blocks the next worktree from re-using the freed port.
 	if err := st.Store.ReleaseWorktreePorts(ctx, row.ID); err != nil {
 		slog.Warn("release worktree ports (freed ports stay blocked for reallocation)", "wt", wtPath, "err", err)
-	}
-	if err := st.Store.ClearActiveBranchesForWorktree(ctx, row.ID); err != nil {
-		slog.Warn("clear active-branch markers (stale markers survive recreate)", "wt", wtPath, "err", err)
 	}
 
 	if err := st.Store.MarkWorktreeDeleted(ctx, row.ID); err != nil {

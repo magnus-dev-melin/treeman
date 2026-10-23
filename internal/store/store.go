@@ -652,7 +652,9 @@ func (s *Store) EnsureWorktreeWithAdmin(ctx context.Context, repoID int64, path,
 	}
 	// Resurrect/refresh an existing row (active or soft-deleted) at this
 	// path. When a worktree is re-created at the path of a previously-
-	// deleted row we MUST clear deleted_at and refresh slug/branch.
+	// deleted row we MUST clear deleted_at and refresh slug/branch, and
+	// drop any pending teardown retry: the new worktree owns the
+	// namespaces now.
 	// Without this the row stays marked deleted, and the next
 	// TeardownWorktree short-circuits on the `row.Deleted` check so
 	// predelete + db drop + git remove never run and the working tree
@@ -689,7 +691,8 @@ func (s *Store) EnsureWorktreeWithAdmin(ctx context.Context, repoID int64, path,
 			SET slug = ?,
 			    branch = COALESCE(?, branch),
 			    admin_dir = COALESCE(?, admin_dir),
-			    deleted_at = NULL
+			    deleted_at = NULL,
+			    teardown_error = NULL
 			WHERE id = ?`, slug, br, ad, id); err != nil {
 			return 0, err
 		}

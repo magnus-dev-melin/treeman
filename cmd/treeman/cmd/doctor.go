@@ -254,6 +254,7 @@ func RunDoctorChecks(ctx context.Context) []DoctorResult {
 		results = append(results, checkFrameworks(repoRoot))
 		results = append(results, checkHooks(repoRoot))
 		results = append(results, checkRegistry(ctx, repoRoot))
+		results = append(results, checkTeardowns(ctx, repoRoot))
 		results = append(results, checkSnapshots(ctx, repoRoot))
 		results = append(results, checkEngines(ctx, repoRoot))
 	} else {
@@ -264,6 +265,42 @@ func RunDoctorChecks(ctx context.Context) []DoctorResult {
 		})
 	}
 	return results
+}
+
+// checkTeardowns lists deleted worktrees whose database teardown
+// failed and is still pending. The daemon retries them on every GC
+// sweep; one that stays here keeps failing, and its databases hold
+// disk until the cause (the error shown) is fixed.
+func checkTeardowns(ctx context.Context, repoRoot string) doctorResult {
+	st, err := openDefaultStore(ctx)
+	if err != nil {
+		return doctorResult{Name: "teardowns", Status: "fail", Detail: err.Error()}
+	}
+	defer func() { _ = st.Close() }()
+	repoID, err := st.LookupRepoID(ctx, repoRoot)
+	if err != nil {
+		return doctorResult{Name: "teardowns", Status: "fail", Detail: err.Error()}
+	}
+	if repoID == 0 {
+		return doctorResult{Name: "teardowns", Status: "skip", Detail: "repo not enrolled"}
+	}
+	pending, err := st.ListPendingTeardowns(ctx, repoID)
+	if err != nil {
+		return doctorResult{Name: "teardowns", Status: "fail", Detail: err.Error()}
+	}
+	if len(pending) == 0 {
+		return doctorResult{Name: "teardowns", Status: "ok", Detail: "no failed database teardowns pending"}
+	}
+	lines := make([]string, 0, len(pending))
+	for _, p := range pending {
+		lines = append(lines, fmt.Sprintf("%s (%s)", p.Path, p.Error))
+	}
+	return doctorResult{
+		Name:   "teardowns",
+		Status: "warn",
+		Detail: fmt.Sprintf("%d deleted worktree(s) still hold databases: %s", len(pending), strings.Join(lines, "; ")),
+		Hint:   "the daemon retries these every snapshots.gc_interval_minutes; fix the error shown so the retry can succeed",
+	}
 }
 
 // checkSnapshots probes the template cache: row count vs cap, total

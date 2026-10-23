@@ -77,6 +77,7 @@ func TestFreshDBHasExpectedSchema(t *testing.T) {
 		"idx_worktrees_repo",
 		"idx_worktrees_repo_visited",
 		"idx_worktrees_slug",
+		"idx_worktrees_teardown_pending",
 	}
 	if !equalLists(got.indexes, wantIndexes) {
 		t.Errorf("indexes\n got: %v\nwant: %v", got.indexes, wantIndexes)

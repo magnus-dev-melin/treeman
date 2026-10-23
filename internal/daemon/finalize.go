@@ -991,12 +991,6 @@ func TeardownWorktree(
 	if err := st.Store.ReleaseWorktreePorts(ctx, wtID); err != nil {
 		slog.Warn("release worktree ports (freed ports stay blocked for reallocation)", "wt", wtRoot, "err", err)
 	}
-	// Reap every active-branch marker too, so a worktree later created at
-	// the same path starts clean (also clears markers for databases since
-	// removed from config).
-	if err := st.Store.ClearActiveBranchesForWorktree(ctx, wtID); err != nil {
-		slog.Warn("clear active-branch markers (stale markers survive recreate)", "wt", wtRoot, "err", err)
-	}
 
 	_ = st.Store.MarkWorktreeDeleted(ctx, wtID)
 	_ = st.Store.WriteEvent(ctx, store.LevelInfo, store.EvtWorktreeDeleteEnd,

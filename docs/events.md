@@ -70,6 +70,7 @@ that emits it.
 | `db:teardown:skip` | `store.EvtDBTeardownSkip` |
 | `db:teardown:error` | `store.EvtDBTeardownError` |
 | `db:teardown:progress` | `store.EvtDBTeardownProgress` |
+| `db:teardown:retry` | `store.EvtDBTeardownRetry` |
 
 ## databases[].migrate
 

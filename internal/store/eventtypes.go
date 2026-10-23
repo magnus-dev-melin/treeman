@@ -53,6 +53,7 @@ const (
 	EvtDBTeardownSkip     = "db:teardown:skip"
 	EvtDBTeardownError    = "db:teardown:error"
 	EvtDBTeardownProgress = "db:teardown:progress"
+	EvtDBTeardownRetry    = "db:teardown:retry"
 
 	// databases[].migrate
 	EvtMigrateSkip = "migrate:skip"
