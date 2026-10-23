@@ -10,7 +10,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/stubbedev/treeman/internal/config"
 	"github.com/stubbedev/treeman/internal/prepare"
 	"github.com/stubbedev/treeman/internal/store"
 	"github.com/stubbedev/treeman/pkg/safego"
@@ -105,13 +104,6 @@ type State struct {
 	// ready to use.
 	untrackedSeen prepare.UntrackedSeen
 
-	// dropQueues mirrors reapQueues for DROP DATABASE work. Each repo
-	// has a single drain goroutine — sequential DROP per repo avoids
-	// hammering the DB server when five worktrees are torn down at
-	// once, while different repos can still drop in parallel.
-	dropQueuesMu sync.Mutex
-	dropQueues   map[string]chan DBDropJob
-
 	// ConfigReloader watches `.treeman.yaml` + layered config files
 	// and restarts per-repo watchers when they change. Initialised by
 	// `treemand` main; nil in unit tests that exercise dispatch
@@ -202,17 +194,6 @@ type WatchRerun struct {
 	RunID    string
 }
 
-// DBDropJob is one queued `prepare.TeardownDatabases` invocation,
-// scheduled by TeardownWorktree to run in the background after
-// teardown hooks complete. The cfg field is a value copy — the
-// caller's mutation cannot race the drain worker.
-type DBDropJob struct {
-	Cfg        config.Config
-	Slug       string
-	RepoID     int64
-	WorktreeID int64
-}
-
 // WatcherEntry — per-repo watcher placeholder. Phase 10 fills in the
 // actual fsnotify guts; for now this carries cancel + worktree
 // counts so the RPC layer can answer `WatcherList`.
@@ -243,7 +224,6 @@ func NewState(bg context.Context, s *store.Store) *State {
 		inFlightFinalizes: map[string]inFlightFinalize{},
 		inFlightCreates:   map[string]int{},
 		reapQueues:        map[string]chan string{},
-		dropQueues:        map[string]chan DBDropJob{},
 		syncBackoff:       map[string]time.Time{},
 		syncFailCount:     map[string]int{},
 		syncLastFetch:     map[string]time.Time{},
@@ -553,8 +533,6 @@ const (
 	lblWatcherFS         = "watcher:fs"
 	lblWatchActions      = "watch:actions"
 	lblWatchFinalize     = "watch:finalize"
-	lblDBDropOverflow    = "db:drop:overflow"
-	lblDBDropDrain       = "db:drop:drain"
 	lblNotify            = "notify:dispatch"
 	lblPlanLane          = "plan:lane"
 	lblPlanTask          = "plan:task"
