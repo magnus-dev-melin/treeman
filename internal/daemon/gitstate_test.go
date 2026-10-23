@@ -1,9 +1,13 @@
 package daemon
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 )
 
 // TestGitOpInProgress covers each conflict-prone marker (files and the
@@ -57,5 +61,42 @@ func TestIsGitOpMarker(t *testing.T) {
 		if isGitOpMarker(base) {
 			t.Errorf("isGitOpMarker(%q) = true, want false", base)
 		}
+	}
+}
+
+func TestAwaitIndexUnlocked(t *testing.T) {
+	repo := filepath.Join(t.TempDir(), "repo")
+	gitRun(t, "", "init", "-q", "-b", "main", repo)
+	lock := filepath.Join(repo, ".git", "index.lock")
+
+	if err := awaitIndexUnlocked(t.Context(), repo, time.Second, 10*time.Millisecond); err != nil {
+		t.Fatalf("no lock: %v", err)
+	}
+
+	if err := os.WriteFile(lock, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	released := time.AfterFunc(150*time.Millisecond, func() { _ = os.Remove(lock) })
+	defer released.Stop()
+	start := time.Now()
+	if err := awaitIndexUnlocked(t.Context(), repo, 5*time.Second, 10*time.Millisecond); err != nil {
+		t.Fatalf("released lock: %v", err)
+	}
+	if waited := time.Since(start); waited < 100*time.Millisecond {
+		t.Fatalf("returned after %s, before git released the lock", waited)
+	}
+
+	if err := os.WriteFile(lock, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := awaitIndexUnlocked(t.Context(), repo, 50*time.Millisecond, 10*time.Millisecond)
+	if err == nil || !strings.Contains(err.Error(), lock) {
+		t.Fatalf("stale lock: err = %v, want a timeout naming %s", err, lock)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if err := awaitIndexUnlocked(ctx, repo, 5*time.Second, 10*time.Millisecond); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled: err = %v, want context.Canceled", err)
 	}
 }

@@ -1,8 +1,13 @@
 package daemon
 
 import (
+	"context"
+	"errors"
+	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 // gitOpMarkers are the entries in a worktree's git directory that
@@ -66,4 +71,45 @@ func worktreeGitOp(worktreePath string) string {
 		return ""
 	}
 	return gitOpInProgress(gitDir)
+}
+
+// indexLockWait bounds how long a finalize waits for git to release a
+// worktree's index lock. A merge or checkout of a large tree holds it
+// for seconds; one held longer is a stale lock from a git that died,
+// which git itself refuses to work past either.
+const indexLockWait = 2 * time.Minute
+
+// indexLockPoll is how often awaitIndexUnlocked re-checks the lock.
+const indexLockPoll = 100 * time.Millisecond
+
+// awaitIndexUnlocked blocks until no git process holds wtRoot's index
+// lock (`<gitdir>/index.lock`). A merge or checkout holds it for the
+// whole time it rewrites the tracked files, and a clean merge leaves
+// no other marker (MERGE_HEAD only exists when it stops on a
+// conflict). Reading the config or inputs mid-rewrite sees a half-
+// updated tree: a moved dump whose new path is in treeman.yaml but not
+// yet on disk (#173). Returns an error naming the lock when it is
+// still held after `timeout`, or ctx's error when ctx ends first.
+// Proceeds when the git dir can't be resolved, like worktreeGitOp.
+func awaitIndexUnlocked(ctx context.Context, wtRoot string, timeout, poll time.Duration) error {
+	gitDir, err := resolveGitDir(wtRoot)
+	if err != nil {
+		return nil //nolint:nilerr // an unresolvable git dir is the watcher's to surface, not a reason to block
+	}
+	lock := filepath.Join(gitDir, "index.lock")
+	deadline := time.Now().Add(timeout)
+	for {
+		if _, err := os.Stat(lock); errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("git has held %s for over %s; if no git command is running there, "+
+				"remove the stale lock and run `treeman worktree finalize`", lock, timeout)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(poll):
+		}
+	}
 }

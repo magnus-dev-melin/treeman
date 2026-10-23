@@ -218,6 +218,9 @@ func finalizeWorktree(
 	}
 	defer release()
 
+	if err := awaitIndexUnlocked(ctx, wtRoot, indexLockWait, indexLockPoll); err != nil {
+		return unlessCancelled(ctx, err)
+	}
 	cfg, err = resolve.LoadResolvedForWorktree(repoRoot, wtRoot)
 	if err != nil {
 		return err
@@ -755,6 +758,12 @@ func FinalizeWorktreeForWatch(
 	}
 	defer release()
 
+	// A watched input changing is often git rewriting the tree (merge,
+	// checkout, pull). Wait for it to finish so config and inputs are
+	// read from the settled tree, not halfway through (#173).
+	if err := awaitIndexUnlocked(ctx, wtRoot, indexLockWait, indexLockPoll); err != nil {
+		return unlessCancelled(ctx, err)
+	}
 	cfg, err = resolve.LoadResolvedForWorktree(repoRoot, wtRoot)
 	if err != nil {
 		return err
