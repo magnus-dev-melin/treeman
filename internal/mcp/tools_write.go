@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -638,23 +639,11 @@ func repoRemoveTool(
 	}
 	// Prefer the daemon RPC so live watchers stop in-process; fall
 	// back to direct SQLite when the daemon isn't running.
-	if sock, _ := rpc.SocketPath(); sock != "" {
-		if _, statErr := os.Stat(sock); statErr == nil {
-			resp, callErr := rpc.Call(ctx, rpc.Request{
-				Method:     rpc.MethodRepoRemove,
-				RepoRemove: &rpc.RepoRemoveArgs{RepoPath: repoRoot, Force: in.Force},
-			})
-			if callErr == nil {
-				if resp.Kind == rpc.KindError {
-					return nil, repoRemoveOut{}, fmt.Errorf("daemon: %s", resp.Message)
-				}
-				writeMCPEvent(context.Background(), store.EvtMCPRegistryRemove, "removed "+repoRoot, 0, map[string]string{
-					"repo": repoRoot,
-					"via":  "daemon",
-				})
-				return nil, repoRemoveOut{RepoPath: repoRoot, Via: "daemon"}, nil
-			}
+	if done, err := repoRemoveViaDaemon(ctx, repoRoot, in.Force); done || err != nil {
+		if err != nil {
+			return nil, repoRemoveOut{}, err
 		}
+		return nil, repoRemoveOut{RepoPath: repoRoot, Via: "daemon"}, nil
 	}
 
 	st, err := openStore(ctx)
@@ -1543,4 +1532,34 @@ func planWorktreeDelete(ctx context.Context, repoRoot, target string) (worktreeD
 		out.WouldDropDBs = append(out.WouldDropDBs, entry)
 	}
 	return out, nil
+}
+
+func repoRemoveViaDaemon(ctx context.Context, repoRoot string, force bool) (bool, error) {
+	sock, err := rpc.SocketPath()
+	if err != nil {
+		return false, err
+	}
+	if _, statErr := os.Stat(sock); errors.Is(statErr, fs.ErrNotExist) {
+		return false, nil
+	} else if statErr != nil {
+		return false, fmt.Errorf("check for the daemon socket %s: %w", sock, statErr)
+	}
+	resp, err := rpc.Call(ctx, rpc.Request{
+		Method:     rpc.MethodRepoRemove,
+		RepoRemove: &rpc.RepoRemoveArgs{RepoPath: repoRoot, Force: force},
+	})
+	if errors.Is(err, rpc.ErrDaemonUnreachable) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("remove repo %s via the daemon: %w", repoRoot, err)
+	}
+	if resp.Kind == rpc.KindError {
+		return false, fmt.Errorf("daemon: %s", resp.Message)
+	}
+	writeMCPEvent(context.Background(), store.EvtMCPRegistryRemove, "removed "+repoRoot, 0, map[string]string{
+		"repo": repoRoot,
+		"via":  "daemon",
+	})
+	return true, nil
 }

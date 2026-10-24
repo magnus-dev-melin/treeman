@@ -375,6 +375,9 @@ func checkDaemon(ctx context.Context) doctorResult {
 			Hint: "restart it with: treeman daemon restart",
 		}
 	}
+	if err != nil && !errors.Is(err, rpc.ErrDaemonUnreachable) {
+		return doctorResult{Name: "daemon", Status: "fail", Detail: "status request failed: " + err.Error()}
+	}
 	if err != nil {
 		return doctorResult{
 			Name:   "daemon",
@@ -502,7 +505,10 @@ func checkSchema(repoRoot string) doctorResult {
 }
 
 func checkFrameworks(repoRoot string) doctorResult {
-	cfg, _ := resolve.LoadResolved(repoRoot)
+	cfg, err := resolve.LoadResolved(repoRoot)
+	if err != nil {
+		return doctorResult{Name: "framework", Status: "fail", Detail: "load config of " + repoRoot + ": " + err.Error()}
+	}
 	detected := framework.RegistryFor(&cfg).DetectAll(repoRoot)
 	if len(detected) == 0 {
 		return doctorResult{

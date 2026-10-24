@@ -371,8 +371,11 @@ func checkSnapshots(ctx context.Context, repoRoot string) doctorResult {
 
 func checkDaemon(ctx context.Context) doctorResult {
 	resp, err := rpc.Call(ctx, rpc.Request{Method: rpc.MethodStatus})
-	if err != nil {
+	if errors.Is(err, rpc.ErrDaemonUnreachable) {
 		return doctorResult{Name: "daemon", Status: "warn", Detail: "not reachable", Hint: "treeman daemon start"}
+	}
+	if err != nil {
+		return doctorResult{Name: "daemon", Status: "fail", Detail: "status request failed: " + err.Error()}
 	}
 	if resp.Kind == rpc.KindError {
 		return doctorResult{Name: "daemon", Status: "fail", Detail: resp.Message}
@@ -423,7 +426,10 @@ func checkSchema(repoRoot string) doctorResult {
 }
 
 func checkFrameworks(repoRoot string) doctorResult {
-	cfg, _ := resolve.LoadResolved(repoRoot)
+	cfg, err := resolve.LoadResolved(repoRoot)
+	if err != nil {
+		return doctorResult{Name: "framework", Status: "fail", Detail: "load config of " + repoRoot + ": " + err.Error()}
+	}
 	detected := framework.RegistryFor(&cfg).DetectAll(repoRoot)
 	if len(detected) == 0 {
 		return doctorResult{Name: "framework", Status: "warn", Detail: "no migration framework detected"}
@@ -1276,8 +1282,11 @@ func daemonStateTool(ctx context.Context, _ *mcpsdk.CallToolRequest, _ daemonSta
 // agents can react without parsing the error string.
 func collectDaemonState(ctx context.Context) daemonStateOut {
 	resp, err := rpc.Call(ctx, rpc.Request{Method: rpc.MethodDaemonState})
-	if err != nil {
+	if errors.Is(err, rpc.ErrDaemonUnreachable) {
 		return daemonStateOut{Status: "not-running", Error: err.Error()}
+	}
+	if err != nil {
+		return daemonStateOut{Status: "error", Error: err.Error()}
 	}
 	if resp.Kind == rpc.KindError {
 		return daemonStateOut{Status: "error", Error: resp.Message}
@@ -1287,9 +1296,12 @@ func collectDaemonState(ctx context.Context) daemonStateOut {
 
 func daemonStatusTool(ctx context.Context, _ *mcpsdk.CallToolRequest, _ daemonStatusIn) (*mcpsdk.CallToolResult, daemonStatusOut, error) {
 	resp, err := rpc.Call(ctx, rpc.Request{Method: rpc.MethodStatus})
-	if err != nil {
+	if errors.Is(err, rpc.ErrDaemonUnreachable) {
 		out := daemonStatusOut{Status: "not-running", Error: err.Error()}
-		return nil, out, nil //nolint:nilerr // daemon-down is tool output, not a transport error
+		return nil, out, nil
+	}
+	if err != nil {
+		return nil, daemonStatusOut{}, fmt.Errorf("query daemon status: %w", err)
 	}
 	if resp.Kind == rpc.KindError {
 		return nil, daemonStatusOut{Status: "error", Error: resp.Message}, nil

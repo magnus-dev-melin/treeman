@@ -82,10 +82,14 @@ func finalizePlan(repoRoot, wtPath string) rpc.Request {
 // it in-process when no daemon is reachable — mirroring the CLI so MCP
 // tools work daemon-less too.
 func submitMCPPlan(ctx context.Context, req rpc.Request) rpc.Response {
-	if resp, err := rpc.Call(ctx, req); err == nil {
+	resp, err := rpc.Call(ctx, req)
+	if err == nil {
 		return resp
 	}
-	resp, err := daemon.RunPlanInProcess(ctx, *req.RunPlan)
+	if !errors.Is(err, rpc.ErrDaemonUnreachable) {
+		return rpc.Response{Kind: rpc.KindError, Message: "submit plan to the daemon: " + err.Error()}
+	}
+	resp, err = daemon.RunPlanInProcess(ctx, *req.RunPlan)
 	if err != nil {
 		return rpc.Response{Kind: rpc.KindError, Message: err.Error()}
 	}
