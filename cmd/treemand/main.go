@@ -181,7 +181,10 @@ func run() error {
 	// drag their events / hook_runs / snapshots rows forever.
 	daemon.ReapDeadRepos(ctx, st)
 
-	repoPaths, _ := s.ListRepoPaths(ctx)
+	repoPaths, err := s.ListRepoPaths(ctx)
+	if err != nil {
+		slog.Error("list registered repos at boot: repo watchers are not resumed and trash dirs are not swept", "err", err)
+	}
 	resumeRepoWatchers(ctx, st, repoPaths)
 
 	// Reap any `.treeman-trash/` leftovers from a previously crashed
@@ -297,6 +300,7 @@ func enrollMainWorktrees(ctx context.Context, st *daemon.State, repoPaths []stri
 func resumeWorktreeWatchers(ctx context.Context, s *store.Store, st *daemon.State) {
 	wts, err := s.ListActiveWorktrees(ctx)
 	if err != nil {
+		slog.Error("list active worktrees at boot: worktree watchers are not resumed", "err", err)
 		return
 	}
 	parallelFor(wts, 8, func(w store.ActiveWorktree) {
@@ -320,6 +324,7 @@ func resumeWorktreeWatchers(ctx context.Context, s *store.Store, st *daemon.Stat
 func resumeLifecycleWatchers(ctx context.Context, s *store.Store, st *daemon.State) {
 	repos, err := s.ListRepoRefs(ctx)
 	if err != nil {
+		slog.Error("list registered repos at boot: lifecycle watchers are not resumed", "err", err)
 		return
 	}
 	for _, r := range repos {

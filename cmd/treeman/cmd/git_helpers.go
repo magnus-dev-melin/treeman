@@ -133,7 +133,11 @@ func checkoutRoute(ctx context.Context, repoRoot, branch string, opts spawnOpts)
 // out in the main repo — a local branch with no worktree gets a linked
 // worktree, not a `git checkout` that moves main off its branch.
 func worktreeRoute(ctx context.Context, repoRoot, branch string, opts spawnOpts) error {
-	if path, ok := liveWorktreeForBranch(ctx, repoRoot, branch); ok {
+	path, ok, err := liveWorktreeForBranch(ctx, repoRoot, branch)
+	if err != nil {
+		return err
+	}
+	if ok {
 		landExisting(ctx, path)
 		return nil
 	}
@@ -155,18 +159,26 @@ func worktreeRoute(ctx context.Context, repoRoot, branch string, opts spawnOpts)
 // git still lists them until the final git-remove lands, and handing
 // the shell a directory that's about to disappear is worse than a
 // create that git refuses.
-func liveWorktreeForBranch(ctx context.Context, repoRoot, branch string) (string, bool) {
-	if path, ok := registryWorktreeForBranch(ctx, repoRoot, branch); ok {
-		if _, err := os.Stat(path); err == nil {
-			return path, true
-		}
+func liveWorktreeForBranch(ctx context.Context, repoRoot, branch string) (string, bool, error) {
+	path, ok, err := registryWorktreeForBranch(ctx, repoRoot, branch)
+	if err != nil {
+		return "", false, err
 	}
-	if path, ok := gitWorktrees(ctx, repoRoot)[branch]; ok {
-		if _, err := os.Stat(path); err == nil && !tearingDownPaths(ctx, repoRoot)[filepath.Clean(path)] {
-			return path, true
-		}
+	if ok && dirPresent(path) {
+		return path, true, nil
 	}
-	return "", false
+	path, ok = gitWorktrees(ctx, repoRoot)[branch]
+	if !ok || !dirPresent(path) {
+		return "", false, nil
+	}
+	tearing, err := tearingDownPaths(ctx, repoRoot)
+	if err != nil {
+		return "", false, err
+	}
+	if tearing[filepath.Clean(path)] {
+		return "", false, nil
+	}
+	return path, true, nil
 }
 
 // occupiedWorktrees merges the registry occupancy map with git's own
@@ -175,19 +187,26 @@ func liveWorktreeForBranch(ctx context.Context, repoRoot, branch string) (string
 // This is the source for the switch menu + delete picker, so foreign
 // worktrees show up, dead registry rows never surface a cd-able path,
 // and a worktree mid-teardown never offers itself as a destination.
-func occupiedWorktrees(ctx context.Context, repoRoot string) map[string]string {
+func occupiedWorktrees(ctx context.Context, repoRoot string) (map[string]string, error) {
 	occ := gitWorktrees(ctx, repoRoot)
 	if occ == nil {
 		occ = map[string]string{}
 	}
-	maps.Copy(occ, branchOccupancy(ctx, repoRoot))
-	tearing := tearingDownPaths(ctx, repoRoot)
+	registered, err := branchOccupancy(ctx, repoRoot)
+	if err != nil {
+		return nil, err
+	}
+	maps.Copy(occ, registered)
+	tearing, err := tearingDownPaths(ctx, repoRoot)
+	if err != nil {
+		return nil, err
+	}
 	for branch, path := range occ {
 		if _, err := os.Stat(path); err != nil || tearing[filepath.Clean(path)] {
 			delete(occ, branch)
 		}
 	}
-	return occ
+	return occ, nil
 }
 
 // tearingDownPaths returns the (cleaned) paths of worktrees whose
@@ -195,10 +214,10 @@ func occupiedWorktrees(ctx context.Context, repoRoot string) map[string]string {
 // callers whose data comes from OUTSIDE the registry — git porcelain
 // entries in occupiedWorktrees / liveWorktreeForBranch, where the SQL
 // predicate can't be applied at query time.
-func tearingDownPaths(ctx context.Context, repoRoot string) map[string]bool {
+func tearingDownPaths(ctx context.Context, repoRoot string) (map[string]bool, error) {
 	st, err := openSharedStore(ctx)
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("open the treeman store to list the worktrees of %s being torn down: %w", repoRoot, err)
 	}
 	//nolint:gosec // WorktreeNotTearingDown is a compile-time constant fragment
 	rows, err := st.DB.QueryContext(ctx, `
@@ -206,17 +225,21 @@ func tearingDownPaths(ctx context.Context, repoRoot string) map[string]bool {
 		WHERE r.path = ? COLLATE NOCASE AND w.deleted_at IS NULL
 		AND NOT (`+store.WorktreeNotTearingDown+`)`, repoRoot)
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("list the worktrees of %s being torn down: %w", repoRoot, err)
 	}
 	defer func() { _ = rows.Close() }()
 	out := map[string]bool{}
 	for rows.Next() {
 		var p string
-		if err := rows.Scan(&p); err == nil {
-			out[filepath.Clean(p)] = true
+		if err := rows.Scan(&p); err != nil {
+			return nil, fmt.Errorf("scan a worktree of %s being torn down: %w", repoRoot, err)
 		}
+		out[filepath.Clean(p)] = true
 	}
-	return out
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list the worktrees of %s being torn down: %w", repoRoot, err)
+	}
+	return out, nil
 }
 
 // gitWorktrees builds branch → path for the repo's LINKED worktrees
@@ -294,7 +317,14 @@ func runSwitch(ctx context.Context, c *cli.Command, route switchRoute) error {
 	// (prefix convention + handleize) instead of silently creating a
 	// branch literally named "typo". Names carrying a "/" are taken
 	// as-is — the user already chose a prefix.
-	if !strings.Contains(branch, "/") && !branchKnown(ctx, repoRoot, branch) {
+	if strings.Contains(branch, "/") {
+		return route(ctx, repoRoot, branch, opts)
+	}
+	known, err := branchKnown(ctx, repoRoot, branch)
+	if err != nil {
+		return err
+	}
+	if !known {
 		if !tui.Interactive() {
 			return fmt.Errorf(
 				"no branch %q — pass a prefixed name (feature/%s) to create it, or run interactively for the wizard",
@@ -307,12 +337,12 @@ func runSwitch(ctx context.Context, c *cli.Command, route switchRoute) error {
 
 // branchKnown reports whether `branch` resolves to anything switchable:
 // a local ref, a remote ref, or a live registered worktree.
-func branchKnown(ctx context.Context, repoRoot, branch string) bool {
+func branchKnown(ctx context.Context, repoRoot, branch string) (bool, error) {
 	if wt.RefExistsLocal(ctx, repoRoot, branch) || wt.RefExistsRemote(ctx, repoRoot, branch) {
-		return true
+		return true, nil
 	}
-	_, ok := registryWorktreeForBranch(ctx, repoRoot, branch)
-	return ok
+	_, ok, err := registryWorktreeForBranch(ctx, repoRoot, branch)
+	return ok, err
 }
 
 // switchInteractive drives the no-arg switch path. It shows live
@@ -349,7 +379,10 @@ func switchInteractive(ctx context.Context, repoRoot string, opts spawnOpts, rou
 // `[branch]   <name>` rows for branches not occupying a worktree. Each
 // target is the branch name goCheckout should route on.
 func buildSwitchMenu(ctx context.Context, repoRoot string) (items, targets []string, err error) {
-	occ := occupiedWorktrees(ctx, repoRoot)
+	occ, err := occupiedWorktrees(ctx, repoRoot)
+	if err != nil {
+		return nil, nil, err
+	}
 	cwdTop := ""
 	if cwd, err := os.Getwd(); err == nil {
 		cwdTop, _ = gitWorktreeRoot(cwd)
@@ -513,7 +546,10 @@ func branchWizard(ctx context.Context, repoRoot, initial string) (name, base str
 // marked yields the highlighted row, so the single-pick flow is
 // unchanged.
 func pickWorktrees(ctx context.Context, repoRoot, prompt string) ([]string, error) {
-	occ := occupiedWorktrees(ctx, repoRoot)
+	occ, err := occupiedWorktrees(ctx, repoRoot)
+	if err != nil {
+		return nil, err
+	}
 	cwdTop := ""
 	if cwd, err := os.Getwd(); err == nil {
 		cwdTop, _ = gitWorktreeRoot(cwd)
@@ -584,7 +620,12 @@ func worktreeArgsComplete(_ context.Context, c *cli.Command) {
 	for _, a := range c.Args().Slice() {
 		typed[a] = true
 	}
-	for branch, p := range branchOccupancy(context.Background(), repoRoot) {
+	occ, err := branchOccupancy(context.Background(), repoRoot)
+	if err != nil {
+		warnCompletion(err)
+		return
+	}
+	for branch, p := range occ {
 		if p != repoRoot && !typed[branch] {
 			_, _ = fmt.Fprintln(os.Stdout, branch)
 		}
@@ -608,4 +649,13 @@ func branchArgComplete(_ context.Context, c *cli.Command) {
 	for _, b := range allBranches(dir) {
 		_, _ = fmt.Fprintln(os.Stdout, b)
 	}
+}
+
+func warnCompletion(err error) {
+	_, _ = fmt.Fprintf(os.Stderr, "treeman: completion: %v\n", err)
+}
+
+func dirPresent(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }

@@ -526,13 +526,15 @@ func RunDbStatusOnWorktree(ctx context.Context, worktree, repoOverride string) (
 		return nil, err
 	}
 	branch := detectBranchOfWorktree(wt)
-	dbPath, _ := store.DefaultDBPath()
-	st, err := store.Open(ctx, dbPath)
+	st, err := openDefaultStore(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = st.Close() }()
-	repoID, _ := st.EnsureRepo(ctx, repoRoot, filepath.Base(repoRoot))
+	repoID, err := st.EnsureRepo(ctx, repoRoot, filepath.Base(repoRoot))
+	if err != nil {
+		return nil, fmt.Errorf("register repo %s: %w", repoRoot, err)
+	}
 	id, err := wt2.ResolveIdentity(ctx, st, &cfg, repoRoot, wt, branch, repoID)
 	if err != nil {
 		return nil, err

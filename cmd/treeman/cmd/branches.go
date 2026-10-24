@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"strings"
 
@@ -44,7 +45,10 @@ func BranchesCmd() *cli.Command {
 			}
 
 			// Build occupancy map: branch → worktree path.
-			occ := branchOccupancy(ctx, repoRoot)
+			occ, err := branchOccupancy(ctx, repoRoot)
+			if err != nil {
+				return err
+			}
 
 			rows := mergeBranchRows(localSet, remoteSet, occ, branchFilter{
 				localOnly:  c.Bool("local-only"),
@@ -181,10 +185,10 @@ func listGitBranches(repoRoot string, remote bool) []string {
 // per-worktree `git worktree list --porcelain` parse. Worktrees
 // mid-teardown are excluded — they feed completion and the pickers,
 // and must never surface a path that's about to disappear.
-func branchOccupancy(ctx context.Context, repoRoot string) map[string]string {
+func branchOccupancy(ctx context.Context, repoRoot string) (map[string]string, error) {
 	st, err := openSharedStore(ctx)
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("open the treeman store to list the worktrees of %s: %w", repoRoot, err)
 	}
 	//nolint:gosec // WorktreeNotTearingDown is a compile-time constant fragment
 	rows, err := st.DB.QueryContext(ctx, `
@@ -193,19 +197,22 @@ func branchOccupancy(ctx context.Context, repoRoot string) map[string]string {
 		WHERE r.path = ? COLLATE NOCASE AND w.deleted_at IS NULL AND w.branch IS NOT NULL
 		AND `+store.WorktreeNotTearingDown, repoRoot)
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("list the worktrees of %s: %w", repoRoot, err)
 	}
 	defer func() { _ = rows.Close() }()
 	out := make(map[string]string)
 	for rows.Next() {
 		var branch, path string
 		if err := rows.Scan(&branch, &path); err != nil {
-			continue
+			return nil, fmt.Errorf("scan a worktree of %s: %w", repoRoot, err)
 		}
 		if branch == "" {
 			continue
 		}
 		out[branch] = path
 	}
-	return out
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list the worktrees of %s: %w", repoRoot, err)
+	}
+	return out, nil
 }

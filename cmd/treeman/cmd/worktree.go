@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -77,7 +78,10 @@ func worktreeRootAction(ctx context.Context, c *cli.Command) error {
 // the cd-substitution contract), and whose action keys hand the row
 // to the same flows as the named subcommands.
 func worktreeActionPicker(ctx context.Context, c *cli.Command, repoRoot string) error {
-	occ := occupiedWorktrees(ctx, repoRoot)
+	occ, err := occupiedWorktrees(ctx, repoRoot)
+	if err != nil {
+		return err
+	}
 	type row struct{ label, path, branch string }
 	// Markers cost a `git status` per worktree — scan concurrently,
 	// same as buildSwitchMenu.
@@ -181,7 +185,11 @@ func wtPrune() *cli.Command {
 				return err
 			}
 			pruned := 0
-			for _, p := range liveWorktreePaths(ctx, repoRoot) {
+			live, err := liveWorktreePaths(ctx, repoRoot)
+			if err != nil {
+				return err
+			}
+			for _, p := range live {
 				if p == repoRoot {
 					continue
 				}
@@ -205,33 +213,31 @@ func wtPrune() *cli.Command {
 	}
 }
 
-// liveWorktreePaths returns the paths of every non-deleted worktree row
-// for repoRoot.
-func liveWorktreePaths(ctx context.Context, repoRoot string) []string {
-	dbPath, err := store.DefaultDBPath()
+func liveWorktreePaths(ctx context.Context, repoRoot string) ([]string, error) {
+	st, err := openDefaultStore(ctx)
 	if err != nil {
-		return nil
-	}
-	st, err := store.Open(ctx, dbPath)
-	if err != nil {
-		return nil
+		return nil, err
 	}
 	defer func() { _ = st.Close() }()
 	rows, err := st.DB.QueryContext(ctx, `
 		SELECT w.path FROM worktrees w JOIN repos r ON r.id = w.repo_id
 		WHERE r.path = ? COLLATE NOCASE AND w.deleted_at IS NULL`, repoRoot)
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("list the registered worktrees of %s: %w", repoRoot, err)
 	}
 	defer func() { _ = rows.Close() }()
 	var paths []string
 	for rows.Next() {
 		var p string
-		if err := rows.Scan(&p); err == nil {
-			paths = append(paths, p)
+		if err := rows.Scan(&p); err != nil {
+			return nil, fmt.Errorf("scan a registered worktree of %s: %w", repoRoot, err)
 		}
+		paths = append(paths, p)
 	}
-	return paths
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list the registered worktrees of %s: %w", repoRoot, err)
+	}
+	return paths, nil
 }
 
 // wtSwitch — `treeman worktree switch [branch]` (the zsh `gwt`). Lands
@@ -674,7 +680,10 @@ func deleteForeground(ctx context.Context, c *cli.Command, repoRoot, target, wtP
 		return err
 	}
 	defer closer()
-	repoID := resolveShowRepoID(ctx, st, c.String("repo"))
+	repoID, err := resolveShowRepoID(ctx, st, c.String("repo"))
+	if err != nil {
+		return err
+	}
 	row, err := worktreeRowByPath(ctx, st, repoID, wtPath)
 	if err != nil {
 		return fmt.Errorf("resolve %s: %w", wtPath, err)
@@ -797,7 +806,11 @@ func previewDelete(ctx context.Context, c *cli.Command, repoRoot, _, wtPath stri
 	if err != nil {
 		return err
 	}
-	dbs, err := prepare.PreviewTeardown(&cfg, repoRoot, wtPath, registrySlug(ctx, repoRoot, wtPath), branch)
+	sl, err := registrySlug(ctx, repoRoot, wtPath)
+	if err != nil {
+		return err
+	}
+	dbs, err := prepare.PreviewTeardown(&cfg, repoRoot, wtPath, sl, branch)
 	if err != nil {
 		return err
 	}
@@ -819,25 +832,20 @@ func printPlanEntries(dbs []prepare.PlanEntry) {
 	}
 }
 
-// registrySlug resolves the worktree's registered slug from the store
-// — templates render {slug} from the row, not from a path re-hash —
-// falling back to "" (PreviewTeardown derives from the path) when the
-// row is missing or the store is unreadable.
-func registrySlug(ctx context.Context, repoRoot, wtPath string) string {
-	dbPath, err := store.DefaultDBPath()
+func registrySlug(ctx context.Context, repoRoot, wtPath string) (string, error) {
+	st, err := openSharedStore(ctx)
 	if err != nil {
-		return ""
-	}
-	st, err := store.OpenShared(ctx, dbPath)
-	if err != nil {
-		return ""
+		return "", fmt.Errorf("open the treeman store to read the slug of %s: %w", wtPath, err)
 	}
 	var sl string
-	_ = st.DB.QueryRowContext(ctx, `
+	err = st.DB.QueryRowContext(ctx, `
 		SELECT COALESCE(w.slug,'') FROM worktrees w JOIN repos r ON r.id = w.repo_id
 		WHERE r.path = ? COLLATE NOCASE AND w.path = ? COLLATE NOCASE AND w.deleted_at IS NULL`,
 		repoRoot, wtPath).Scan(&sl)
-	return sl
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return "", fmt.Errorf("read the registered slug of %s: %w", wtPath, err)
+	}
+	return sl, nil
 }
 
 // previewBranchReset implements `db reset --dry-run` (#60): the
@@ -849,7 +857,11 @@ func previewBranchReset(ctx context.Context, c *cli.Command, repoRoot, wtPath st
 	if err != nil {
 		return err
 	}
-	dbs, err := prepare.PreviewBranchReset(&cfg, repoRoot, wtPath, registrySlug(ctx, repoRoot, wtPath), branch)
+	sl, err := registrySlug(ctx, repoRoot, wtPath)
+	if err != nil {
+		return err
+	}
+	dbs, err := prepare.PreviewBranchReset(&cfg, repoRoot, wtPath, sl, branch)
 	if err != nil {
 		return err
 	}
@@ -973,8 +985,7 @@ func wtList() *cli.Command {
 			&cli.StringFlag{Name: "repo", Aliases: []string{"r"}, Usage: "scope to one repo (path)"},
 		},
 		Action: func(ctx context.Context, c *cli.Command) error {
-			dbPath, _ := store.DefaultDBPath()
-			st, err := store.Open(ctx, dbPath)
+			st, err := openDefaultStore(ctx)
 			if err != nil {
 				return err
 			}
@@ -1033,7 +1044,10 @@ func loadWtRows(ctx context.Context, st *store.Store, repoFilter, sortMode strin
 		orderBy string
 	)
 	if repoFilter != "" {
-		repoID, _ := st.LookupRepoID(ctx, MustAbs(repoFilter))
+		repoID, err := st.LookupRepoID(ctx, MustAbs(repoFilter))
+		if err != nil {
+			return nil, fmt.Errorf("look up repo %s: %w", MustAbs(repoFilter), err)
+		}
 		if repoID == 0 {
 			return nil, fmt.Errorf("no repo registered at %s", repoFilter)
 		}
@@ -1446,13 +1460,15 @@ func runLocalFinalizeFlow(ctx context.Context, repoRoot, wtPath string) error {
 	if err != nil {
 		return err
 	}
-	dbPath, _ := store.DefaultDBPath()
-	st, err := store.Open(ctx, dbPath)
+	st, err := openDefaultStore(ctx)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = st.Close() }()
-	repoID, _ := st.EnsureRepo(ctx, repoRoot, filepath.Base(repoRoot))
+	repoID, err := st.EnsureRepo(ctx, repoRoot, filepath.Base(repoRoot))
+	if err != nil {
+		return fmt.Errorf("register repo %s: %w", repoRoot, err)
+	}
 	branch := detectBranchOfWorktree(wtPath)
 	id, err := wt.ResolveIdentity(ctx, st, &cfg, repoRoot, wtPath, branch, repoID)
 	if err != nil {
@@ -1629,19 +1645,24 @@ func wtPrev() *cli.Command {
 			if err != nil {
 				return err
 			}
-			dbPath, _ := store.DefaultDBPath()
-			st, err := store.Open(ctx, dbPath)
+			st, err := openDefaultStore(ctx)
 			if err != nil {
 				return err
 			}
 			defer func() { _ = st.Close() }()
-			repoID, _ := st.LookupRepoID(ctx, repoRoot)
+			repoID, err := st.LookupRepoID(ctx, repoRoot)
+			if err != nil {
+				return fmt.Errorf("look up repo %s: %w", repoRoot, err)
+			}
 			if repoID == 0 {
 				return fmt.Errorf("repo %s not registered yet", repoRoot)
 			}
 			cwd, _ := os.Getwd()
 			cwdTop, _ := gitWorktreeRoot(cwd)
-			path, ok := st.PrevVisitedWorktree(ctx, repoID, cwdTop)
+			path, ok, err := st.PrevVisitedWorktree(ctx, repoID, cwdTop)
+			if err != nil {
+				return err
+			}
 			if !ok {
 				return fmt.Errorf("no previously-visited worktree on record for %s", repoRoot)
 			}
@@ -1715,7 +1736,11 @@ which may check out in the main repo). To always land in a worktree, use
 				landExisting(ctx, path)
 				return nil
 			}
-			if path, ok := registryWorktreeForBranch(ctx, repoRoot, target); ok {
+			path, ok, err := registryWorktreeForBranch(ctx, repoRoot, target)
+			if err != nil {
+				return err
+			}
+			if ok {
 				landExisting(ctx, path)
 				return nil
 			}
@@ -1757,7 +1782,11 @@ which may check out in the main repo). To always land in a worktree, use
 func goCheckout(ctx context.Context, repoRoot, branch string, create bool, opts spawnOpts) error {
 	// (1) Already live in some worktree (other than cwd)? Registry
 	// first, then git's own view (worktrees added outside treeman).
-	if path, ok := liveWorktreeForBranch(ctx, repoRoot, branch); ok {
+	path, ok, err := liveWorktreeForBranch(ctx, repoRoot, branch)
+	if err != nil {
+		return err
+	}
+	if ok {
 		cwd, _ := os.Getwd()
 		cwdTop, _ := gitWorktreeRoot(cwd)
 		if path != cwdTop {
@@ -1914,10 +1943,10 @@ func failedSetup(ctx context.Context, path string) (msg string, failed bool, err
 // <repoRoot>. Returns ("", false) when no row matches. Branch is an
 // exact match on `worktrees.branch` — the column is populated by
 // `wt create` / `wt register --branch`.
-func registryWorktreeForBranch(ctx context.Context, repoRoot, branch string) (string, bool) {
+func registryWorktreeForBranch(ctx context.Context, repoRoot, branch string) (string, bool, error) {
 	st, err := openSharedStore(ctx)
 	if err != nil {
-		return "", false
+		return "", false, fmt.Errorf("open the treeman store to find the worktree of %s on %s: %w", repoRoot, branch, err)
 	}
 	//nolint:gosec // WorktreeNotTearingDown is a compile-time constant fragment
 	row := st.DB.QueryRowContext(ctx, `
@@ -1926,21 +1955,24 @@ func registryWorktreeForBranch(ctx context.Context, repoRoot, branch string) (st
 		AND `+store.WorktreeNotTearingDown+`
 		ORDER BY w.id DESC LIMIT 1`, repoRoot, branch)
 	var p string
-	if err := row.Scan(&p); err != nil {
-		return "", false
+	switch err := row.Scan(&p); {
+	case errors.Is(err, sql.ErrNoRows):
+		return "", false, nil
+	case err != nil:
+		return "", false, fmt.Errorf("find the worktree of %s on %s: %w", repoRoot, branch, err)
 	}
-	return p, true
+	return p, true, nil
 }
 
-// touchVisitedByPath stamps last_visited_at on the worktree row at
-// `path`. Swallows errors — visit-tracking is best-effort metadata,
-// not a correctness gate.
 func touchVisitedByPath(ctx context.Context, path string) {
 	st, err := openSharedStore(ctx)
 	if err != nil {
+		PrintWarn("could not record the visit to %s: open the treeman store: %v", path, err)
 		return
 	}
-	_ = st.TouchWorktreeVisitedByPath(ctx, path)
+	if err := st.TouchWorktreeVisitedByPath(ctx, path); err != nil {
+		PrintWarn("could not record the visit to %s: %v", path, err)
+	}
 }
 
 // openSharedStore is the CLI-side handle: one shared store per

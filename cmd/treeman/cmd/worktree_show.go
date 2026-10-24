@@ -74,7 +74,10 @@ func showWorktree(ctx context.Context, opts showOpts, target string) error {
 	}
 	defer closer()
 
-	repoID := resolveShowRepoID(ctx, st, opts.repo)
+	repoID, err := resolveShowRepoID(ctx, st, opts.repo)
+	if err != nil {
+		return err
+	}
 
 	var wt worktreeRow
 	if target != "" {
@@ -88,21 +91,29 @@ func showWorktree(ctx context.Context, opts showOpts, target string) error {
 	}
 
 	// Recent events.
-	evs, _ := st.QueryEvents(ctx, store.EventFilter{
+	evs, err := st.QueryEvents(ctx, store.EventFilter{
 		WorktreeID: wt.ID,
 		Limit:      opts.events,
 		HydrateWT:  false,
 	})
+	if err != nil {
+		return fmt.Errorf("read recent events of worktree #%d: %w", wt.ID, err)
+	}
 	reverseEvents(evs)
+	runs, err := st.QueryHookRuns(ctx, wt.ID, opts.hooks)
+	if err != nil {
+		return fmt.Errorf("read recent hook runs of worktree #%d: %w", wt.ID, err)
+	}
 
 	if opts.asJSON {
-		runs, _ := st.QueryHookRuns(ctx, wt.ID, opts.hooks)
 		state, detail, err := finalizeState(ctx, st, wt.ID)
 		if err != nil {
 			return err
 		}
-		ports, _ := st.LoadWorktreePorts(ctx, wt.ID)
-		branches, _ := st.ListActiveBranches(ctx, wt.ID)
+		ports, branches, err := worktreeResources(ctx, st, wt.ID)
+		if err != nil {
+			return err
+		}
 		return jsonStream(map[string]any{
 			"id":            wt.ID,
 			"slug":          wt.Slug,
@@ -121,7 +132,9 @@ func showWorktree(ctx context.Context, opts showOpts, target string) error {
 	if err := printWtHeader(ctx, st, wt); err != nil {
 		return err
 	}
-	printWtPrepareSummary(ctx, st, wt.ID)
+	if err := printWtPrepareSummary(ctx, st, wt.ID); err != nil {
+		return err
+	}
 	if len(evs) > 0 {
 		_, _ = fmt.Fprintln(ui.Out, ui.Bold("recent events"))
 		for _, e := range evs {
@@ -130,8 +143,6 @@ func showWorktree(ctx context.Context, opts showOpts, target string) error {
 		_, _ = fmt.Fprintln(ui.Out)
 	}
 
-	// Recent hook runs.
-	runs, _ := st.QueryHookRuns(ctx, wt.ID, opts.hooks)
 	printWtHookRuns(runs)
 
 	ui.Hint("follow live events: treeman worktree logs %s --follow", wt.Slug)
@@ -141,16 +152,55 @@ func showWorktree(ctx context.Context, opts showOpts, target string) error {
 // resolveShowRepoID resolves the repo id to scope `wt show` lookups to:
 // the explicit --repo override, else the repo containing cwd. Returns 0
 // when neither resolves (an unscoped lookup).
-func resolveShowRepoID(ctx context.Context, st *store.Store, repoOverride string) int64 {
-	repoID := int64(0)
+func resolveShowRepoID(ctx context.Context, st *store.Store, repoOverride string) (int64, error) {
 	if repoOverride != "" {
-		repoID, _ = lookupRepoID(ctx, st, MustAbs(repoOverride))
-	} else if cwd, err := os.Getwd(); err == nil {
-		if root, err := DiscoverRepoRoot(cwd); err == nil {
-			repoID, _ = lookupRepoID(ctx, st, root)
-		}
+		return lookupExplicitRepoID(ctx, st, repoOverride)
 	}
-	return repoID
+	root := cwdRepoRoot()
+	if root == "" {
+		return 0, nil
+	}
+	repoID, err := st.LookupRepoID(ctx, root)
+	if err != nil {
+		return 0, fmt.Errorf("look up repo %s: %w", root, err)
+	}
+	return repoID, nil
+}
+
+func cwdRepoRoot() string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	root, err := DiscoverRepoRoot(cwd)
+	if err != nil {
+		return ""
+	}
+	return root
+}
+
+func lookupExplicitRepoID(ctx context.Context, st *store.Store, repo string) (int64, error) {
+	root := MustAbs(repo)
+	repoID, err := st.LookupRepoID(ctx, root)
+	if err != nil {
+		return 0, fmt.Errorf("look up repo %s: %w", root, err)
+	}
+	if repoID == 0 {
+		return 0, fmt.Errorf("repo %s is not registered with treeman (see `treeman repo list`)", root)
+	}
+	return repoID, nil
+}
+
+func worktreeResources(ctx context.Context, st *store.Store, wtID int64) (map[string]uint16, []store.ActiveBranchRow, error) {
+	ports, err := st.LoadWorktreePorts(ctx, wtID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("read the ports of worktree #%d: %w", wtID, err)
+	}
+	branches, err := st.ListActiveBranches(ctx, wtID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("read the branch_scoped databases of worktree #%d: %w", wtID, err)
+	}
+	return ports, branches, nil
 }
 
 // printWtHeader prints the metadata block (slug, branch, path, state,
@@ -160,17 +210,19 @@ func printWtHeader(ctx context.Context, st *store.Store, wt worktreeRow) error {
 	if err != nil {
 		return err
 	}
+	portMap, bs, err := worktreeResources(ctx, st, wt.ID)
+	if err != nil {
+		return err
+	}
 	_, _ = fmt.Fprintln(ui.Out, ui.Bold(wt.Slug)+ui.Dim("  #"+strconv.FormatInt(wt.ID, 10)))
 	_, _ = fmt.Fprintf(ui.Out, "  branch: %s\n", wt.Branch)
 	_, _ = fmt.Fprintf(ui.Out, "  path:   %s\n", wt.Path)
 	_, _ = fmt.Fprintf(ui.Out, "  state:  %s\n", stateLine)
-	if portMap, _ := st.LoadWorktreePorts(ctx, wt.ID); len(portMap) > 0 {
+	if len(portMap) > 0 {
 		_, _ = fmt.Fprintf(ui.Out, "  ports:  %s\n", formatPortMap(portMap))
 	}
-	if bs, _ := st.ListActiveBranches(ctx, wt.ID); len(bs) > 0 {
-		for _, r := range bs {
-			_, _ = fmt.Fprintf(ui.Out, "  branch_scoped: %s (%s) → active branch %s\n", r.DBKey, r.Engine, r.Branch)
-		}
+	for _, r := range bs {
+		_, _ = fmt.Fprintf(ui.Out, "  branch_scoped: %s (%s) → active branch %s\n", r.DBKey, r.Engine, r.Branch)
 	}
 	_, _ = fmt.Fprintln(ui.Out)
 	return nil
@@ -181,14 +233,17 @@ func printWtHeader(ctx context.Context, st *store.Store, wt worktreeRow) error {
 // per-phase duration breakdown from that run's prepare:phase events.
 // Everything here was already in the event log — this renders it so
 // "why was that create slow?" doesn't require spelunking `logs tail`.
-func printWtPrepareSummary(ctx context.Context, st *store.Store, wtID int64) {
-	ends, _ := st.QueryEvents(ctx, store.EventFilter{
+func printWtPrepareSummary(ctx context.Context, st *store.Store, wtID int64) error {
+	ends, err := st.QueryEvents(ctx, store.EventFilter{
 		WorktreeID: wtID,
 		EventTypes: []string{store.EvtPrepareEnd},
 		Limit:      10,
 	})
+	if err != nil {
+		return fmt.Errorf("read the last prepare runs of worktree #%d: %w", wtID, err)
+	}
 	if len(ends) == 0 {
-		return
+		return nil
 	}
 	// Newest run per (engine, source_db) — the query returns newest
 	// first, so first sighting wins.
@@ -222,13 +277,16 @@ func printWtPrepareSummary(ctx context.Context, st *store.Store, wtID int64) {
 	// Phase breakdowns belong to the runs above: scope to a window just
 	// before the oldest rendered prepare:end (phases precede their end
 	// event; 30 minutes generously covers the slowest cold build).
-	phases, _ := st.QueryEvents(ctx, store.EventFilter{
+	phases, err := st.QueryEvents(ctx, store.EventFilter{
 		WorktreeID:  wtID,
 		EventTypes:  []string{store.EvtPreparePhase},
 		SinceMs:     oldest - 30*60*1000,
 		OldestFirst: true,
 		Limit:       100,
 	})
+	if err != nil {
+		return fmt.Errorf("read the prepare phases of worktree #%d: %w", wtID, err)
+	}
 	phaseByKey := map[string][]string{}
 	for _, e := range phases {
 		p := decodePayload(e.PayloadJSON)
@@ -255,6 +313,7 @@ func printWtPrepareSummary(ctx context.Context, st *store.Store, wtID int64) {
 		}
 	}
 	_, _ = fmt.Fprintln(ui.Out)
+	return nil
 }
 
 // decodePayload unmarshals an event's payload_json into a flat string
@@ -386,7 +445,10 @@ func wtWait() *cli.Command {
 				return err
 			}
 			defer closer()
-			repoID := resolveShowRepoID(ctx, st, c.String("repo"))
+			repoID, err := resolveShowRepoID(ctx, st, c.String("repo"))
+			if err != nil {
+				return err
+			}
 			wt, err := loadWorktreeRow(ctx, st, repoID, name)
 			if err != nil {
 				return err
@@ -396,7 +458,10 @@ func wtWait() *cli.Command {
 			// see. If none exists yet, fall back to the wt's creation
 			// time so we don't terminate prematurely against a
 			// historical "done" row.
-			anchor := newestStartTs(ctx, st, wt.ID)
+			anchor, err := newestStartTs(ctx, st, wt.ID)
+			if err != nil {
+				return err
+			}
 			if anchor == 0 {
 				anchor = wt.CreatedAt
 			}
@@ -652,14 +717,17 @@ func finalizeStateDetail(last store.Event) string {
 	return ""
 }
 
-func newestStartTs(ctx context.Context, st *store.Store, wtID int64) int64 {
-	rows, _ := st.QueryEvents(ctx, store.EventFilter{
+func newestStartTs(ctx context.Context, st *store.Store, wtID int64) (int64, error) {
+	rows, err := st.QueryEvents(ctx, store.EventFilter{
 		WorktreeID: wtID,
 		EventTypes: []string{store.EvtWorktreeCreateStart},
 		Limit:      1,
 	})
-	if len(rows) == 0 {
-		return 0
+	if err != nil {
+		return 0, fmt.Errorf("read the newest finalize start of worktree #%d: %w", wtID, err)
 	}
-	return rows[0].Ts
+	if len(rows) == 0 {
+		return 0, nil
+	}
+	return rows[0].Ts, nil
 }

@@ -15,8 +15,8 @@ import (
 	"github.com/stubbedev/treeman/internal/patcher"
 	"github.com/stubbedev/treeman/internal/resolve"
 	"github.com/stubbedev/treeman/internal/slug"
-	"github.com/stubbedev/treeman/internal/store"
 	"github.com/stubbedev/treeman/internal/template"
+	"github.com/stubbedev/treeman/internal/ui"
 )
 
 // PatchFilterCmd backs git's clean/smudge filter for `patches:`.
@@ -100,7 +100,8 @@ func runPatchFilter(ctx context.Context, mode, relPath string, in io.Reader, out
 
 	tplCtx, err := buildTemplateContext(ctx, repoRoot, worktreePath)
 	if err != nil {
-		return passthrough(out, body)
+		ui.Warn("patch-filter %s %s: %v; rendering with the slug derived from %s and no ports", mode, relPath, err, worktreePath)
+		tplCtx = template.FromSlug(slug.For(worktreePath, ""))
 	}
 
 	switch mode {
@@ -157,30 +158,31 @@ func isMainWorktreePath(repoRoot, worktreePath string) bool {
 	return filepath.Clean(a) == filepath.Clean(b)
 }
 
-// buildTemplateContext loads the worktree's slug + port map from the
-// SQLite store and returns a template.Context ready for Render.
-// Falls back to deriving the slug from the worktree path when the
-// store lookup fails — same fallback prepare.Run uses for
-// non-registered worktrees.
 func buildTemplateContext(ctx context.Context, repoRoot, worktreePath string) (template.Context, error) {
-	dbPath, _ := store.DefaultDBPath()
-	st, err := store.Open(ctx, dbPath)
+	pathSlug := template.FromSlug(slug.For(worktreePath, ""))
+	st, err := openDefaultStore(ctx)
 	if err != nil {
-		// No store available — derive slug from path so smudge still
-		// renders deterministically; ports unavailable.
-		return template.FromSlug(slug.For(worktreePath, "")), nil
+		return template.Context{}, err
 	}
 	defer func() { _ = st.Close() }()
 
 	repoID, err := st.LookupRepoID(ctx, repoRoot)
-	if err != nil || repoID == 0 {
-		return template.FromSlug(slug.For(worktreePath, "")), nil
+	if err != nil {
+		return template.Context{}, fmt.Errorf("look up repo %s: %w", repoRoot, err)
+	}
+	if repoID == 0 {
+		return pathSlug, nil
 	}
 	row, err := st.LookupActiveWorktreeByPath(ctx, worktreePath)
-	if err != nil || row.ID == 0 {
-		return template.FromSlug(slug.For(worktreePath, "")), nil
+	if err != nil {
+		return template.Context{}, fmt.Errorf("look up the worktree at %s: %w", worktreePath, err)
 	}
-	sl := slug.Slug{Value: row.Slug, Source: slug.SourceTicket}
-	ports, _ := st.LoadWorktreePorts(ctx, row.ID)
-	return template.FromSlug(sl).WithPorts(ports), nil
+	if row.ID == 0 {
+		return pathSlug, nil
+	}
+	ports, err := st.LoadWorktreePorts(ctx, row.ID)
+	if err != nil {
+		return template.Context{}, fmt.Errorf("read the ports of worktree %s: %w", worktreePath, err)
+	}
+	return template.FromSlug(slug.Slug{Value: row.Slug, Source: slug.SourceTicket}).WithPorts(ports), nil
 }

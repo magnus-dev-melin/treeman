@@ -1126,7 +1126,7 @@ func (s *Store) TouchWorktreeVisitedByPath(ctx context.Context, path string) err
 // PrevVisitedWorktree returns the most-recently-visited worktree path
 // for `repoID`, excluding `exceptPath`. Empty string + false when
 // there's no candidate.
-func (s *Store) PrevVisitedWorktree(ctx context.Context, repoID int64, exceptPath string) (string, bool) {
+func (s *Store) PrevVisitedWorktree(ctx context.Context, repoID int64, exceptPath string) (string, bool, error) {
 	row := s.DB.QueryRowContext(ctx, `
 		SELECT path FROM worktrees
 		WHERE repo_id = ? AND deleted_at IS NULL AND path != ?
@@ -1134,9 +1134,12 @@ func (s *Store) PrevVisitedWorktree(ctx context.Context, repoID int64, exceptPat
 		ORDER BY last_visited_at DESC LIMIT 1`, repoID, exceptPath)
 	var p string
 	if err := row.Scan(&p); err != nil {
-		return "", false
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("find the previously visited worktree of repo %d: %w", repoID, err)
 	}
-	return p, true
+	return p, true, nil
 }
 
 // RepoPath resolves a repo row id back to its absolute path. Returns

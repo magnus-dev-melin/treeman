@@ -298,14 +298,15 @@ included, so the original terminal colors round-trip.`,
 // (0, "", nil) for the --all span (no single worktree).
 func resolveHooksScope(ctx context.Context, st *store.Store, c *cli.Command, all bool) (int64, string, error) {
 	repoID := int64(0)
-	if r := c.String("repo"); r != "" {
-		repoID, _ = lookupRepoID(ctx, st, MustAbs(r))
-	} else if !all {
-		if cwd, err := os.Getwd(); err == nil {
-			if root, err := DiscoverRepoRoot(cwd); err == nil {
-				repoID, _ = lookupRepoID(ctx, st, root)
-			}
-		}
+	var err error
+	switch {
+	case c.String("repo") != "":
+		repoID, err = lookupExplicitRepoID(ctx, st, c.String("repo"))
+	case !all:
+		repoID, err = resolveShowRepoID(ctx, st, "")
+	}
+	if err != nil {
+		return 0, "", err
 	}
 
 	if c.NArg() >= 1 {
@@ -324,7 +325,10 @@ func resolveHooksScope(ctx context.Context, st *store.Store, c *cli.Command, all
 	}
 
 	cwd, _ := os.Getwd()
-	row := lookupWorktreeContainingCwd(ctx, st, MustAbs(cwd))
+	row, err := lookupWorktreeContainingCwd(ctx, st, MustAbs(cwd))
+	if err != nil {
+		return 0, "", err
+	}
 	if row.ID == 0 {
 		return 0, "", errors.New(
 			"usage: treeman logs hooks [worktree] (cwd is not inside a registered worktree; pass --all to span every worktree)",
@@ -496,15 +500,8 @@ func buildFilterWithScope(ctx context.Context, c *cli.Command) (filterScope, err
 	// signal to skip the cwd→worktree auto-resolve below: the caller
 	// asked for "this repo's events", not "this repo's events filtered
 	// to whichever worktree my shell happens to be in".
-	repoRoot := repoOverride
-	if repoRoot == "" {
-		cwd, _ := os.Getwd()
-		if cwd != "" {
-			repoRoot, _ = DiscoverRepoRoot(cwd)
-		}
-	}
-	if repoRoot != "" {
-		scope.Filter.RepoID, _ = lookupRepoID(ctx, st, MustAbs(repoRoot))
+	if scope.Filter.RepoID, err = resolveShowRepoID(ctx, st, repoOverride); err != nil {
+		return scope, err
 	}
 
 	// Explicit --worktree wins over cwd auto-resolve.
@@ -532,7 +529,10 @@ func buildFilterWithScope(ctx context.Context, c *cli.Command) (filterScope, err
 	if cwd == "" {
 		return scope, nil
 	}
-	row := lookupWorktreeContainingCwd(ctx, st, MustAbs(cwd))
+	row, err := lookupWorktreeContainingCwd(ctx, st, MustAbs(cwd))
+	if err != nil {
+		return scope, err
+	}
 	if row.ID == 0 {
 		return scope, nil
 	}
@@ -554,19 +554,17 @@ func buildFilterWithScope(ctx context.Context, c *cli.Command) (filterScope, err
 // nested worktrees resolve to the most specific row. Returns the
 // zero value when no row matches — callers treat that as
 // "logs scope = all worktrees".
-func lookupWorktreeContainingCwd(ctx context.Context, st *store.Store, cwd string) store.WorktreeRow {
+func lookupWorktreeContainingCwd(ctx context.Context, st *store.Store, cwd string) (store.WorktreeRow, error) {
 	if cwd == "" {
-		return store.WorktreeRow{}
+		return store.WorktreeRow{}, nil
 	}
-	// Try exact match first — cheapest path. Most invocations happen
-	// at the root of a worktree, not somewhere nested.
-	if row, err := st.LookupActiveWorktreeByPath(ctx, cwd); err == nil && row.ID != 0 {
-		return row
+	row, err := st.LookupActiveWorktreeByPath(ctx, cwd)
+	if err != nil {
+		return store.WorktreeRow{}, fmt.Errorf("look up the worktree at %s: %w", cwd, err)
 	}
-	// Fall back to prefix match. SQL handles this cheaply with `?
-	// LIKE path || '/%'` which `path UNIQUE` keeps short. The LIKE
-	// collates NOCASE so a cwd typed in different case (common on
-	// APFS-default macOS) still matches the stored row.
+	if row.ID != 0 {
+		return row, nil
+	}
 	rows, err := st.DB.QueryContext(ctx, `
 		SELECT id, repo_id, path, slug, COALESCE(branch, ''), COALESCE(admin_dir, ''), 0
 		FROM worktrees
@@ -574,17 +572,20 @@ func lookupWorktreeContainingCwd(ctx context.Context, st *store.Store, cwd strin
 		ORDER BY length(path) DESC
 		LIMIT 1`, cwd)
 	if err != nil {
-		return store.WorktreeRow{}
+		return store.WorktreeRow{}, fmt.Errorf("find the worktree containing %s: %w", cwd, err)
 	}
 	defer func() { _ = rows.Close() }()
+	var w store.WorktreeRow
 	if rows.Next() {
-		var w store.WorktreeRow
 		var deleted int
-		if err := rows.Scan(&w.ID, &w.RepoID, &w.Path, &w.Slug, &w.Branch, &w.AdminDir, &deleted); err == nil {
-			return w
+		if err := rows.Scan(&w.ID, &w.RepoID, &w.Path, &w.Slug, &w.Branch, &w.AdminDir, &deleted); err != nil {
+			return store.WorktreeRow{}, fmt.Errorf("scan the worktree containing %s: %w", cwd, err)
 		}
 	}
-	return store.WorktreeRow{}
+	if err := rows.Err(); err != nil {
+		return store.WorktreeRow{}, fmt.Errorf("find the worktree containing %s: %w", cwd, err)
+	}
+	return w, nil
 }
 
 // printScopePreamble writes a one-line scope hint to stderr when the
@@ -613,24 +614,11 @@ func parseSince(s string) (time.Time, error) {
 }
 
 func openLogStore(ctx context.Context) (*store.Store, func(), error) {
-	p, err := store.DefaultDBPath()
-	if err != nil {
-		return nil, func() {}, err
-	}
-	st, err := store.Open(ctx, p)
+	st, err := openDefaultStore(ctx)
 	if err != nil {
 		return nil, func() {}, err
 	}
 	return st, func() { _ = st.Close() }, nil
-}
-
-func lookupRepoID(ctx context.Context, st *store.Store, root string) (int64, error) {
-	var id int64
-	row := st.DB.QueryRowContext(ctx, `SELECT id FROM repos WHERE path = ? COLLATE NOCASE`, root)
-	if err := row.Scan(&id); err != nil {
-		return 0, err
-	}
-	return id, nil
 }
 
 func reverseEvents(in []store.Event) {

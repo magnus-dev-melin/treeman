@@ -119,7 +119,10 @@ func mainStatusAction(ctx context.Context, c *cli.Command) error {
 		return fmt.Errorf("load config: %w", err)
 	}
 
-	row, branch := lookupMainStatus(ctx, repoRoot)
+	row, branch, err := lookupMainStatus(ctx, repoRoot)
+	if err != nil {
+		return err
+	}
 
 	if c.Bool("json") {
 		return jsonStream(map[string]any{
@@ -217,24 +220,23 @@ func requestWorktreeFinalize(ctx context.Context, repoRoot, wtPath string) error
 	return nil
 }
 
-// lookupMainStatus reads the main-wt row (if any) for repoRoot and
-// the current branch. Errors collapse to zero-values so status never
-// fails on a missing daemon DB — the caller renders "no row".
-func lookupMainStatus(ctx context.Context, repoRoot string) (store.WorktreeRow, string) {
+func lookupMainStatus(ctx context.Context, repoRoot string) (store.WorktreeRow, string, error) {
 	branch := detectBranchOfWorktree(repoRoot)
-	dbPath, err := store.DefaultDBPath()
+	st, err := openDefaultStore(ctx)
 	if err != nil {
-		return store.WorktreeRow{}, branch
-	}
-	st, err := store.Open(ctx, dbPath)
-	if err != nil {
-		return store.WorktreeRow{}, branch
+		return store.WorktreeRow{}, branch, err
 	}
 	defer func() { _ = st.Close() }()
-	repoID, err := st.EnsureRepo(ctx, repoRoot, filepath.Base(repoRoot))
-	if err != nil || repoID == 0 {
-		return store.WorktreeRow{}, branch
+	repoID, err := st.LookupRepoID(ctx, repoRoot)
+	if err != nil {
+		return store.WorktreeRow{}, branch, fmt.Errorf("look up repo %s: %w", repoRoot, err)
 	}
-	row, _ := st.LookupMainWorktree(ctx, repoID)
-	return row, branch
+	if repoID == 0 {
+		return store.WorktreeRow{}, branch, nil
+	}
+	row, err := st.LookupMainWorktree(ctx, repoID)
+	if err != nil {
+		return store.WorktreeRow{}, branch, fmt.Errorf("look up the main worktree row of %s: %w", repoRoot, err)
+	}
+	return row, branch, nil
 }

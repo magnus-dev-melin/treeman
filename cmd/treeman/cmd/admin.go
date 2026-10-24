@@ -216,8 +216,11 @@ func SnapshotsCmd() *cli.Command {
 						return err
 					}
 					defer func() { _ = st.Close() }()
-					repoID, err := lookupRepoID(ctx, st, repoRoot)
+					repoID, err := st.LookupRepoID(ctx, repoRoot)
 					if err != nil {
+						return fmt.Errorf("look up repo %s: %w", repoRoot, err)
+					}
+					if repoID == 0 {
 						if c.Bool("json") {
 							return jsonStream(map[string]any{"repo": repoRoot, "snapshots": []any{}})
 						}
@@ -546,22 +549,42 @@ func persistConfigBody(ctx context.Context, histRoot, path string, body []byte, 
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("create config dir: %w", err)
 	}
-	if prev, err := os.ReadFile(path); err == nil {
-		if st, serr := openDefaultStore(ctx); serr == nil {
-			_, _ = st.SnapshotConfig(ctx, histRoot, path, prev)
-			_ = st.Close()
+	prev, err := os.ReadFile(path)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+	case err != nil:
+		return fmt.Errorf("read %s to snapshot it before the write: %w", path, err)
+	default:
+		if err := snapshotConfig(ctx, histRoot, path, prev); err != nil {
+			return err
 		}
 	}
 	return atomicfile.Write(path, body, 0o600)
+}
+
+func snapshotConfig(ctx context.Context, histRoot, path string, prev []byte) error {
+	st, err := openDefaultStore(ctx)
+	if err != nil {
+		return fmt.Errorf("open the store to snapshot %s before the write: %w", path, err)
+	}
+	defer func() { _ = st.Close() }()
+	if _, err := st.SnapshotConfig(ctx, histRoot, path, prev); err != nil {
+		return fmt.Errorf("snapshot %s before the write: %w", path, err)
+	}
+	return nil
 }
 
 // openDefaultStore opens the default SQLite event store.
 func openDefaultStore(ctx context.Context) (*store.Store, error) {
 	p, err := store.DefaultDBPath()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("resolve the treeman store path: %w", err)
 	}
-	return store.Open(ctx, p)
+	st, err := store.Open(ctx, p)
+	if err != nil {
+		return nil, fmt.Errorf("open the treeman store %s: %w", p, err)
+	}
+	return st, nil
 }
 
 // parseOlderThan accepts "24h" / "7d" / RFC3339. For durations the

@@ -101,11 +101,14 @@ func runWorktreeGc(ctx context.Context, c *cli.Command) error {
 		rows = filterWorktreeRows(rows, MustAbs(repo))
 	}
 
-	cands, skipped := gcPlan(ctx, st, rows, gcOptions{
+	cands, skipped, err := gcPlan(ctx, st, rows, gcOptions{
 		stale:        stale,
 		deleteMerged: deleteMerged,
 		mergedRef:    mergedRef,
 	})
+	if err != nil {
+		return err
+	}
 	if len(cands) == 0 {
 		ui.Info("nothing to reclaim (%d worktree(s) considered, %d skipped)", len(rows), skipped)
 		return nil
@@ -188,12 +191,15 @@ type gcOptions struct {
 // main checkout, the cwd worktree, missing directories, dirty/unpushed
 // delete candidates, and worktrees mid-teardown are skipped and
 // counted.
-func gcPlan(ctx context.Context, st *store.Store, rows []store.WorktreeRow, opts gcOptions) ([]gcCandidate, int) {
+func gcPlan(ctx context.Context, st *store.Store, rows []store.WorktreeRow, opts gcOptions) ([]gcCandidate, int, error) {
 	ids := make([]int64, len(rows))
 	for i := range rows {
 		ids[i] = rows[i].ID
 	}
-	lastEvent, _ := st.LastEventTsPerWorktree(ctx, ids)
+	lastEvent, err := st.LastEventTsPerWorktree(ctx, ids)
+	if err != nil {
+		return nil, 0, fmt.Errorf("read the last activity of %d worktrees: %w", len(ids), err)
+	}
 
 	// mergedSet: branch → merged, per repo, one for-each-ref per repo.
 	mergedSets := map[string]map[string]bool{}
@@ -257,7 +263,7 @@ func gcPlan(ctx context.Context, st *store.Store, rows []store.WorktreeRow, opts
 		}
 		skipped++
 	}
-	return cands, skipped
+	return cands, skipped, nil
 }
 
 // gcMergedCandidate decides the delete arm for one row: a merged,

@@ -322,16 +322,17 @@ func checkSnapshots(ctx context.Context, repoRoot string) doctorResult {
 	}
 	defer func() { _ = st.Close() }()
 
-	var rowCount int
-	if repoID, rerr := st.LookupRepoID(ctx, repoRoot); rerr == nil {
-		if rows, lerr := st.ListSnapshotsForRepo(ctx, repoID); lerr == nil {
-			rowCount = len(rows)
-		}
+	rowCount, totalBytes, err := snapshotTotals(ctx, st, repoRoot)
+	if err != nil {
+		return doctorResult{Name: "snapshots", Status: "fail", Detail: err.Error()}
 	}
-	totalBytes, _ := st.SumSnapshotBytes(ctx)
 	detail := fmt.Sprintf("%d cached template(s) (cap %d), %.1f MiB recorded across repos",
 		rowCount, cfg.Snapshots.CapPerRepo, float64(totalBytes)/(1<<20))
-	if counts, serr := snapshot.SpareCounts(ctx, &cfg); serr == nil && len(counts) > 0 {
+	counts, err := snapshot.SpareCounts(ctx, &cfg)
+	if err != nil {
+		return doctorResult{Name: "snapshots", Status: "warn", Detail: detail + "; count pre-warmed spares: " + err.Error()}
+	}
+	if len(counts) > 0 {
 		total := 0
 		for _, n := range counts {
 			total += n
@@ -535,8 +536,7 @@ func checkRegistry(ctx context.Context, repoRoot string) doctorResult {
 			Detail: err.Error(),
 		}
 	}
-	dbPath, _ := store.DefaultDBPath()
-	st, err := store.Open(ctx, dbPath)
+	st, err := openDefaultStore(ctx)
 	if err != nil {
 		return doctorResult{
 			Name:   "registry",
@@ -558,9 +558,17 @@ func checkRegistry(ctx context.Context, repoRoot string) doctorResult {
 	dbPaths := map[string]bool{}
 	for rows.Next() {
 		var p string
-		if err := rows.Scan(&p); err == nil {
-			dbPaths[p] = true
+		if err := rows.Scan(&p); err != nil {
+			return doctorResult{
+				Name:   "registry",
+				Status: "fail",
+				Detail: fmt.Sprintf("scan a registered worktree of %s: %v", repoRoot, err),
+			}
 		}
+		dbPaths[p] = true
+	}
+	if err := rows.Err(); err != nil {
+		return doctorResult{Name: "registry", Status: "fail", Detail: fmt.Sprintf("list the registered worktrees of %s: %v", repoRoot, err)}
 	}
 
 	var onlyInGit, onlyInDB []string
@@ -609,4 +617,23 @@ func checkRegistry(ctx context.Context, repoRoot string) doctorResult {
 // so existing call sites in this file don't need an import churn.
 func gitWorktreePaths(ctx context.Context, repoRoot string) ([]string, error) {
 	return wtreg.GitWorktreePaths(ctx, repoRoot)
+}
+
+func snapshotTotals(ctx context.Context, st *store.Store, repoRoot string) (rowCount int, totalBytes int64, err error) {
+	repoID, err := st.LookupRepoID(ctx, repoRoot)
+	if err != nil {
+		return 0, 0, fmt.Errorf("look up repo %s: %w", repoRoot, err)
+	}
+	if repoID != 0 {
+		rows, err := st.ListSnapshotsForRepo(ctx, repoID)
+		if err != nil {
+			return 0, 0, fmt.Errorf("list the cached templates of %s: %w", repoRoot, err)
+		}
+		rowCount = len(rows)
+	}
+	totalBytes, err = st.SumSnapshotBytes(ctx)
+	if err != nil {
+		return 0, 0, fmt.Errorf("sum the cached template sizes: %w", err)
+	}
+	return rowCount, totalBytes, nil
 }

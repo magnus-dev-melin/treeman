@@ -61,15 +61,23 @@ func TestTearingDownPaths(t *testing.T) {
 	repoID, _ := st.EnsureRepo(ctx, "/tmp/repo", "repo")
 	wtID, _ := st.EnsureWorktree(ctx, repoID, "/tmp/repo/wt", "feature-x", "feature-x")
 
-	if paths := tearingDownPaths(ctx, "/tmp/repo"); len(paths) != 0 {
+	tearing := func() map[string]bool {
+		t.Helper()
+		paths, err := tearingDownPaths(ctx, "/tmp/repo")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return paths
+	}
+	if paths := tearing(); len(paths) != 0 {
 		t.Fatalf("no delete events yet — want empty set, got %v", paths)
 	}
 	_ = st.WriteEvent(ctx, store.LevelInfo, store.EvtWorktreeDeleteStart, "start", repoID, wtID, "", 0, nil)
-	if paths := tearingDownPaths(ctx, "/tmp/repo"); !paths["/tmp/repo/wt"] {
+	if paths := tearing(); !paths["/tmp/repo/wt"] {
 		t.Fatalf("teardown in flight — want /tmp/repo/wt in set, got %v", paths)
 	}
 	_ = st.WriteEvent(ctx, store.LevelInfo, store.EvtWorktreeDeleteEnd, "end", repoID, wtID, "", 0, nil)
-	if paths := tearingDownPaths(ctx, "/tmp/repo"); len(paths) != 0 {
+	if paths := tearing(); len(paths) != 0 {
 		t.Fatalf("teardown done — want empty set, got %v", paths)
 	}
 }
@@ -110,7 +118,9 @@ func TestPrintWtPrepareSummary(t *testing.T) {
 	ui.Out = &buf
 	defer func() { ui.Out = oldOut }()
 
-	printWtPrepareSummary(ctx, st, wtID)
+	if err := printWtPrepareSummary(ctx, st, wtID); err != nil {
+		t.Fatal(err)
+	}
 	out := buf.String()
 	for _, want := range []string{"last prepare", "postgres", "app_x", "cache hit", "412ms", "2 clones", "migrate 1.2s"} {
 		if !strings.Contains(out, want) {

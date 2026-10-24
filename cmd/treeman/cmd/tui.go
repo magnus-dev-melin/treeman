@@ -48,8 +48,7 @@ func tuiCmd() *cli.Command {
 // runDashboard opens the store + subscription the model needs, then
 // hands off to bubbletea. Both handles close when the program exits.
 func runDashboard(ctx context.Context) error {
-	dbPath, _ := store.DefaultDBPath()
-	st, err := store.Open(ctx, dbPath)
+	st, err := openDefaultStore(ctx)
 	if err != nil {
 		return err
 	}
