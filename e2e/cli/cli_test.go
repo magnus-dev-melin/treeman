@@ -33,6 +33,7 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 
 	"github.com/stubbedev/treeman/e2e/harness"
+	"github.com/stubbedev/treeman/internal/testsock"
 )
 
 func TestCLIEndToEnd(t *testing.T) {
@@ -73,7 +74,7 @@ func TestCLIEndToEnd(t *testing.T) {
 
 	// Per-test sockets + state so we don't collide with the
 	// developer's running daemon.
-	runtimeDir := t.TempDir()
+	runtimeDir := testsock.Dir(t)
 	stateDir := t.TempDir()
 	socket := filepath.Join(runtimeDir, "treeman.sock")
 	// Isolate the daemon's state DB. DefaultDBPath resolves to

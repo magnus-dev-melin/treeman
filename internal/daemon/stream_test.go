@@ -5,36 +5,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
-	"os"
 	"path/filepath"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/stubbedev/treeman/internal/runid"
 	"github.com/stubbedev/treeman/internal/store"
+	"github.com/stubbedev/treeman/internal/testsock"
 	"github.com/stubbedev/treeman/pkg/rpc"
 )
-
-// shortSocketPath returns a unix-socket path short enough to bind on
-// macOS (104-byte sun_path limit). t.TempDir() on macOS roots tests
-// under /var/folders/<hash>/T/<TestName>/NNN/ which can exceed the
-// limit; pinning the parent at os.TempDir() with a tiny basename
-// keeps the path well inside the cap.
-//
-// CI hit `bind: invalid argument` on macos-latest before this helper
-// landed. See: https://man7.org/linux/man-pages/man7/unix.7.html
-// (Linux is 108 bytes, macOS is 104 — pick the lower bound).
-var sockCounter atomic.Uint64
-
-func shortSocketPath(t *testing.T) string {
-	t.Helper()
-	n := sockCounter.Add(1)
-	p := filepath.Join(os.TempDir(), fmt.Sprintf("tm-%d-%d.sock", os.Getpid(), n))
-	t.Cleanup(func() { _ = os.Remove(p) })
-	return p
-}
 
 // startStreamServer binds a unix socket at a short path, points
 // TREEMAN_SOCKET at it, and serves every accepted connection through
@@ -42,7 +22,7 @@ func shortSocketPath(t *testing.T) string {
 // written to.
 func startStreamServer(ctx context.Context, t *testing.T) *store.Store {
 	t.Helper()
-	sockPath := shortSocketPath(t)
+	sockPath := testsock.Path(t, "tm.sock")
 	t.Setenv("TREEMAN_SOCKET", sockPath)
 	ln, err := net.Listen("unix", sockPath)
 	if err != nil {
@@ -182,7 +162,7 @@ func TestStreamingSubscribe_NoRegistrationRace(t *testing.T) {
 // handshake) fails SubscribeEvents with a restart hint instead of
 // handing back a stream that may already have missed events.
 func TestSubscribeEvents_HandshakeRequired(t *testing.T) {
-	sockPath := shortSocketPath(t)
+	sockPath := testsock.Path(t, "tm.sock")
 	t.Setenv("TREEMAN_SOCKET", sockPath)
 	ln, err := net.Listen("unix", sockPath)
 	if err != nil {

@@ -18,6 +18,7 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/stubbedev/treeman/e2e/harness"
+	"github.com/stubbedev/treeman/internal/testsock"
 )
 
 const (
@@ -44,7 +45,7 @@ connections:
   postgres: {host: 127.0.0.1, port: 15572, user: postgres, password: pgpw}
 `)
 	t.Setenv("TREEMAN_DB_PATH", filepath.Join(t.TempDir(), "treeman.db"))
-	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("XDG_RUNTIME_DIR", testsock.Dir(t))
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("TREEMAN_MCP_ALL_TOOLS", "1")
 	srv := harness.StartMCPServer(t, repo)

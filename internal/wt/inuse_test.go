@@ -7,11 +7,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+
+	"github.com/stubbedev/treeman/internal/testsock"
 )
 
 func TestDeleteRefusesWorktreeInUse(t *testing.T) {
 	withTempStore(t)
-	t.Setenv("TREEMAN_SOCKET", filepath.Join(t.TempDir(), "no-daemon.sock"))
+	t.Setenv("TREEMAN_SOCKET", testsock.Path(t, "no-daemon.sock"))
 	repoRoot := t.TempDir()
 	wtPath := filepath.Join(repoRoot, ".worktrees", "release")
 	vendorBin := filepath.Join(wtPath, "vendor", "bin")
@@ -48,7 +50,7 @@ func TestDeleteRefusesWorktreeInUse(t *testing.T) {
 }
 
 func TestEnsureNotInUseIgnoresTheCallingProcess(t *testing.T) {
-	t.Setenv("TREEMAN_SOCKET", filepath.Join(t.TempDir(), "no-daemon.sock"))
+	t.Setenv("TREEMAN_SOCKET", testsock.Path(t, "no-daemon.sock"))
 	wtPath := t.TempDir()
 	f, err := os.Create(filepath.Join(wtPath, "composer.lock"))
 	if err != nil {

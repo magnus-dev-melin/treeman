@@ -7,24 +7,15 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"path/filepath"
-	"sync/atomic"
 	"testing"
+
+	"github.com/stubbedev/treeman/internal/testsock"
 )
 
-var sockCounter atomic.Uint64
-
-// serveOnce answers exactly one request with the given response over
-// a throwaway unix socket wired to $TREEMAN_SOCKET. The socket lives
-// directly under os.TempDir(), not t.TempDir(): on macOS the latter
-// embeds the test name under /var/folders/... and overruns the
-// 104-byte sun_path limit ("bind: invalid argument").
 func serveOnce(t *testing.T, resp Response) <-chan Request {
 	t.Helper()
 	received := make(chan Request, 1)
-	n := sockCounter.Add(1)
-	sock := filepath.Join(os.TempDir(), fmt.Sprintf("rpc-%d-%d.sock", os.Getpid(), n))
-	t.Cleanup(func() { _ = os.Remove(sock) })
+	sock := testsock.Path(t, "rpc.sock")
 	ln, err := net.Listen("unix", sock)
 	if err != nil {
 		t.Fatal(err)

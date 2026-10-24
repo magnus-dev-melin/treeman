@@ -14,6 +14,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/stubbedev/treeman/internal/testsock"
 )
 
 func buildTreemand(t *testing.T) string {
@@ -62,7 +64,7 @@ func daemonStderr(t *testing.T, bin, logLevel string) string {
 		"XDG_CONFIG_HOME="+xdgConfig,
 		"XDG_STATE_HOME="+t.TempDir(),
 		"XDG_DATA_HOME="+t.TempDir(),
-		"XDG_RUNTIME_DIR="+t.TempDir(),
+		"XDG_RUNTIME_DIR="+testsock.Dir(t),
 		"TREEMAN_DB_PATH="+filepath.Join(t.TempDir(), "treeman.db"),
 	)
 	var serr strings.Builder

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/stubbedev/treeman/internal/testsock"
 	"github.com/stubbedev/treeman/pkg/rpc"
 )
 
@@ -22,7 +23,7 @@ func TestMain(m *testing.M) {
 }
 
 func runIsolated(m *testing.M) int {
-	dir, err := os.MkdirTemp("", "treeman-mcp-test-")
+	dir, err := testsock.NewDir()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "create isolated test dir: %v\n", err)
 		return 1

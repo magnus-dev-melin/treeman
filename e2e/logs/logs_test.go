@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/stubbedev/treeman/internal/store"
+	"github.com/stubbedev/treeman/internal/testsock"
 )
 
 type fixture struct {
@@ -27,6 +28,7 @@ type fixture struct {
 
 	dbPath  string
 	homeDir string
+	socket  string
 
 	repo1Dir string
 	repo2Dir string
@@ -213,6 +215,7 @@ func setup(t *testing.T) *fixture {
 		bin:      binPath,
 		dbPath:   dbPath,
 		homeDir:  homeDir,
+		socket:   testsock.Path(t, "tm.sock"),
 		repo1Dir: repo1,
 		repo2Dir: repo2,
 		wt1aPath: wt1a,
@@ -239,7 +242,7 @@ func runCLI(t *testing.T, fx *fixture, cwd string, args ...string) cliResult {
 	cmd.Dir = cwd
 	cmd.Env = append(os.Environ(),
 		"TREEMAN_DB_PATH="+fx.dbPath,
-		"TREEMAN_SOCKET="+filepath.Join(filepath.Dir(fx.dbPath), "tm.sock"),
+		"TREEMAN_SOCKET="+fx.socket,
 		"HOME="+fx.homeDir,
 		"XDG_DATA_HOME="+fx.homeDir,
 		"XDG_STATE_HOME="+fx.homeDir,
@@ -639,7 +642,7 @@ func TestLogsTailFollow(t *testing.T) {
 	cmd.Dir = t.TempDir()
 	cmd.Env = append(os.Environ(),
 		"TREEMAN_DB_PATH="+fx.dbPath,
-		"TREEMAN_SOCKET="+filepath.Join(filepath.Dir(fx.dbPath), "tm.sock"),
+		"TREEMAN_SOCKET="+fx.socket,
 		"HOME="+fx.homeDir,
 		"XDG_DATA_HOME="+fx.homeDir,
 		"XDG_STATE_HOME="+fx.homeDir,

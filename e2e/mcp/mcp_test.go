@@ -24,6 +24,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/stubbedev/treeman/internal/testsock"
 )
 
 // startServer builds and spawns `treeman mcp` on stdio, returning a
@@ -48,7 +50,7 @@ func startServer(t *testing.T) (func(map[string]any), func() map[string]any) {
 	dbPath := filepath.Join(stateDir, "treeman.db")
 	srv.Env = append(os.Environ(),
 		"TREEMAN_DB_PATH="+dbPath,
-		"TREEMAN_SOCKET="+filepath.Join(filepath.Dir(dbPath), "tm.sock"),
+		"TREEMAN_SOCKET="+testsock.Path(t, "tm.sock"),
 		"XDG_CONFIG_HOME="+t.TempDir(),
 		// Advertise every tool — these tests exercise tool behavior, not
 		// the lazy-disclosure gateway (unit-tested in internal/mcp).

@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/stubbedev/treeman/e2e/harness"
+	"github.com/stubbedev/treeman/internal/testsock"
 )
 
 func TestSIGHUPReloadsConfig(t *testing.T) {
@@ -44,7 +45,7 @@ func TestSIGHUPReloadsConfig(t *testing.T) {
 
 	// Per-test sockets + isolated treeman DB so we don't pick up
 	// stale rows from earlier e2e runs.
-	runtimeDir := t.TempDir()
+	runtimeDir := testsock.Dir(t)
 	stateDir := t.TempDir()
 	configHome := t.TempDir()
 	dbPath := filepath.Join(stateDir, "treeman.db")

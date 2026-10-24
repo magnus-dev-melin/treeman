@@ -24,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stubbedev/treeman/internal/testsock"
 	"github.com/stubbedev/treeman/pkg/rpc"
 )
 
@@ -67,19 +68,6 @@ func sharedDaemonBinDir(t *testing.T) string {
 		t.Skipf("treemand build failed / skipped: %v", daemonBinErr)
 	}
 	return daemonBinDir
-}
-
-// shortSocketPath returns a socket path under a fresh short temp dir —
-// t.TempDir() embeds the (long) test name and can blow past the
-// ~104-byte sun_path limit when bind()ing.
-func shortSocketPath(t *testing.T) string {
-	t.Helper()
-	dir, err := os.MkdirTemp("", "tmd-*")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	return filepath.Join(dir, "treeman.sock")
 }
 
 // daemonCommand builds a treemand process confined to e's store and
@@ -127,7 +115,7 @@ func waitForPing(t *testing.T) rpc.Response {
 // sweep failed the first daemon's in-flight creates as "stale".
 func TestSecondDaemonRefusesSharedStore(t *testing.T) {
 	e := newEnv(t)
-	sock := shortSocketPath(t)
+	sock := testsock.Path(t, "treeman.sock")
 	spawnDaemon(t, e, sock)
 	t.Setenv("TREEMAN_SOCKET", sock)
 	waitForPing(t)
@@ -163,7 +151,7 @@ func TestDaemonStartStatusReloadStop(t *testing.T) {
 	binDir := sharedDaemonBinDir(t)
 	e := newEnv(t)
 
-	sock := shortSocketPath(t)
+	sock := testsock.Path(t, "treeman.sock")
 
 	// run with treemand on PATH + the pinned socket. The daemon
 	// (spawned by `daemon start` via exec.Command with inherited env)
@@ -244,7 +232,7 @@ func TestDoctorFixStartsDaemon(t *testing.T) {
 	binDir := sharedDaemonBinDir(t)
 	e := newEnv(t)
 
-	sock := shortSocketPath(t)
+	sock := testsock.Path(t, "treeman.sock")
 
 	run := func(args ...string) cliResult {
 		cmd := exec.Command(sharedBin(t), args...)

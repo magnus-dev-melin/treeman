@@ -6,6 +6,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/stubbedev/treeman/internal/testsock"
 	"github.com/stubbedev/treeman/pkg/rpc"
 )
 
@@ -14,7 +15,7 @@ import (
 // package, complete `ping` (typed status response), and drive a real
 // `run_plan` (worktree_register) through to per-task results.
 func TestPkgRPCClientIntegration(t *testing.T) {
-	sock := shortSocketPath(t)
+	sock := testsock.Path(t, "treeman.sock")
 	spawnDaemon(t, newEnv(t), sock)
 	// rpc.Call below resolves the socket from THIS process's env, so
 	// pin it here too — otherwise it dials the default path and talks

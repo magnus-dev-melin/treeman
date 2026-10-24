@@ -25,6 +25,7 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 
 	"github.com/stubbedev/treeman/e2e/harness"
+	"github.com/stubbedev/treeman/internal/testsock"
 )
 
 const (
@@ -62,7 +63,7 @@ func TestDeleteDuringFinalize(t *testing.T) {
 	buildBin(t, binDir, repoRoot, "treeman", "./cmd/treeman")
 	buildBin(t, binDir, repoRoot, "treemand", "./cmd/treemand")
 
-	runtimeDir := t.TempDir()
+	runtimeDir := testsock.Dir(t)
 	stateDir := t.TempDir()
 	socket := filepath.Join(runtimeDir, "treeman.sock")
 	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
@@ -213,7 +214,7 @@ func TestDeleteImmediatelyAfterCreate(t *testing.T) {
 	buildBin(t, binDir, repoRoot, "treeman", "./cmd/treeman")
 	buildBin(t, binDir, repoRoot, "treemand", "./cmd/treemand")
 
-	runtimeDir := t.TempDir()
+	runtimeDir := testsock.Dir(t)
 	stateDir := t.TempDir()
 	socket := filepath.Join(runtimeDir, "treeman.sock")
 	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)

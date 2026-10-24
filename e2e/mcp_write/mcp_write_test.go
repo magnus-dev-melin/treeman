@@ -36,6 +36,7 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 
 	"github.com/stubbedev/treeman/e2e/harness"
+	"github.com/stubbedev/treeman/internal/testsock"
 )
 
 func TestMCPWriteTools(t *testing.T) {
@@ -56,7 +57,7 @@ func TestMCPWriteTools(t *testing.T) {
 
 	// Isolated state so we don't trip over the developer's daemon.
 	stateDir := t.TempDir()
-	runtimeDir := t.TempDir()
+	runtimeDir := testsock.Dir(t)
 	dbPath := filepath.Join(stateDir, "treeman.db")
 	t.Setenv("TREEMAN_DB_PATH", dbPath)
 	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)

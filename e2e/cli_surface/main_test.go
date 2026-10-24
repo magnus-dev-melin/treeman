@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/stubbedev/treeman/internal/store"
+	"github.com/stubbedev/treeman/internal/testsock"
 )
 
 var (
@@ -90,7 +91,7 @@ func newEnv(t *testing.T) *env {
 		stateDir:   t.TempDir(),
 		dataDir:    t.TempDir(),
 		configDir:  t.TempDir(),
-		runtimeDir: t.TempDir(),
+		runtimeDir: testsock.Dir(t),
 		dbPath:     filepath.Join(t.TempDir(), "treeman.db"),
 		// Commands that autostart the daemon exec `treemand` off PATH.
 		// Put this tree's build first so they never pick up whatever

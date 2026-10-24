@@ -19,6 +19,7 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 
 	"github.com/stubbedev/treeman/e2e/harness"
+	"github.com/stubbedev/treeman/internal/testsock"
 )
 
 const mysqlAddr = "127.0.0.1:13360"
@@ -87,7 +88,7 @@ func runTreeman(t *testing.T, repo string, args ...string) (string, string, erro
 		"XDG_DATA_HOME="+t.TempDir(),
 		"XDG_CONFIG_HOME="+t.TempDir(),
 		"TREEMAN_DB_PATH="+filepath.Join(t.TempDir(), "treeman.db"),
-		"TREEMAN_SOCKET="+filepath.Join(t.TempDir(), "tm.sock"),
+		"TREEMAN_SOCKET="+testsock.Path(t, "tm.sock"),
 		"TREEMAN_NO_PAGER=1", "NO_COLOR=1",
 	)
 	var sout, serr strings.Builder
