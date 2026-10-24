@@ -60,29 +60,34 @@ func PatchFilterCmd() *cli.Command {
 // to `out`. Resolves the worktree from cwd, finds the matching
 // patches[] entry, dispatches Smudge or Clean.
 //
-// Pass-through semantics: any non-fatal hiccup (no config, no
-// matching patch entry, main worktree) outputs stdin unchanged so
-// the file lands on disk untouched. A patch-filter that misbehaves
-// must not corrupt git's view of the working tree — silent identity
-// is the safest fallback.
+// Pass-through semantics: no matching patch entry and the main
+// worktree output stdin unchanged. A failure to work out what to
+// render (cwd, repo root, config, registry) also passes the bytes
+// through, since a filter that exits non-zero breaks the git command,
+// but it warns on stderr, which git shows, so an unpatched file is
+// never a silent outcome.
 func runPatchFilter(ctx context.Context, mode, relPath string, in io.Reader, out io.Writer) error {
 	body, err := io.ReadAll(in)
 	if err != nil {
 		return fmt.Errorf("read stdin: %w", err)
 	}
 
+	unchanged := func(what string, err error) error {
+		ui.Warn("patch-filter %s %s: %s: %v; leaving the file unpatched", mode, relPath, what, err)
+		return passthrough(out, body)
+	}
 	worktreePath, err := os.Getwd()
 	if err != nil {
-		return passthrough(out, body)
+		return unchanged("resolve the worktree", err)
 	}
 	repoRoot, err := DiscoverRepoRoot(worktreePath)
 	if err != nil {
-		return passthrough(out, body)
+		return unchanged("resolve the repo of "+worktreePath, err)
 	}
 
 	cfg, err := resolve.LoadResolvedForWorktree(repoRoot, worktreePath)
 	if err != nil {
-		return passthrough(out, body)
+		return unchanged("load the treeman config of "+worktreePath, err)
 	}
 	patch, ok := findPatchEntry(cfg.Patches, relPath)
 	if !ok {
@@ -100,8 +105,7 @@ func runPatchFilter(ctx context.Context, mode, relPath string, in io.Reader, out
 
 	tplCtx, err := buildTemplateContext(ctx, repoRoot, worktreePath)
 	if err != nil {
-		ui.Warn("patch-filter %s %s: %v; rendering with the slug derived from %s and no ports", mode, relPath, err, worktreePath)
-		tplCtx = template.FromSlug(slug.For(worktreePath, ""))
+		return unchanged("read the template context", err)
 	}
 
 	switch mode {
