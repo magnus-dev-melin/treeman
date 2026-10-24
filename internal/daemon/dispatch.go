@@ -596,7 +596,7 @@ func listWorktreePaths(ctx context.Context, st *State, repoPath string) ([]strin
 		rows, err = st.Store.DB.QueryContext(ctx, `
 			SELECT w.path FROM worktrees w
 			JOIN repos r ON r.id = w.repo_id
-			WHERE w.deleted_at IS NULL AND r.path = ?
+			WHERE w.deleted_at IS NULL AND r.path = ? COLLATE NOCASE
 			ORDER BY w.id`, repoPath)
 	}
 	if err != nil {
