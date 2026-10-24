@@ -17,8 +17,8 @@ import (
 	"sync"
 	"time"
 
-	// modernc.org/sqlite registers the pure-Go "sqlite" database/sql driver.
-	_ "modernc.org/sqlite"
+	"modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 
 	"github.com/stubbedev/treeman/internal/runid"
 	"github.com/stubbedev/treeman/pkg/safego"
@@ -126,24 +126,63 @@ const batchFlushThreshold = 200
 // embedded migrations, and returns a usable Store.
 func Open(ctx context.Context, path string) (*Store, error) {
 	if dir := filepath.Dir(path); dir != "" {
-		_ = os.MkdirAll(dir, 0o755)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return nil, fmt.Errorf("create the store directory %s: %w", dir, err)
+		}
 	}
-	// modernc.org/sqlite's DSN supports query params for pragmas
-	// applied at connection open (compatible across the pool).
 	dsn := fmt.Sprintf(
-		"file:%s?_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)",
-		path,
+		"file:%s?_pragma=busy_timeout(%d)&_pragma=synchronous(NORMAL)&_pragma=foreign_keys(1)",
+		path, busyTimeout.Milliseconds(),
 	)
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite at %s: %w", path, err)
 	}
 	db.SetMaxOpenConns(8)
+	if err := ensureWAL(ctx, db, time.Now().Add(busyTimeout)); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("open sqlite at %s: %w", path, err)
+	}
 	if err := migrate(ctx, db); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
 	return &Store{DB: db}, nil
+}
+
+const busyTimeout = 5 * time.Second
+
+func ensureWAL(ctx context.Context, db *sql.DB, deadline time.Time) error {
+	for {
+		var mode string
+		if err := db.QueryRowContext(ctx, "PRAGMA journal_mode").Scan(&mode); err != nil {
+			return fmt.Errorf("read the journal mode: %w", err)
+		}
+		if mode == "wal" {
+			return nil
+		}
+		err := db.QueryRowContext(ctx, "PRAGMA journal_mode=WAL").Scan(&mode)
+		switch {
+		case err == nil && mode == "wal":
+			return nil
+		case err == nil:
+			return fmt.Errorf("switch the journal mode to WAL: SQLite kept %q", mode)
+		case !isBusy(err):
+			return fmt.Errorf("switch the journal mode to WAL: %w", err)
+		case time.Now().After(deadline):
+			return fmt.Errorf("switch the journal mode to WAL: another connection held the database for %s: %w", busyTimeout, err)
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("switch the journal mode to WAL: %w", ctx.Err())
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
+func isBusy(err error) bool {
+	var se *sqlite.Error
+	return errors.As(err, &se) && se.Code()&0xff == sqlite3.SQLITE_BUSY
 }
 
 // Go runs fn in the background for work that outlives the call that

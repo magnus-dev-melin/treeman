@@ -2,10 +2,12 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // explain returns the EXPLAIN QUERY PLAN detail lines for q.
@@ -103,5 +105,42 @@ func TestActiveWorktreePageUsesTheCoveringPartialIndexWithoutSorting(t *testing.
 	if !strings.Contains(plan, "COVERING INDEX idx_worktrees_active_page") || strings.Contains(plan, "SCAN") ||
 		strings.Contains(plan, "TEMP B-TREE") {
 		t.Errorf("plan:\n%s\nwant a covering idx_worktrees_active_page seek with no scan or sort", plan)
+	}
+}
+
+func TestOpenWaitsForAWriterBeforeSwitchingToWAL(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "t.db")
+	raw, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = raw.Close() }()
+	conn, err := raw.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.ExecContext(ctx, "CREATE TABLE held (x)"); err != nil {
+		t.Fatal(err)
+	}
+	released := make(chan struct{})
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		_, _ = conn.ExecContext(ctx, "COMMIT")
+		_ = conn.Close()
+		close(released)
+	}()
+	st, err := Open(ctx, path)
+	<-released
+	if err != nil {
+		t.Fatalf("Open while another connection held a write lock: %v", err)
+	}
+	defer func() { _ = st.Close() }()
+	var mode string
+	if err := st.DB.QueryRowContext(ctx, "PRAGMA journal_mode").Scan(&mode); err != nil || mode != "wal" {
+		t.Fatalf("journal mode = %q, %v; want wal", mode, err)
 	}
 }
