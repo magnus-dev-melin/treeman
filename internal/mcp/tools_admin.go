@@ -42,7 +42,7 @@ func registerAdminGapTools(srv *mcpsdk.Server) {
 
 	addTool(srv, &mcpsdk.Tool{
 		Name:        "status_overview",
-		Description: "Cross-repo fleet rollup: every registered worktree across every repo, bucketed stable/up(preparing)/down(teardown)/failed, derived from the latest lifecycle event per worktree. The fleet-wide answer to \"what's the state of everything?\" — worktree_list is per-repo and has no health bucket.",
+		Description: "Cross-repo fleet rollup: registered worktrees across every repo, bucketed stable/up(preparing)/down(teardown)/failed, derived from the latest lifecycle event per worktree. The fleet-wide answer to \"what's the state of everything?\" — worktree_list is per-repo and has no health bucket. Paged in worktree-id order: counts cover the returned page; when truncated=true, re-call with after_id=next_after_id.",
 		Annotations: readOnlyAnno("Status overview", false),
 	}, statusOverviewTool)
 
@@ -363,38 +363,80 @@ type statusWorktree struct {
 	IsMain bool   `json:"is_main,omitempty"`
 	Path   string `json:"path"`
 }
-type statusOverviewOut struct {
-	Total     int              `json:"total"`
-	Stable    int              `json:"stable"`
-	Up        int              `json:"up"`
-	Down      int              `json:"down"`
-	Failed    int              `json:"failed"`
-	Worktrees []statusWorktree `json:"worktrees"`
+
+const (
+	statusOverviewDefaultLimit = 200
+	statusOverviewMaxLimit     = 1000
+)
+
+type statusOverviewIn struct {
+	Limit   int   `json:"limit,omitempty"    jsonschema:"page size (default 200, max 1000)"`
+	AfterID int64 `json:"after_id,omitempty" jsonschema:"return worktrees after this id: pass the previous page's next_after_id"`
 }
 
-func statusOverviewTool(ctx context.Context, _ *mcpsdk.CallToolRequest, _ struct{}) (*mcpsdk.CallToolResult, statusOverviewOut, error) {
+type statusOverviewOut struct {
+	Total       int              `json:"total"`
+	Stable      int              `json:"stable"`
+	Up          int              `json:"up"`
+	Down        int              `json:"down"`
+	Failed      int              `json:"failed"`
+	Worktrees   []statusWorktree `json:"worktrees"`
+	Truncated   bool             `json:"truncated,omitempty"     jsonschema:"more worktrees exist after this page"`
+	NextAfterID int64            `json:"next_after_id,omitempty" jsonschema:"after_id for the next page; set only when truncated"`
+}
+
+func statusOverviewTool(
+	ctx context.Context,
+	_ *mcpsdk.CallToolRequest,
+	in statusOverviewIn,
+) (*mcpsdk.CallToolResult, statusOverviewOut, error) {
 	st, err := openStore(ctx)
 	if err != nil {
 		return nil, statusOverviewOut{}, err
 	}
 	defer func() { _ = st.Close() }()
-	out, err := statusOverview(ctx, st)
+	out, err := statusOverview(ctx, st, in)
 	return nil, out, err
 }
 
-func statusOverview(ctx context.Context, st *store.Store) (statusOverviewOut, error) {
-	wts, ids, err := activeStatusWorktrees(ctx, st)
+func statusOverview(ctx context.Context, st *store.Store, in statusOverviewIn) (statusOverviewOut, error) {
+	limit := in.Limit
+	if limit == 0 {
+		limit = statusOverviewDefaultLimit
+	}
+	if limit < 0 || limit > statusOverviewMaxLimit {
+		return statusOverviewOut{}, fmt.Errorf("status overview: limit %d out of range 1..%d", in.Limit, statusOverviewMaxLimit)
+	}
+	page, err := st.ActiveWorktreePage(ctx, in.AfterID, limit+1)
 	if err != nil {
-		return statusOverviewOut{}, err
+		return statusOverviewOut{}, fmt.Errorf("status overview: %w", err)
+	}
+	var out statusOverviewOut
+	if len(page) > limit {
+		page = page[:limit]
+		out.Truncated = true
+		out.NextAfterID = page[limit-1].ID
+	}
+	ids := make([]int64, len(page))
+	for i, w := range page {
+		ids[i] = w.ID
 	}
 	latest, err := st.LatestEventPerWorktree(ctx, ids, store.WorktreeStateEventTypes)
 	if err != nil {
 		return statusOverviewOut{}, fmt.Errorf("status overview: lifecycle state of %d worktrees: %w", len(ids), err)
 	}
-	out := statusOverviewOut{Total: len(wts), Worktrees: wts}
-	for i, id := range ids {
-		state, bucket := store.DeriveWorktreeState(latest[id])
-		out.Worktrees[i].State, out.Worktrees[i].Bucket = state, bucket
+	out.Total = len(page)
+	out.Worktrees = make([]statusWorktree, len(page))
+	for i, w := range page {
+		state, bucket := store.DeriveWorktreeState(latest[w.ID])
+		branch := w.Branch
+		if branch == "" {
+			branch = "-"
+		}
+		out.Worktrees[i] = statusWorktree{
+			Repo: filepath.Base(w.RepoPath), Branch: branch, Slug: w.Slug,
+			State: state, Bucket: bucket, IsMain: w.IsMain, Path: w.Path,
+		}
 		switch bucket {
 		case store.BucketStable:
 			out.Stable++
@@ -407,39 +449,6 @@ func statusOverview(ctx context.Context, st *store.Store) (statusOverviewOut, er
 		}
 	}
 	return out, nil
-}
-
-func activeStatusWorktrees(ctx context.Context, st *store.Store) ([]statusWorktree, []int64, error) {
-	rows, err := st.DB.QueryContext(ctx, `
-		SELECT COALESCE(w.slug,''), COALESCE(w.branch,'-'), w.path, w.is_main, r.path, w.id
-		FROM worktrees w JOIN repos r ON r.id = w.repo_id
-		WHERE w.deleted_at IS NULL
-		ORDER BY r.path, w.is_main DESC, w.branch, w.id`)
-	if err != nil {
-		return nil, nil, fmt.Errorf("status overview: list active worktrees: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
-	var (
-		wts []statusWorktree
-		ids []int64
-	)
-	for rows.Next() {
-		var (
-			w     statusWorktree
-			rpath string
-			wid   int64
-		)
-		if err := rows.Scan(&w.Slug, &w.Branch, &w.Path, &w.IsMain, &rpath, &wid); err != nil {
-			return nil, nil, fmt.Errorf("status overview: scan active worktree: %w", err)
-		}
-		w.Repo = filepath.Base(rpath)
-		wts = append(wts, w)
-		ids = append(ids, wid)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, nil, fmt.Errorf("status overview: list active worktrees: %w", err)
-	}
-	return wts, ids, nil
 }
 
 // ─── notify_test ───────────────────────────────────────────────────

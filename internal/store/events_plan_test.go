@@ -92,3 +92,16 @@ func TestWorktreeLifecycleEventQueriesUseTheWorktreeIndexWithoutSorting(t *testi
 	latest, latestArgs := latestEventPerWorktreeSQL([]int64{1, 2, 3}, WorktreeStateEventTypes)
 	assertServedWithoutSort(t, st, latest, latestArgs, "COVERING INDEX idx_events_worktree_recent")
 }
+
+func TestActiveWorktreePageUsesTheCoveringPartialIndexWithoutSorting(t *testing.T) {
+	st, err := Open(context.Background(), filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+	plan := explain(t, st, activeWorktreePageSQL, int64(0), 201)
+	if !strings.Contains(plan, "COVERING INDEX idx_worktrees_active_page") || strings.Contains(plan, "SCAN") ||
+		strings.Contains(plan, "TEMP B-TREE") {
+		t.Errorf("plan:\n%s\nwant a covering idx_worktrees_active_page seek with no scan or sort", plan)
+	}
+}

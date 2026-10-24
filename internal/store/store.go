@@ -896,6 +896,32 @@ func (s *Store) CountActiveWorktreesForRepo(ctx context.Context, repoID int64) (
 	return n, nil
 }
 
+const activeWorktreePageSQL = `SELECT w.id, w.repo_id, w.path, w.slug, COALESCE(w.branch, ''), w.is_main, r.path
+		FROM worktrees w JOIN repos r ON r.id = w.repo_id
+		WHERE w.deleted_at IS NULL AND w.id > ?
+		ORDER BY w.id
+		LIMIT ?`
+
+func (s *Store) ActiveWorktreePage(ctx context.Context, afterID int64, limit int) ([]WorktreeRow, error) {
+	rows, err := s.DB.QueryContext(ctx, activeWorktreePageSQL, afterID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list active worktrees after id %d: %w", afterID, err)
+	}
+	defer func() { _ = rows.Close() }()
+	out := make([]WorktreeRow, 0, limit)
+	for rows.Next() {
+		var w WorktreeRow
+		if err := rows.Scan(&w.ID, &w.RepoID, &w.Path, &w.Slug, &w.Branch, &w.IsMain, &w.RepoPath); err != nil {
+			return nil, fmt.Errorf("scan active worktree after id %d: %w", afterID, err)
+		}
+		out = append(out, w)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list active worktrees after id %d: %w", afterID, err)
+	}
+	return out, nil
+}
+
 // ListActiveWorktreeRows returns every live worktree row (with the
 // owning repo's path in RepoPath) — the full-row form of
 // ListActiveWorktrees for callers that need ids/slugs/repo paths

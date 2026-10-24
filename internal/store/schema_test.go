@@ -71,6 +71,7 @@ func TestFreshDBHasExpectedSchema(t *testing.T) {
 		"idx_worktree_ports_one_per_port",
 		"idx_worktree_ports_one_per_slot",
 		"idx_worktree_ports_repo",
+		"idx_worktrees_active_page",
 		"idx_worktrees_admin_dir",
 		"idx_worktrees_one_main_per_repo",
 		"idx_worktrees_path_nocase",

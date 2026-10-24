@@ -178,7 +178,7 @@ through the `tools` gateway (`action=list` / `action=enable`).
 
 | Tool | Core | Summary |
 |------|------|---------|
-| `status_overview` | ✓ | Cross-repo fleet rollup: every registered worktree across every repo, bucketed stable/up(preparing)/down(teardown)/failed, derived from the latest lifecycle event per worktree. |
+| `status_overview` | ✓ | Cross-repo fleet rollup: registered worktrees across every repo, bucketed stable/up(preparing)/down(teardown)/failed, derived from the latest lifecycle event per worktree. |
 
 ## sync
 

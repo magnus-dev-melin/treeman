@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stubbedev/treeman/internal/store"
@@ -20,7 +21,7 @@ func openStatusStore(t *testing.T) *store.Store {
 
 func bucketOf(t *testing.T, s *store.Store, path string) string {
 	t.Helper()
-	out, err := statusOverview(context.Background(), s)
+	out, err := statusOverview(context.Background(), s, statusOverviewIn{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +85,7 @@ func TestStatusOverviewDerivesEveryWorktreeFromItsOwnLatestEvent(t *testing.T) {
 			}
 		}
 	}
-	out, err := statusOverview(ctx, s)
+	out, err := statusOverview(ctx, s, statusOverviewIn{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,7 +115,62 @@ func TestStatusOverviewSurfacesLifecycleQueryErrors(t *testing.T) {
 	if _, err := s.DB.ExecContext(ctx, "DROP TABLE events"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := statusOverview(ctx, s); err == nil {
+	if _, err := statusOverview(ctx, s, statusOverviewIn{}); err == nil {
 		t.Fatal("a failed lifecycle-state query must fail the status overview, not report every worktree stable")
+	}
+}
+
+func TestStatusOverviewPagesThroughEveryActiveWorktreeByID(t *testing.T) {
+	ctx := context.Background()
+	s := openStatusStore(t)
+	repoID, _ := s.EnsureRepo(ctx, "/r", "r")
+	var paths []string
+	for _, name := range []string{"a", "b", "gone", "c", "d", "e"} {
+		path := "/r/.wt/" + name
+		id, err := s.EnsureWorktree(ctx, repoID, path, name, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if name == "gone" {
+			if err := s.MarkWorktreeDeleted(ctx, id); err != nil {
+				t.Fatal(err)
+			}
+			continue
+		}
+		paths = append(paths, path)
+	}
+
+	var got []string
+	in := statusOverviewIn{Limit: 2}
+	for range 10 {
+		out, err := statusOverview(ctx, s, in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if out.Total != len(out.Worktrees) || out.Total > 2 {
+			t.Fatalf("page %+v: total must count the page and respect the limit", out)
+		}
+		for _, w := range out.Worktrees {
+			got = append(got, w.Path)
+		}
+		if !out.Truncated {
+			if out.NextAfterID != 0 {
+				t.Fatalf("last page carries next_after_id %d", out.NextAfterID)
+			}
+			break
+		}
+		in.AfterID = out.NextAfterID
+	}
+	if strings.Join(got, ",") != strings.Join(paths, ",") {
+		t.Fatalf("paged worktrees = %v, want every active one once in id order %v", got, paths)
+	}
+}
+
+func TestStatusOverviewRejectsAnOutOfRangeLimit(t *testing.T) {
+	s := openStatusStore(t)
+	for _, limit := range []int{-1, statusOverviewMaxLimit + 1} {
+		if _, err := statusOverview(context.Background(), s, statusOverviewIn{Limit: limit}); err == nil {
+			t.Errorf("limit %d accepted", limit)
+		}
 	}
 }
