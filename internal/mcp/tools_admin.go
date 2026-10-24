@@ -378,27 +378,23 @@ func statusOverviewTool(ctx context.Context, _ *mcpsdk.CallToolRequest, _ struct
 		return nil, statusOverviewOut{}, err
 	}
 	defer func() { _ = st.Close() }()
-	rows, err := st.DB.QueryContext(ctx, `
-		SELECT COALESCE(w.slug,''), COALESCE(w.branch,'-'), w.path, w.is_main, r.path, w.id
-		FROM worktrees w JOIN repos r ON r.id = w.repo_id
-		WHERE w.deleted_at IS NULL
-		ORDER BY r.path, w.is_main DESC, w.branch`)
+	out, err := statusOverview(ctx, st)
+	return nil, out, err
+}
+
+func statusOverview(ctx context.Context, st *store.Store) (statusOverviewOut, error) {
+	wts, ids, err := activeStatusWorktrees(ctx, st)
 	if err != nil {
-		return nil, statusOverviewOut{}, err
+		return statusOverviewOut{}, err
 	}
-	defer func() { _ = rows.Close() }()
-	out := statusOverviewOut{}
-	for rows.Next() {
-		var (
-			sl, branch, wpath, rpath string
-			isMain                   bool
-			wid                      int64
-		)
-		if err := rows.Scan(&sl, &branch, &wpath, &isMain, &rpath, &wid); err != nil {
-			return nil, statusOverviewOut{}, err
-		}
-		state, bucket := deriveStatusBucket(ctx, st, wid)
-		out.Total++
+	latest, err := st.LatestEventPerWorktree(ctx, ids, store.WorktreeStateEventTypes)
+	if err != nil {
+		return statusOverviewOut{}, fmt.Errorf("status overview: lifecycle state of %d worktrees: %w", len(ids), err)
+	}
+	out := statusOverviewOut{Total: len(wts), Worktrees: wts}
+	for i, id := range ids {
+		state, bucket := store.DeriveWorktreeState(latest[id])
+		out.Worktrees[i].State, out.Worktrees[i].Bucket = state, bucket
 		switch bucket {
 		case store.BucketStable:
 			out.Stable++
@@ -409,19 +405,41 @@ func statusOverviewTool(ctx context.Context, _ *mcpsdk.CallToolRequest, _ struct
 		case store.BucketFailed:
 			out.Failed++
 		}
-		out.Worktrees = append(out.Worktrees, statusWorktree{
-			Repo: filepath.Base(rpath), Branch: branch, Slug: sl,
-			State: state, Bucket: bucket, IsMain: isMain, Path: wpath,
-		})
 	}
-	return nil, out, rows.Err()
+	return out, nil
 }
 
-// deriveStatusBucket maps a worktree's latest lifecycle event to a
-// (state, bucket) pair.
-func deriveStatusBucket(ctx context.Context, st *store.Store, wtID int64) (state, bucket string) {
-	last, _ := st.LatestWorktreeStateEvent(ctx, wtID)
-	return store.DeriveWorktreeState(last)
+func activeStatusWorktrees(ctx context.Context, st *store.Store) ([]statusWorktree, []int64, error) {
+	rows, err := st.DB.QueryContext(ctx, `
+		SELECT COALESCE(w.slug,''), COALESCE(w.branch,'-'), w.path, w.is_main, r.path, w.id
+		FROM worktrees w JOIN repos r ON r.id = w.repo_id
+		WHERE w.deleted_at IS NULL
+		ORDER BY r.path, w.is_main DESC, w.branch, w.id`)
+	if err != nil {
+		return nil, nil, fmt.Errorf("status overview: list active worktrees: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var (
+		wts []statusWorktree
+		ids []int64
+	)
+	for rows.Next() {
+		var (
+			w     statusWorktree
+			rpath string
+			wid   int64
+		)
+		if err := rows.Scan(&w.Slug, &w.Branch, &w.Path, &w.IsMain, &rpath, &wid); err != nil {
+			return nil, nil, fmt.Errorf("status overview: scan active worktree: %w", err)
+		}
+		w.Repo = filepath.Base(rpath)
+		wts = append(wts, w)
+		ids = append(ids, wid)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, fmt.Errorf("status overview: list active worktrees: %w", err)
+	}
+	return wts, ids, nil
 }
 
 // ─── notify_test ───────────────────────────────────────────────────
