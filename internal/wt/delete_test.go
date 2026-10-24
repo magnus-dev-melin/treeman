@@ -3,6 +3,7 @@ package wt
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -129,5 +130,61 @@ func TestInlineDeleteOfDirtyWorktreeRemovesIt(t *testing.T) {
 	}
 	if !deleted {
 		t.Error("registry row not marked deleted")
+	}
+}
+
+func inlineLifecycle(t *testing.T, st *store.Store, wtPath string) []store.Event {
+	t.Helper()
+	var id int64
+	if err := st.DB.QueryRowContext(context.Background(), "SELECT id FROM worktrees WHERE path = ?", wtPath).Scan(&id); err != nil {
+		t.Fatalf("worktree row for %s: %v", wtPath, err)
+	}
+	evs, err := st.QueryEvents(context.Background(), store.EventFilter{
+		WorktreeID:  id,
+		EventTypes:  []string{store.EvtWorktreeDeleteStart, store.EvtWorktreeDeleteEnd, store.EvtWorktreeDeleteError},
+		OldestFirst: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return evs
+}
+
+func gitRunT(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+}
+
+func TestInlineTeardownRecordsTheDeleteLifecycle(t *testing.T) {
+	ctx := context.Background()
+	st := withTempStore(t)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	repo := filepath.Join(t.TempDir(), "repo")
+	gitRunT(t, "", "init", "-q", "-b", "main", repo)
+	gitRunT(t, repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "init")
+	ok := filepath.Join(repo, ".worktrees", "ok")
+	gitRunT(t, repo, "worktree", "add", "-q", "-b", "ok", ok)
+
+	if err := inlineTeardown(ctx, repo, ok, false, nil, NoopSink{}); err != nil {
+		t.Fatal(err)
+	}
+	evs := inlineLifecycle(t, st, ok)
+	if len(evs) != 2 || evs[0].EventType != store.EvtWorktreeDeleteStart || evs[1].EventType != store.EvtWorktreeDeleteEnd {
+		t.Fatalf("in-process teardown must be bracketed by delete:start and delete:end, got %+v", evs)
+	}
+
+	locked := filepath.Join(repo, ".worktrees", "locked")
+	gitRunT(t, repo, "worktree", "add", "-q", "-b", "locked", locked)
+	gitRunT(t, repo, "worktree", "lock", locked)
+	if err := inlineTeardown(ctx, repo, locked, false, nil, NoopSink{}); err == nil {
+		t.Fatal("git refusing to remove a locked worktree must fail the teardown")
+	}
+	evs = inlineLifecycle(t, st, locked)
+	if len(evs) != 2 || evs[1].EventType != store.EvtWorktreeDeleteError || evs[1].Level != store.LevelError {
+		t.Fatalf("a failed in-process teardown must end in an error-level delete:error, got %+v", evs)
 	}
 }

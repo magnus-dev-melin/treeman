@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -183,67 +182,60 @@ func pathsEqual(a, b string) bool {
 // inlineTeardown runs the full teardown sequence locally without
 // dispatching to the daemon. Used by the explicit `--detached` mode
 // and as the automatic fallback when the daemon is unreachable.
-func inlineTeardown(ctx context.Context, repoRoot, wtPath string, force bool, env map[string]string, sink Sink) error {
+func inlineTeardown(ctx context.Context, repoRoot, wtPath string, force bool, env map[string]string, sink Sink) (err error) {
 	cfg, err := resolve.LoadResolved(repoRoot)
 	if err != nil {
 		return err
 	}
-	dbPath, _ := store.DefaultDBPath()
-	// Shared handle (#79): the same invocation's lookup + guard helpers
-	// already opened it; helpers never close a shared store.
-	st, err := store.OpenShared(ctx, dbPath)
+	st, err := openSharedDefaultStore(ctx)
 	if err != nil {
 		return err
 	}
-	repoID, _ := st.EnsureRepo(ctx, repoRoot, filepath.Base(repoRoot))
+	repoID, err := st.EnsureRepo(ctx, repoRoot, filepath.Base(repoRoot))
+	if err != nil {
+		return fmt.Errorf("register repo %s for the teardown of %s: %w", repoRoot, wtPath, err)
+	}
 	branch := gitenv.DetectBranch(ctx, wtPath)
 	id, err := ResolveIdentity(ctx, st, &cfg, repoRoot, wtPath, branch, repoID)
 	if err != nil {
 		return err
 	}
+	_ = st.WriteEvent(ctx, store.LevelInfo, store.EvtWorktreeDeleteStart,
+		"in-process teardown hooks + db teardown + git remove beginning", repoID, id.WtID, "", 0, nil)
+	defer func() {
+		if err != nil {
+			_ = st.WriteEvent(context.WithoutCancel(ctx), store.LevelError, store.EvtWorktreeDeleteError,
+				err.Error(), repoID, id.WtID, "", 0, map[string]string{"worktree_path": wtPath})
+			return
+		}
+		_ = st.WriteEvent(ctx, store.LevelInfo, store.EvtWorktreeDeleteEnd,
+			"in-process teardown complete", repoID, id.WtID, "", 0, nil)
+	}()
 	runTrigger := func(trigger string, actions []config.Action) {
 		if len(actions) == 0 {
 			return
 		}
 		started := hooks.EmitHookStart(ctx, st, repoID, id.WtID, trigger, len(actions))
-		out, _ := hooks.RunHooks(ctx, trigger, actions, repoRoot, wtPath, id.Slug.Value, id.IsMain, env, true)
+		out, hookErr := hooks.RunHooks(ctx, trigger, actions, repoRoot, wtPath, id.Slug.Value, id.IsMain, env, true)
 		hooks.PersistOutcome(ctx, st, repoID, id.WtID, trigger, started, time.Now().UnixMilli(), out)
+		if hookErr != nil {
+			sink.Warn("%s hooks failed for %s (teardown continues): %v", trigger, wtPath, hookErr)
+		}
 	}
 	runTrigger("delete-before-engines", cfg.Hooks.OnDeleteBeforeEngines)
 	if err := prepare.TeardownDatabases(ctx, &cfg, id.Slug.Value, repoID, id.WtID, st); err != nil {
-		slog.Warn("wt delete: teardown databases",
-			"slug", id.Slug.Value, "repo", repoRoot, "wt", wtPath, "err", err)
-		_ = st.WriteEvent(ctx, store.LevelWarn, store.EvtWorktreeDeleteError,
-			fmt.Sprintf("teardown databases: %v", err),
-			repoID, id.WtID, "", 0, map[string]any{
-				"slug": id.Slug.Value, "err": err.Error(),
-			})
+		sink.Warn("dropping the databases of %s failed; the daemon retries it on its next sweep: %v", wtPath, err)
 	}
 	runTrigger("delete-after-engines", cfg.Hooks.OnDeleteAfterEngines)
-	// Always --force: whether dirty work may be destroyed was settled
-	// before Delete ran (the CLI's confirm, back --remove's and gc's
-	// clean gates, MCP's ack), and the databases are already gone, so
-	// git refusing here would only strand a worktree without them. The
-	// daemon path agrees: it renames the tree into trash. The request's
-	// force flag still means "a stale entry may fail to remove".
-	// Same stdout-discipline rationale as Create's git invocation:
-	// route everything informational to stderr.
 	if err := gitcmd.RunPiped(ctx, repoRoot, os.Stderr, os.Stderr, "worktree", "remove", "--force", wtPath); err != nil && !force {
 		return fmt.Errorf("git worktree remove %s: %w", wtPath, err)
 	}
-	// git worktree remove leaves untracked copies/links bring-in behind
-	// (node_modules, vendored dirs, nested git repos). Nuke it plus the
-	// now-empty parent dirs so a future create at this path doesn't trip
-	// "destination path already exists".
 	RemoveWorktreeTree(wtPath, WorktreesRoot(cfg, repoRoot))
-	// Registry bookkeeping last: a removal that failed above leaves the
-	// row live, so a retry finds it and finishes the teardown.
 	if err := st.ReleaseWorktreePorts(ctx, id.WtID); err != nil {
-		slog.Warn("wt delete: release ports (freed ports stay blocked)", "wt", wtPath, "err", err)
+		sink.Warn("releasing the ports of %s failed; they stay reserved: %v", wtPath, err)
 	}
 	if err := st.MarkWorktreeDeleted(ctx, id.WtID); err != nil {
 		return fmt.Errorf("mark worktree %s deleted: %w", wtPath, err)
 	}
-	_ = sink
 	return nil
 }
