@@ -115,7 +115,6 @@ func TestOpenWaitsForAWriterBeforeSwitchingToWAL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = raw.Close() }()
 	conn, err := raw.Conn(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -131,6 +130,7 @@ func TestOpenWaitsForAWriterBeforeSwitchingToWAL(t *testing.T) {
 		time.Sleep(300 * time.Millisecond)
 		_, _ = conn.ExecContext(ctx, "COMMIT")
 		_ = conn.Close()
+		_ = raw.Close()
 		close(released)
 	}()
 	st, err := Open(ctx, path)
