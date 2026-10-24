@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"strings"
 
@@ -29,17 +30,20 @@ func completionHandler(ctx context.Context, req *mcpsdk.CompleteRequest) (*mcpsd
 	argName := req.Params.Argument.Name
 	prefix := req.Params.Argument.Value
 
-	var values []string
+	var (
+		values []string
+		err    error
+	)
 	switch ref.Type {
 	case "ref/prompt":
-		values = completeForPromptArg(ctx, ref.Name, argName)
+		values, err = completeForPromptArg(ctx, argName)
 	case "ref/resource":
-		// All our templated resources currently carry one variable:
-		// {slug} → worktree slug. argName matches the template's
-		// variable name.
 		if strings.HasPrefix(ref.URI, "treeman://worktrees/") && argName == "slug" {
-			values = worktreeSlugCompletions(ctx)
+			values, err = worktreeSlugCompletions(ctx)
 		}
+	}
+	if err != nil {
+		return nil, fmt.Errorf("complete %s %q argument %q: %w", ref.Type, ref.Name+ref.URI, argName, err)
 	}
 
 	values = filterByPrefix(values, prefix)
@@ -67,10 +71,7 @@ func emptyCompletion() *mcpsdk.CompleteResult {
 	}
 }
 
-// completeForPromptArg maps (prompt name, arg name) onto a value
-// source. Unknown combinations return nil so the client falls back
-// to free-form input.
-func completeForPromptArg(ctx context.Context, promptName, argName string) []string {
+func completeForPromptArg(ctx context.Context, argName string) ([]string, error) {
 	switch argName {
 	case "worktree":
 		return worktreeSlugCompletions(ctx)
@@ -81,128 +82,79 @@ func completeForPromptArg(ctx context.Context, promptName, argName string) []str
 	case "fingerprint":
 		return snapshotFingerprintCompletions(ctx)
 	}
-	// Per-prompt fallbacks — prompts with arg names not in the
-	// generic set above. Currently none, but the switch lets us add
-	// e.g. "phase" suggestions for hook-flavoured prompts later.
-	_ = promptName
-	return nil
+	return nil, nil
 }
 
-// worktreeSlugCompletions pulls every live worktree slug from the
-// SQLite registry. The store handle is opened+closed per call —
-// completions don't run often enough to justify a long-lived handle.
-func worktreeSlugCompletions(ctx context.Context) []string {
+func queryCompletionStrings(ctx context.Context, what, q string, keep func(string) bool) ([]string, error) {
 	st, err := openStore(ctx)
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("open the store to list %s: %w", what, err)
 	}
 	defer func() { _ = st.Close() }()
-	//nolint:gosec // WorktreeNotTearingDown is a compile-time constant fragment
-	rows, err := st.DB.QueryContext(ctx, `
+	rows, err := st.DB.QueryContext(ctx, q)
+	if err != nil {
+		return nil, fmt.Errorf("list %s: %w", what, err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []string
+	for rows.Next() {
+		var v string
+		if err := rows.Scan(&v); err != nil {
+			return nil, fmt.Errorf("scan %s: %w", what, err)
+		}
+		if keep(v) {
+			out = append(out, v)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list %s: %w", what, err)
+	}
+	return out, nil
+}
+
+func nonEmpty(v string) bool { return v != "" }
+
+func worktreeSlugCompletions(ctx context.Context) ([]string, error) {
+	return queryCompletionStrings(ctx, "worktree slugs", `
 		SELECT w.slug FROM worktrees w
 		WHERE w.deleted_at IS NULL AND w.slug IS NOT NULL
 		AND `+store.WorktreeNotTearingDown+`
-		ORDER BY w.slug`)
-	if err != nil {
-		return nil
-	}
-	defer func() { _ = rows.Close() }()
-	var out []string
-	for rows.Next() {
-		var s string
-		if err := rows.Scan(&s); err != nil {
-			continue
-		}
-		if s != "" {
-			out = append(out, s)
-		}
-	}
-	// Best-effort: a mid-iteration DB error just truncates the
-	// completion list rather than failing the whole call.
-	if err := rows.Err(); err != nil {
-		return out
-	}
-	return out
+		ORDER BY w.slug`, nonEmpty)
 }
 
-// branchCompletions returns every distinct branch known to the
-// registry across every repo. Cheaper than shelling out to git and
-// good enough for completion — users typing a branch name almost
-// always want one that already exists in the registry.
-func branchCompletions(ctx context.Context) []string {
-	st, err := openStore(ctx)
-	if err != nil {
-		return nil
-	}
-	defer func() { _ = st.Close() }()
-	//nolint:gosec // WorktreeNotTearingDown is a compile-time constant fragment
-	rows, err := st.DB.QueryContext(ctx, `
+func branchCompletions(ctx context.Context) ([]string, error) {
+	return queryCompletionStrings(ctx, "worktree branches", `
 		SELECT DISTINCT w.branch FROM worktrees w
 		WHERE w.deleted_at IS NULL AND w.branch IS NOT NULL AND w.branch != ''
 		AND `+store.WorktreeNotTearingDown+`
-		ORDER BY w.branch`)
-	if err != nil {
-		return nil
-	}
-	defer func() { _ = rows.Close() }()
-	var out []string
-	for rows.Next() {
-		var b string
-		if err := rows.Scan(&b); err != nil {
-			break
-		}
-		if b != "" {
-			out = append(out, b)
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return nil
-	}
-	return out
+		ORDER BY w.branch`, nonEmpty)
 }
 
-// recentRunIDCompletions returns the 50 most recent distinct run_ids
-// from the events table. Useful for the diagnose-prepare-failure
-// prompt's run_id arg — the user usually wants the LAST run.
-func recentRunIDCompletions(ctx context.Context) []string {
-	st, err := openStore(ctx)
-	if err != nil {
-		return nil
-	}
-	defer func() { _ = st.Close() }()
-	// run_id lives inside payload_json; pull it out via a string-scan
-	// pattern. Cheap because payload_json is small (kilobytes) and
-	// we limit to the 200 most recent rows.
-	rows, err := st.DB.QueryContext(ctx, `
+func recentRunIDCompletions(ctx context.Context) ([]string, error) {
+	payloads, err := queryCompletionStrings(ctx, "recent run ids", `
 		SELECT payload_json FROM events
 		WHERE payload_json LIKE '%"run_id":"%'
-		ORDER BY id DESC LIMIT 200`)
+		ORDER BY id DESC LIMIT 200`, nonEmpty)
 	if err != nil {
-		return nil
+		return nil, err
 	}
-	defer func() { _ = rows.Close() }()
 	seen := map[string]struct{}{}
 	var out []string
-	for rows.Next() {
-		var p string
-		if err := rows.Scan(&p); err != nil {
+	for _, p := range payloads {
+		id := extractRunID(p)
+		if id == "" {
+			continue
+		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+		if len(out) >= 50 {
 			break
 		}
-		if id := extractRunID(p); id != "" {
-			if _, dup := seen[id]; dup {
-				continue
-			}
-			seen[id] = struct{}{}
-			out = append(out, id)
-			if len(out) >= 50 {
-				break
-			}
-		}
 	}
-	if err := rows.Err(); err != nil {
-		return nil
-	}
-	return out
+	return out, nil
 }
 
 // extractRunID reaches into a payload JSON string and pulls the
@@ -222,32 +174,9 @@ func extractRunID(payload string) string {
 	return payload[start : start+end]
 }
 
-func snapshotFingerprintCompletions(ctx context.Context) []string {
-	st, err := openStore(ctx)
-	if err != nil {
-		return nil
-	}
-	defer func() { _ = st.Close() }()
-	rows, err := st.DB.QueryContext(ctx, `
-		SELECT fingerprint FROM snapshots ORDER BY last_used_at DESC LIMIT 100`)
-	if err != nil {
-		return nil
-	}
-	defer func() { _ = rows.Close() }()
-	var out []string
-	for rows.Next() {
-		var f string
-		if err := rows.Scan(&f); err != nil {
-			break
-		}
-		if f != "" {
-			out = append(out, f)
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return nil
-	}
-	return out
+func snapshotFingerprintCompletions(ctx context.Context) ([]string, error) {
+	return queryCompletionStrings(ctx, "snapshot fingerprints", `
+		SELECT fingerprint FROM snapshots ORDER BY last_used_at DESC LIMIT 100`, nonEmpty)
 }
 
 func filterByPrefix(values []string, prefix string) []string {

@@ -72,23 +72,38 @@ func snapshotRecordToMap(r *store.SnapshotRecord) map[string]any {
 	}
 }
 
-// probeTemplate checks whether the engine-side template exists and
-// returns a size estimate where the engine exposes one. Errors are
-// silently dropped (exists=false) — the caller surfaces them via the
-// SQLite row's recorded state.
-func probeTemplate(ctx context.Context, cfg *config.Config, eng, connName, template string) (bool, int64, string) {
-	fam, _ := engine.Canonical(eng)
+type templateProbe struct {
+	exists  bool
+	sizeKB  int64
+	version string
+}
+
+func probeTemplate(ctx context.Context, cfg *config.Config, eng, connName, template string) (templateProbe, error) {
+	fam, ok := engine.Canonical(eng)
+	if !ok {
+		return templateProbe{}, fmt.Errorf("template %s: unknown engine %q", template, eng)
+	}
 	conn, configured, err := engineconn.Connect(ctx, cfg, fam, connName)
-	if !configured || err != nil {
-		return false, 0, ""
+	if err != nil {
+		return templateProbe{}, fmt.Errorf("connect to %s to probe template %s: %w", eng, template, err)
+	}
+	if !configured {
+		return templateProbe{}, fmt.Errorf("probe template %s: no %s connection %q is configured", template, eng, connName)
 	}
 	defer func() { _ = conn.Close() }()
-	exists, _ := conn.Exists(ctx, template)
-	ver, _ := conn.EngineVersion(ctx)
-	if !exists {
-		return false, 0, ver
+	exists, err := conn.Exists(ctx, template)
+	if err != nil {
+		return templateProbe{}, fmt.Errorf("check whether %s template %s exists: %w", eng, template, err)
 	}
-	return true, conn.SizeKB(ctx, template), ver
+	ver, err := conn.EngineVersion(ctx)
+	if err != nil {
+		return templateProbe{}, fmt.Errorf("read the %s engine version: %w", eng, err)
+	}
+	p := templateProbe{exists: exists, version: ver}
+	if exists {
+		p.sizeKB = conn.SizeKB(ctx, template)
+	}
+	return p, nil
 }
 
 // reservedTemplatePrefixes are the namespace markers treeman owns:

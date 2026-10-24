@@ -121,7 +121,10 @@ func TestNewestMatchingID_PicksLatestEvent(t *testing.T) {
 			maxID = e.ID
 		}
 	}
-	got := newestMatchingID(ctx, s, store.EventFilter{WorktreeID: wtID})
+	got, err := newestMatchingID(ctx, s, store.EventFilter{WorktreeID: wtID})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if got != maxID {
 		t.Errorf("newestMatchingID returned %d, want %d", got, maxID)
 	}

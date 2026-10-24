@@ -92,7 +92,10 @@ func logsWaitTool(ctx context.Context, _ *mcpsdk.CallToolRequest, in logsWaitIn)
 		return nil, logsWaitOut{}, err
 	}
 
-	anchor := newestMatchingID(ctx, st, f)
+	anchor, err := newestMatchingID(ctx, st, f)
+	if err != nil {
+		return nil, logsWaitOut{}, err
+	}
 	f.AfterID = anchor
 	deadline := time.Now().Add(timeout)
 
@@ -129,18 +132,17 @@ func logsWaitTool(ctx context.Context, _ *mcpsdk.CallToolRequest, in logsWaitIn)
 	}
 }
 
-// newestMatchingID returns the highest event id matching the filter
-// at the moment of the call — the anchor every subsequent poll
-// compares against. Errors collapse to 0 (treat as "no anchor"); the
-// downstream loop then surfaces the real error on its next query.
-func newestMatchingID(ctx context.Context, st *store.Store, f store.EventFilter) int64 {
+func newestMatchingID(ctx context.Context, st *store.Store, f store.EventFilter) (int64, error) {
 	f.Limit = 1
 	f.OldestFirst = false
 	evs, err := st.QueryEvents(ctx, f)
-	if err != nil || len(evs) == 0 {
-		return 0
+	if err != nil {
+		return 0, fmt.Errorf("read the newest matching event to anchor on: %w", err)
 	}
-	return evs[0].ID
+	if len(evs) == 0 {
+		return 0, nil
+	}
+	return evs[0].ID, nil
 }
 
 // ─── logs_subscribe ─────────────────────────────────────────────────
@@ -210,43 +212,82 @@ func logsSubscribeTool(
 		progressToken = req.Params.GetProgressToken()
 	}
 
-	// Try the daemon-push path first.
-	out, ok := subscribePushPath(ctx, req, in, minCount, timeout, progressToken)
-	if ok {
+	st, err := openStore(ctx)
+	if err != nil {
+		return nil, logsSubscribeOut{}, fmt.Errorf("open the store for logs_subscribe: %w", err)
+	}
+	defer func() { _ = st.Close() }()
+	scope, err := resolveSubscribeScope(ctx, st, in)
+	if err != nil {
+		return nil, logsSubscribeOut{}, err
+	}
+	sub := subscription{req: req, in: in, scope: scope, minCount: minCount, timeout: timeout, progressToken: progressToken}
+	if out, ok := subscribePushPath(ctx, sub); ok {
 		return nil, out, nil
 	}
-	// Fallback: poll SQLite. Same shape; Mode=poll lets agents tell.
-	return nil, subscribePollPath(ctx, req, in, minCount, timeout, progressToken), nil
+	out, err := subscribePollPath(ctx, st, sub)
+	return nil, out, err
 }
 
-// subscribePushPath opens an rpc.SubscribeEvents stream and consumes
-// events as they arrive. Returns ok=false (and the caller falls back
-// to polling) on dial failure — the daemon may not be running.
-//
-// Pristine push: every filter field in subscribePollPath is also
-// passed to rpc.SubscribeEvents below, and the Anchor (= max event
-// id at subscription time) is computed from the local store before
-// the stream opens so the output shape matches poll exactly.
-func subscribePushPath(
-	ctx context.Context,
-	req *mcpsdk.CallToolRequest,
-	in logsSubscribeIn,
-	minCount int,
-	timeout time.Duration,
-	progressToken any,
-) (logsSubscribeOut, bool) {
-	resolvedRepo, _ := resolveRepo(ctx, in.Repo)
-	resolvedWT, _ := resolveWorktreePath(ctx, resolvedRepo, in.Worktree)
+type subscribeScope struct {
+	filter       store.EventFilter
+	anchor       int64
+	repoPath     string
+	worktreePath string
+}
 
-	// Compute the same Anchor poll mode reports. Required so agents
-	// can correlate the subscription start with logs_query results
-	// regardless of mode. Best-effort: an unopenable store leaves
-	// Anchor=0 (subscription still works, no historical anchor).
-	anchor := pushAnchor(ctx, in)
+type subscription struct {
+	req           *mcpsdk.CallToolRequest
+	in            logsSubscribeIn
+	scope         subscribeScope
+	minCount      int
+	timeout       time.Duration
+	progressToken any
+}
 
+func resolveSubscribeScope(ctx context.Context, st *store.Store, in logsSubscribeIn) (subscribeScope, error) {
+	f := store.EventFilter{
+		Levels:      in.Levels,
+		EventTypes:  in.EventTypes,
+		Phases:      in.Phases,
+		PayloadLike: in.PayloadLike,
+		RunID:       in.RunID,
+		HydrateWT:   true,
+		Limit:       200,
+		OldestFirst: true,
+	}
+	if err := applyRepoWorktreeFilter(ctx, st, &f, in.Repo, in.Worktree); err != nil {
+		return subscribeScope{}, err
+	}
+	sc := subscribeScope{filter: f}
+	if in.Repo != "" {
+		repoRoot, err := resolveRepo(ctx, in.Repo)
+		if err != nil {
+			return subscribeScope{}, fmt.Errorf("resolve repo %q: %w", in.Repo, err)
+		}
+		sc.repoPath = repoRoot
+	}
+	if f.WorktreeID != 0 {
+		p, err := st.WorktreePathByID(ctx, f.WorktreeID)
+		if err != nil {
+			return subscribeScope{}, fmt.Errorf("read the path of worktree %q (#%d): %w", in.Worktree, f.WorktreeID, err)
+		}
+		sc.worktreePath = p
+	}
+	anchor, err := newestMatchingID(ctx, st, f)
+	if err != nil {
+		return subscribeScope{}, err
+	}
+	sc.anchor = anchor
+	return sc, nil
+}
+
+func subscribePushPath(ctx context.Context, sub subscription) (logsSubscribeOut, bool) {
+	in, anchor := sub.in, sub.scope.anchor
+	req, minCount, timeout, progressToken := sub.req, sub.minCount, sub.timeout, sub.progressToken
 	stream, cancel, err := rpc.SubscribeEvents(ctx, rpc.EventSubscribeArgs{
-		RepoPath:     resolvedRepo,
-		WorktreePath: resolvedWT,
+		RepoPath:     sub.scope.repoPath,
+		WorktreePath: sub.scope.worktreePath,
 		Levels:       in.Levels,
 		EventTypes:   in.EventTypes,
 		Phases:       in.Phases,
@@ -298,61 +339,9 @@ func subscribePushPath(
 	}
 }
 
-// pushAnchor returns the highest event id matching the filter at
-// subscription open time. Symmetric with poll mode's newestMatchingID
-// call so the Anchor field has the same meaning across both paths.
-// Errors collapse to 0 — push mode still works, the agent just sees
-// "no anchor" in the result.
-func pushAnchor(ctx context.Context, in logsSubscribeIn) int64 {
-	st, err := openStore(ctx)
-	if err != nil {
-		return 0
-	}
-	defer func() { _ = st.Close() }()
-	f := store.EventFilter{
-		Levels:      in.Levels,
-		EventTypes:  in.EventTypes,
-		Phases:      in.Phases,
-		PayloadLike: in.PayloadLike,
-		RunID:       in.RunID,
-	}
-	if err := applyRepoWorktreeFilter(ctx, st, &f, in.Repo, in.Worktree); err != nil {
-		return 0
-	}
-	return newestMatchingID(ctx, st, f)
-}
-
-// subscribePollPath is the original SQLite-polling implementation,
-// retained as the daemon-down fallback.
-func subscribePollPath(
-	ctx context.Context,
-	req *mcpsdk.CallToolRequest,
-	in logsSubscribeIn,
-	minCount int,
-	timeout time.Duration,
-	progressToken any,
-) logsSubscribeOut {
-	st, err := openStore(ctx)
-	if err != nil {
-		return logsSubscribeOut{Mode: "poll"}
-	}
-	defer func() { _ = st.Close() }()
-
-	f := store.EventFilter{
-		Levels:      in.Levels,
-		EventTypes:  in.EventTypes,
-		Phases:      in.Phases,
-		PayloadLike: in.PayloadLike,
-		RunID:       in.RunID,
-		HydrateWT:   true,
-		Limit:       200,
-		OldestFirst: true,
-	}
-	if err := applyRepoWorktreeFilter(ctx, st, &f, in.Repo, in.Worktree); err != nil {
-		return logsSubscribeOut{Mode: "poll"}
-	}
-
-	anchor := newestMatchingID(ctx, st, f)
+func subscribePollPath(ctx context.Context, st *store.Store, sub subscription) (logsSubscribeOut, error) {
+	req, minCount, timeout, progressToken := sub.req, sub.minCount, sub.timeout, sub.progressToken
+	f, anchor := sub.scope.filter, sub.scope.anchor
 	f.AfterID = anchor
 	deadline := time.Now().Add(timeout)
 	tick := time.NewTicker(500 * time.Millisecond)
@@ -363,7 +352,8 @@ func subscribePollPath(
 	for {
 		evs, err := st.QueryEvents(ctx, f)
 		if err != nil {
-			return logsSubscribeOut{Anchor: anchor, Notifications: notifications, Mode: "poll"}
+			return logsSubscribeOut{Anchor: anchor, Notifications: notifications, Mode: "poll"},
+				fmt.Errorf("poll events after #%d: %w", f.AfterID, err)
 		}
 		for _, e := range evs {
 			e.Message = redactSecrets(e.Message)
@@ -375,7 +365,7 @@ func subscribePollPath(
 			notifications += dispatchEventNotification(ctx, req, progressToken, len(collected), minCount, e)
 		}
 		if len(collected) >= minCount {
-			return logsSubscribeOut{Events: store.EventsJSON(collected), Anchor: anchor, Notifications: notifications, Mode: "poll"}
+			return logsSubscribeOut{Events: store.EventsJSON(collected), Anchor: anchor, Notifications: notifications, Mode: "poll"}, nil
 		}
 		if time.Now().After(deadline) {
 			return logsSubscribeOut{
@@ -384,7 +374,7 @@ func subscribePollPath(
 				TimedOut:      true,
 				Notifications: notifications,
 				Mode:          "poll",
-			}
+			}, nil
 		}
 		select {
 		case <-ctx.Done():
@@ -394,7 +384,7 @@ func subscribePollPath(
 				TimedOut:      true,
 				Notifications: notifications,
 				Mode:          "poll",
-			}
+			}, nil
 		case <-tick.C:
 		}
 	}
@@ -426,28 +416,6 @@ func envelopeToEvent(env rpc.EventEnvelope) store.Event {
 		ev.DurationMs.Int64 = env.DurationMs
 	}
 	return ev
-}
-
-// resolveWorktreePath resolves a worktree slug/branch/basename to its
-// absolute path via the registry. Returns empty when nothing matches
-// — the streaming subscribe args treat empty as "no worktree scope".
-func resolveWorktreePath(ctx context.Context, repoRoot, name string) (string, error) {
-	if name == "" {
-		return "", nil
-	}
-	st, err := openStore(ctx)
-	if err != nil {
-		return "", err
-	}
-	defer func() { _ = st.Close() }()
-	repoID, _ := st.LookupRepoID(ctx, repoRoot)
-	wtID, err := st.LookupWorktreeID(ctx, repoID, name)
-	if err != nil || wtID == 0 {
-		return "", err
-	}
-	var p string
-	_ = st.DB.QueryRowContext(ctx, `SELECT path FROM worktrees WHERE id = ?`, wtID).Scan(&p)
-	return p, nil
 }
 
 // dispatchEventNotification fires a progress-notification (always) and
@@ -561,7 +529,10 @@ func collectRepoBranches(ctx context.Context, repo string, limit int) (branchesL
 	current, _ := gitcmd.String(ctx, repoRoot, "symbolic-ref", "--short", "HEAD")
 	current = strings.TrimSpace(current)
 
-	branchToWtDir, _ := branchOccupancyFromStore(ctx, repoRoot)
+	branchToWtDir, err := branchOccupancyFromStore(ctx, repoRoot)
+	if err != nil {
+		return branchesListOut{}, fmt.Errorf("read which worktrees hold the branches of %s: %w", repoRoot, err)
+	}
 
 	entries := map[string]*branchesListEntry{}
 	for b := range strings.SplitSeq(local, "\n") {
@@ -843,11 +814,17 @@ func inputsFingerprintTool(
 
 	for _, i := range indices {
 		d := cfg.Databases[i]
-		sourceDB, _ := template.Render(d.NameTemplate, tplCtx)
+		sourceDB, err := template.Render(d.NameTemplate, tplCtx)
+		if err != nil {
+			return nil, out, fmt.Errorf("render databases[%d].name_template %q: %w", i, d.NameTemplate, err)
+		}
 		engineVersion := ""
 		note := "engine_version skipped — pass probe_engine=true for a cache-comparable fingerprint"
 		if in.ProbeEngine {
-			engineVersion = probeEngineVersion(ctx, &cfg, d.Engine)
+			engineVersion, err = probeEngineVersion(ctx, &cfg, d.Engine)
+			if err != nil {
+				return nil, out, fmt.Errorf("databases[%d]: %w", i, err)
+			}
 			note = ""
 		}
 		rep := prepare.InspectFingerprint(ctx, st, d, wt, sourceDB, engineVersion)
@@ -860,21 +837,24 @@ func inputsFingerprintTool(
 	return nil, out, nil
 }
 
-// probeEngineVersion calls each engine driver's EngineVersion. Errors
-// are swallowed (empty string) so a half-up environment doesn't
-// crash the introspection call — the caller will see an empty
-// engine_version field and can investigate via engine_status.
-func probeEngineVersion(ctx context.Context, cfg *config.Config, eng string) string {
-	fam, _ := engine.Canonical(eng)
-	// Singular connection: the version probe is a diagnostics aid and
-	// named blocks are resolved through their own db entries.
+func probeEngineVersion(ctx context.Context, cfg *config.Config, eng string) (string, error) {
+	fam, ok := engine.Canonical(eng)
+	if !ok {
+		return "", fmt.Errorf("probe engine version: unknown engine %q", eng)
+	}
 	conn, configured, err := engineconn.Connect(ctx, cfg, fam, "")
-	if !configured || err != nil {
-		return ""
+	if err != nil {
+		return "", fmt.Errorf("connect to %s to probe its version: %w", eng, err)
+	}
+	if !configured {
+		return "", fmt.Errorf("probe engine version: no %s connection is configured", eng)
 	}
 	defer func() { _ = conn.Close() }()
-	v, _ := conn.EngineVersion(ctx)
-	return v
+	v, err := conn.EngineVersion(ctx)
+	if err != nil {
+		return "", fmt.Errorf("read the %s engine version: %w", eng, err)
+	}
+	return v, nil
 }
 
 // ─── prepare_dry_run ────────────────────────────────────────────────
@@ -1064,7 +1044,7 @@ func branchOccupancyFromStore(ctx context.Context, repoRoot string) (map[string]
 	for rows.Next() {
 		var branch, path string
 		if err := rows.Scan(&branch, &path); err != nil {
-			continue
+			return nil, err
 		}
 		if branch == "" {
 			continue

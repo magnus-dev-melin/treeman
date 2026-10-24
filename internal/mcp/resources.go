@@ -157,6 +157,17 @@ func parseWorktreeSlugURI(uri string) (slug, tail string, ok bool) {
 	return slug, tail, true
 }
 
+func worktreeResourceID(ctx context.Context, st *store.Store, uri, slug string) (int64, error) {
+	wid, err := st.LookupWorktreeID(ctx, 0, slug)
+	if err != nil {
+		return 0, fmt.Errorf("look up worktree %q for %s: %w", slug, uri, err)
+	}
+	if wid == 0 {
+		return 0, mcpsdk.ResourceNotFoundError(uri)
+	}
+	return wid, nil
+}
+
 func worktreeEventsResource(ctx context.Context, req *mcpsdk.ReadResourceRequest) (*mcpsdk.ReadResourceResult, error) {
 	slug, _, ok := parseWorktreeSlugURI(req.Params.URI)
 	if !ok || slug == "" {
@@ -167,9 +178,9 @@ func worktreeEventsResource(ctx context.Context, req *mcpsdk.ReadResourceRequest
 		return nil, fmt.Errorf("open store: %w", err)
 	}
 	defer func() { _ = st.Close() }()
-	wid, _ := st.LookupWorktreeID(ctx, 0, slug)
-	if wid == 0 {
-		return nil, mcpsdk.ResourceNotFoundError(req.Params.URI)
+	wid, err := worktreeResourceID(ctx, st, req.Params.URI, slug)
+	if err != nil {
+		return nil, err
 	}
 	events, err := st.QueryEvents(ctx, store.EventFilter{
 		WorktreeID: wid, Limit: 200, HydrateWT: true, OldestFirst: true,
@@ -183,7 +194,7 @@ func worktreeEventsResource(ctx context.Context, req *mcpsdk.ReadResourceRequest
 		e.PayloadJSON = redactSecrets(e.PayloadJSON)
 		b, err := json.Marshal(e)
 		if err != nil {
-			continue
+			return nil, fmt.Errorf("encode event %d of worktree %s: %w", e.ID, slug, err)
 		}
 		buf = append(buf, b...)
 		buf = append(buf, '\n')
@@ -203,9 +214,9 @@ func worktreeHooksResource(ctx context.Context, req *mcpsdk.ReadResourceRequest)
 		return nil, fmt.Errorf("open store: %w", err)
 	}
 	defer func() { _ = st.Close() }()
-	wid, _ := st.LookupWorktreeID(ctx, 0, slug)
-	if wid == 0 {
-		return nil, mcpsdk.ResourceNotFoundError(req.Params.URI)
+	wid, err := worktreeResourceID(ctx, st, req.Params.URI, slug)
+	if err != nil {
+		return nil, err
 	}
 	rows, err := st.QueryHookRuns(ctx, wid, 50)
 	if err != nil {
@@ -311,7 +322,7 @@ func recentLogsResource(ctx context.Context, req *mcpsdk.ReadResourceRequest) (*
 	for _, e := range events {
 		b, err := json.Marshal(e)
 		if err != nil {
-			continue
+			return nil, fmt.Errorf("encode event %d: %w", e.ID, err)
 		}
 		buf = append(buf, b...)
 		buf = append(buf, '\n')

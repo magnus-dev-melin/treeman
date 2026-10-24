@@ -316,16 +316,28 @@ func checkSnapshots(ctx context.Context, repoRoot string) doctorResult {
 	}
 	defer func() { _ = st.Close() }()
 
-	var rowCount int
-	if repoID, rerr := st.LookupRepoID(ctx, repoRoot); rerr == nil {
-		if rows, lerr := st.ListSnapshotsForRepo(ctx, repoID); lerr == nil {
-			rowCount = len(rows)
-		}
+	fail := func(what string, err error) doctorResult {
+		return doctorResult{Name: "snapshots", Status: "fail", Detail: fmt.Sprintf("%s for %s: %v", what, repoRoot, err)}
 	}
-	totalBytes, _ := st.SumSnapshotBytes(ctx)
+	repoID, err := st.LookupRepoID(ctx, repoRoot)
+	if err != nil {
+		return fail("look up repo", err)
+	}
+	snaps, err := st.ListSnapshotsForRepo(ctx, repoID)
+	if err != nil {
+		return fail("list cached templates", err)
+	}
+	totalBytes, err := st.SumSnapshotBytes(ctx)
+	if err != nil {
+		return fail("sum recorded template sizes", err)
+	}
 	detail := fmt.Sprintf("%d cached template(s) (cap %d), %.1f MiB recorded across repos",
-		rowCount, cfg.Snapshots.CapPerRepo, float64(totalBytes)/(1<<20))
-	if counts, serr := snapshot.SpareCounts(ctx, &cfg); serr == nil && len(counts) > 0 {
+		len(snaps), cfg.Snapshots.CapPerRepo, float64(totalBytes)/(1<<20))
+	counts, err := snapshot.SpareCounts(ctx, &cfg)
+	if err != nil {
+		return fail("count pre-warmed spares", err)
+	}
+	if len(counts) > 0 {
 		total := 0
 		for _, n := range counts {
 			total += n
@@ -782,11 +794,14 @@ func worktreeShowTool(ctx context.Context, _ *mcpsdk.CallToolRequest, in worktre
 		if rerr != nil {
 			return nil, worktreeShowOut{}, rerr
 		}
-		var repoID int64
-		if err := st.DB.QueryRowContext(ctx, `SELECT id FROM repos WHERE path = ?`, repoRoot).Scan(&repoID); err != nil {
-			return nil, worktreeShowOut{}, fmt.Errorf("lookup repo %s: %w", repoRoot, err)
+		repoID, err := lookupRepoID(ctx, st, repoRoot)
+		if err != nil {
+			return nil, worktreeShowOut{}, err
 		}
-		id, _ = st.LookupWorktreeID(ctx, repoID, in.Name)
+		id, err = st.LookupWorktreeID(ctx, repoID, in.Name)
+		if err != nil {
+			return nil, worktreeShowOut{}, fmt.Errorf("look up worktree %q in %s: %w", in.Name, repoRoot, err)
+		}
 		if id == 0 {
 			return nil, worktreeShowOut{}, fmt.Errorf("no worktree matches %q", in.Name)
 		}
@@ -797,11 +812,17 @@ func worktreeShowTool(ctx context.Context, _ *mcpsdk.CallToolRequest, in worktre
 		}
 	}
 
-	ports, _ := st.LoadWorktreePorts(ctx, id)
-	branchScoped, _ := st.ListActiveBranches(ctx, id)
+	ports, err := st.LoadWorktreePorts(ctx, id)
+	if err != nil {
+		return nil, worktreeShowOut{}, fmt.Errorf("load the ports of worktree #%d: %w", id, err)
+	}
+	branchScoped, err := st.ListActiveBranches(ctx, id)
+	if err != nil {
+		return nil, worktreeShowOut{}, fmt.Errorf("list the branch_scoped databases of worktree #%d: %w", id, err)
+	}
 	events, err := st.QueryEvents(ctx, store.EventFilter{WorktreeID: id, Limit: 50, HydrateWT: false})
 	if err != nil {
-		return nil, worktreeShowOut{}, err
+		return nil, worktreeShowOut{}, fmt.Errorf("read the recent events of worktree #%d: %w", id, err)
 	}
 	return nil, worktreeShowOut{Worktree: w, Ports: ports, BranchScoped: branchScoped, Recent: store.EventsJSON(events)}, nil
 }
@@ -893,27 +914,6 @@ func clampLogLimit(limit int) int {
 	return limit
 }
 
-// applyLogRepoScope resolves in.Repo/in.Worktree into RepoID/WorktreeID on f.
-func applyLogRepoScope(ctx context.Context, st *store.Store, in logsQueryIn, f *store.EventFilter) error {
-	if in.Repo == "" && in.Worktree == "" {
-		return nil
-	}
-	repoRoot, err := resolveRepo(ctx, in.Repo)
-	if err == nil && repoRoot != "" {
-		if rid, err := lookupRepoID(ctx, st, repoRoot); err == nil {
-			f.RepoID = rid
-		}
-	}
-	if in.Worktree != "" {
-		wid, _ := st.LookupWorktreeID(ctx, f.RepoID, in.Worktree)
-		if wid == 0 {
-			return fmt.Errorf("no worktree matches %q", in.Worktree)
-		}
-		f.WorktreeID = wid
-	}
-	return nil
-}
-
 // filterEventsByRegex keeps events whose message or payload matches re,
 // capping the result at limit.
 func filterEventsByRegex(events []store.Event, re *regexp.Regexp, limit int) []store.Event {
@@ -970,7 +970,7 @@ func logsQueryTool(ctx context.Context, _ *mcpsdk.CallToolRequest, in logsQueryI
 		return nil, logsQueryOut{}, err
 	}
 	defer func() { _ = st.Close() }()
-	if err := applyLogRepoScope(ctx, st, in, &f); err != nil {
+	if err := applyRepoWorktreeFilter(ctx, st, &f, in.Repo, in.Worktree); err != nil {
 		return nil, logsQueryOut{}, err
 	}
 	events, err := st.QueryEvents(ctx, f)
@@ -1031,9 +1031,11 @@ func applyRepoWorktreeFilter(ctx context.Context, st *store.Store, f *store.Even
 		}
 		f.RepoID = rid
 	} else if repoRoot, err := resolveRepo(ctx, ""); err == nil {
-		if rid, err := lookupRepoID(ctx, st, repoRoot); err == nil {
-			f.RepoID = rid
+		rid, err := st.LookupRepoID(ctx, repoRoot)
+		if err != nil {
+			return fmt.Errorf("look up workspace repo %s: %w", repoRoot, err)
 		}
+		f.RepoID = rid
 	}
 	if worktree != "" {
 		wid, err := st.LookupWorktreeID(ctx, f.RepoID, worktree)
@@ -1078,7 +1080,10 @@ func logsHooksTool(ctx context.Context, _ *mcpsdk.CallToolRequest, in logsHooksI
 	if err != nil {
 		return nil, logsHooksOut{}, fmt.Errorf("lookup repo %s: %w", repoRoot, err)
 	}
-	wid, _ := st.LookupWorktreeID(ctx, repoID, in.Worktree)
+	wid, err := st.LookupWorktreeID(ctx, repoID, in.Worktree)
+	if err != nil {
+		return nil, logsHooksOut{}, fmt.Errorf("look up worktree %q in %s: %w", in.Worktree, repoRoot, err)
+	}
 	if wid == 0 {
 		return nil, logsHooksOut{}, fmt.Errorf("no worktree matches %q", in.Worktree)
 	}
@@ -1172,8 +1177,9 @@ type snapshotsListRow struct {
 	Spares int `json:"spares,omitempty"`
 }
 type snapshotsListOut struct {
-	Repo      string             `json:"repo"`
-	Snapshots []snapshotsListRow `json:"snapshots"`
+	Repo        string             `json:"repo"`
+	Snapshots   []snapshotsListRow `json:"snapshots"`
+	SparesError string             `json:"spares_error,omitempty" jsonschema:"why the pre-warmed spare counts could not be read; spares are unknown (not zero) when set"`
 }
 
 func snapshotsListTool(
@@ -1219,14 +1225,7 @@ func collectRepoSnapshots(ctx context.Context, repo string, limit int) (snapshot
 	if len(cands) > limit {
 		cands = cands[:limit]
 	}
-	// Best-effort spare-pool counts: an unreachable engine just leaves
-	// the field zero.
-	spares := map[string]int{}
-	if cfg, lerr := resolve.LoadResolved(repoRoot); lerr == nil {
-		if sc, serr := snapshot.SpareCounts(ctx, &cfg); serr == nil {
-			spares = sc
-		}
-	}
+	spares, sparesErr := spareCounts(ctx, repoRoot)
 	rows := make([]snapshotsListRow, 0, len(cands))
 	for _, c := range cands {
 		rows = append(rows, snapshotsListRow{
@@ -1237,7 +1236,23 @@ func collectRepoSnapshots(ctx context.Context, repo string, limit int) (snapshot
 			Spares:       spares[c.TemplateName],
 		})
 	}
-	return snapshotsListOut{Repo: repoRoot, Snapshots: rows}, nil
+	out := snapshotsListOut{Repo: repoRoot, Snapshots: rows}
+	if sparesErr != nil {
+		out.SparesError = sparesErr.Error()
+	}
+	return out, nil
+}
+
+func spareCounts(ctx context.Context, repoRoot string) (map[string]int, error) {
+	cfg, err := resolve.LoadResolved(repoRoot)
+	if err != nil {
+		return nil, fmt.Errorf("load config of %s to count spares: %w", repoRoot, err)
+	}
+	counts, err := snapshot.SpareCounts(ctx, &cfg)
+	if err != nil {
+		return nil, fmt.Errorf("count pre-warmed spares of %s: %w", repoRoot, err)
+	}
+	return counts, nil
 }
 
 // daemonStateIn — no inputs; the snapshot is always whole-daemon.

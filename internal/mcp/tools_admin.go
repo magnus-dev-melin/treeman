@@ -190,15 +190,22 @@ func mainWorktreeStatus(ctx context.Context, repoRoot string) (*mcpsdk.CallToolR
 	}
 	out := mainWorktreeOut{Action: "status", Repo: repoRoot, Enabled: cfg.MainWorktree.Enabled, CurrentBranch: detectBranch(repoRoot)}
 	st, err := openStore(ctx)
-	if err == nil {
-		defer func() { _ = st.Close() }()
-		if repoID, err := st.EnsureRepo(ctx, repoRoot, filepath.Base(repoRoot)); err == nil && repoID != 0 {
-			if row, err := st.LookupMainWorktree(ctx, repoID); err == nil {
-				out.EnrolledSlug = row.Slug
-				out.EnrolledRowID = row.ID
-			}
-		}
+	if err != nil {
+		return nil, mainWorktreeOut{}, fmt.Errorf("open the store for the main worktree status of %s: %w", repoRoot, err)
 	}
+	defer func() { _ = st.Close() }()
+	repoID, err := st.LookupRepoID(ctx, repoRoot)
+	if err != nil {
+		return nil, mainWorktreeOut{}, fmt.Errorf("look up repo %s: %w", repoRoot, err)
+	}
+	if repoID == 0 {
+		return nil, out, nil
+	}
+	row, err := st.LookupMainWorktree(ctx, repoID)
+	if err != nil {
+		return nil, mainWorktreeOut{}, fmt.Errorf("look up the enrolled main worktree of %s: %w", repoRoot, err)
+	}
+	out.EnrolledSlug, out.EnrolledRowID = row.Slug, row.ID
 	return nil, out, nil
 }
 

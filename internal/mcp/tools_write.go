@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -332,21 +333,30 @@ func configWriteTool(ctx context.Context, _ *mcpsdk.CallToolRequest, in configWr
 	return nil, configWriteOut{Path: target, Scope: layer, Bytes: len(in.Body)}, nil
 }
 
-// atomicWrite stashes the current on-disk content of path as a new
-// per-repo config generation in SQLite (best-effort — a store failure
-// must not block the edit), then atomically writes the new bytes. MCP
-// mutations (config_write, config_set) thus leave a recoverable history
-// reachable via `treeman config history|restore`, instead of dropping
-// `.treeman.yaml.bak.*` files in the project root.
 func atomicWrite(repoRoot, path string, data []byte) error {
-	if prev, err := os.ReadFile(path); err == nil {
-		ctx := context.Background()
-		if st, err := openStore(ctx); err == nil {
-			_, _ = st.SnapshotConfig(ctx, repoRoot, path, prev)
-			_ = st.Close()
+	prev, err := os.ReadFile(path)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+	case err != nil:
+		return fmt.Errorf("read %s before replacing it: %w", path, err)
+	default:
+		if err := snapshotConfig(context.Background(), repoRoot, path, prev); err != nil {
+			return err
 		}
 	}
 	return atomicfile.Write(path, data, 0o600)
+}
+
+func snapshotConfig(ctx context.Context, repoRoot, path string, prev []byte) error {
+	st, err := openStore(ctx)
+	if err != nil {
+		return fmt.Errorf("open the store to snapshot %s before changing it: %w", path, err)
+	}
+	defer func() { _ = st.Close() }()
+	if _, err := st.SnapshotConfig(ctx, repoRoot, path, prev); err != nil {
+		return fmt.Errorf("snapshot %s before changing it (nothing was changed): %w", path, err)
+	}
+	return nil
 }
 
 // ─── init_repo / schema_install ───────────────────────────────────
@@ -559,8 +569,10 @@ func registryUnregisterTool(
 	if wtID == 0 {
 		return nil, registryUnregisterOut{}, fmt.Errorf("no worktree matches %q", in.Name)
 	}
-	var path string
-	_ = st.DB.QueryRowContext(ctx, `SELECT path FROM worktrees WHERE id = ?`, wtID).Scan(&path)
+	path, err := st.WorktreePathByID(ctx, wtID)
+	if err != nil {
+		return nil, registryUnregisterOut{}, fmt.Errorf("read the path of worktree %q (#%d): %w", in.Name, wtID, err)
+	}
 	if in.DryRun {
 		return nil, registryUnregisterOut{WorktreeID: wtID, Path: path, DryRun: true}, nil
 	}
@@ -1256,8 +1268,11 @@ func configRestoreTool(
 	}
 	g, err := st.GetConfigGeneration(ctx, histRoot, p, in.Generation)
 	_ = st.Close()
-	if err != nil {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, configRestoreOut{}, fmt.Errorf("generation %d not found for %s", in.Generation, p)
+	}
+	if err != nil {
+		return nil, configRestoreOut{}, fmt.Errorf("read generation %d of %s: %w", in.Generation, p, err)
 	}
 	if err := config.CheckBodyScope(g.Content, layer); err != nil {
 		return nil, configRestoreOut{}, fmt.Errorf("generation %d cannot be restored: %w", in.Generation, err)
@@ -1428,8 +1443,11 @@ func repairSnapshots(ctx context.Context, st *store.Store, cfg *config.Config, r
 	}
 	orphans := 0
 	for _, r := range rows {
-		exists, _, _ := probeTemplate(ctx, cfg, r.Engine, r.Connection, r.TemplateName)
-		if !exists {
+		probe, err := probeTemplate(ctx, cfg, r.Engine, r.Connection, r.TemplateName)
+		if err != nil {
+			return repairAction{Action: "snapshots", Status: "fail", Detail: err.Error()}
+		}
+		if !probe.exists {
 			orphans++
 		}
 	}
@@ -1465,10 +1483,12 @@ func countCascadedRows(ctx context.Context, repoRoot string) (map[string]int, er
 		"worktrees": `SELECT COUNT(*) FROM worktrees WHERE repo_id = ?`,
 		"events":    `SELECT COUNT(*) FROM events WHERE repo_id = ?`,
 		"snapshots": `SELECT COUNT(*) FROM snapshots WHERE repo_id = ?`,
-		"hook_runs": `SELECT COUNT(*) FROM hook_runs WHERE repo_id = ?`,
+		"hook_runs": `SELECT COUNT(*) FROM hook_runs WHERE worktree_id IN (SELECT id FROM worktrees WHERE repo_id = ?)`,
 	} {
 		var n int
-		_ = st.DB.QueryRowContext(ctx, q, repoID).Scan(&n)
+		if err := st.DB.QueryRowContext(ctx, q, repoID).Scan(&n); err != nil {
+			return nil, fmt.Errorf("count the %s rows of %s: %w", tbl, repoRoot, err)
+		}
 		counts[tbl] = n
 	}
 	return counts, nil
@@ -1500,7 +1520,10 @@ func planWorktreeDelete(ctx context.Context, repoRoot, target string) (worktreeD
 		return out, fmt.Errorf("load resolved config: %w", err)
 	}
 	branch := detectBranch(wtPath)
-	repoID, _ := st.EnsureRepo(ctx, repoRoot, filepath.Base(repoRoot))
+	repoID, err := st.EnsureRepo(ctx, repoRoot, filepath.Base(repoRoot))
+	if err != nil {
+		return out, fmt.Errorf("register repo %s: %w", repoRoot, err)
+	}
 	id, err := wt.ResolveIdentity(ctx, st, &cfg, repoRoot, wtPath, branch, repoID)
 	if err != nil {
 		return out, fmt.Errorf("resolve identity: %w", err)
@@ -1512,9 +1535,11 @@ func planWorktreeDelete(ctx context.Context, repoRoot, target string) (worktreeD
 		if tmpl == "" {
 			tmpl = d.KeyPrefix
 		}
-		if rendered, rErr := template.Render(tmpl, tplCtx); rErr == nil {
-			entry.Name = rendered
+		rendered, err := template.Render(tmpl, tplCtx)
+		if err != nil {
+			return out, fmt.Errorf("render the %s database name %q: %w", d.Engine, tmpl, err)
 		}
+		entry.Name = rendered
 		out.WouldDropDBs = append(out.WouldDropDBs, entry)
 	}
 	return out, nil

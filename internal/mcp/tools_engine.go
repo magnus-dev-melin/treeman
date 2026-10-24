@@ -22,6 +22,7 @@ import (
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 	"gopkg.in/yaml.v3"
 
@@ -124,6 +125,22 @@ type engineProbeResult struct {
 	Error      string         `json:"error,omitempty"`
 }
 
+func (r *engineProbeResult) addError(what string, err error) {
+	if r.Error != "" {
+		r.Error += "; "
+	}
+	r.Error += what + ": " + err.Error()
+}
+
+func (r *engineProbeResult) readVersion(ctx context.Context, version func(context.Context) (string, error)) {
+	v, err := version(ctx)
+	if err != nil {
+		r.addError("read engine version", err)
+		return
+	}
+	r.Version = v
+}
+
 func engineStatusTool(ctx context.Context, _ *mcpsdk.CallToolRequest, in engineStatusIn) (*mcpsdk.CallToolResult, engineStatusOut, error) {
 	cfg, err := loadCfgForRepo(ctx, in.Repo)
 	if err != nil {
@@ -161,8 +178,12 @@ func probeMySQL(ctx context.Context, cfg *config.Config) engineProbeResult {
 	}
 	defer func() { _ = drv.Close() }()
 	r.Reachable = true
-	r.Version, _ = drv.EngineVersion(ctx)
-	dbs, _ := listMysqlDatabases(ctx, drv)
+	r.readVersion(ctx, drv.EngineVersion)
+	dbs, err := listMysqlDatabases(ctx, drv)
+	if err != nil {
+		r.addError("list databases", err)
+		return r
+	}
 	r.Detail = databasesDetail(dbs)
 	return r
 }
@@ -180,8 +201,12 @@ func probePostgres(ctx context.Context, cfg *config.Config) engineProbeResult {
 	}
 	defer func() { _ = drv.Close() }()
 	r.Reachable = true
-	r.Version, _ = drv.EngineVersion(ctx)
-	dbs, _ := listPostgresDatabases(ctx, drv)
+	r.readVersion(ctx, drv.EngineVersion)
+	dbs, err := listPostgresDatabases(ctx, drv)
+	if err != nil {
+		r.addError("list databases", err)
+		return r
+	}
 	r.Detail = databasesDetail(dbs)
 	return r
 }
@@ -199,11 +224,13 @@ func probeMongo(ctx context.Context, cfg *config.Config) engineProbeResult {
 	}
 	defer func() { _ = drv.Close(ctx) }()
 	r.Reachable = true
-	r.Version, _ = drv.EngineVersion(ctx)
+	r.readVersion(ctx, drv.EngineVersion)
 	dbs, err := drv.Client.ListDatabaseNames(ctx, bson.D{})
-	if err == nil {
-		r.Detail = databasesDetail(dbs)
+	if err != nil {
+		r.addError("list databases", err)
+		return r
 	}
+	r.Detail = databasesDetail(dbs)
 	return r
 }
 
@@ -220,12 +247,14 @@ func probeRedis(ctx context.Context, cfg *config.Config) engineProbeResult {
 	}
 	defer func() { _ = drv.Close() }()
 	r.Reachable = true
-	r.Version, _ = drv.EngineVersion(ctx)
+	r.readVersion(ctx, drv.EngineVersion)
 	c := drv.Client()
 	dbsize, err := c.DBSize(ctx).Result()
-	if err == nil {
-		r.Detail = map[string]any{"db0_keys": dbsize}
+	if err != nil {
+		r.addError("count keys", err)
+		return r
 	}
+	r.Detail = map[string]any{"db0_keys": dbsize}
 	return r
 }
 
@@ -241,8 +270,12 @@ func probeES(ctx context.Context, cfg *config.Config) engineProbeResult {
 		return r
 	}
 	r.Reachable = true
-	r.Version, _ = drv.EngineVersion(ctx)
-	indices, _ := drv.ListMatching(ctx, "")
+	r.readVersion(ctx, drv.EngineVersion)
+	indices, err := drv.ListMatching(ctx, "")
+	if err != nil {
+		r.addError("list indices", err)
+		return r
+	}
 	var app, internal []string
 	for _, idx := range indices {
 		if isESInternalIndex(idx) {
@@ -271,7 +304,7 @@ func probeS3(ctx context.Context, cfg *config.Config) engineProbeResult {
 		return r
 	}
 	r.Reachable = true
-	r.Version, _ = drv.EngineVersion(ctx)
+	r.readVersion(ctx, drv.EngineVersion)
 
 	// Restrict the listing to the literal prefix(es) carried by the
 	// configured s3 databases. ListBuckets returns the whole AWS
@@ -283,7 +316,7 @@ func probeS3(ctx context.Context, cfg *config.Config) engineProbeResult {
 	for _, p := range prefixes {
 		matches, err := drv.ListMatching(ctx, p)
 		if err != nil {
-			r.Error = err.Error()
+			r.addError("list buckets under "+p, err)
 			return r
 		}
 		for _, b := range matches {
@@ -640,7 +673,10 @@ func execSQL(ctx context.Context, db sqlSession, q string) ([]any, *int64, error
 	if err != nil {
 		return nil, nil, err
 	}
-	aff, _ := res.RowsAffected()
+	aff, err := res.RowsAffected()
+	if err != nil {
+		return nil, nil, fmt.Errorf("read rows affected: %w", err)
+	}
 	row := map[string]any{"rows_affected": aff}
 	if id, err := res.LastInsertId(); err == nil && id > 0 {
 		row["last_insert_id"] = id
@@ -799,7 +835,10 @@ func dbQueryES(ctx context.Context, cfg *config.Config, in dbQueryIn) ([]any, er
 		return nil, err
 	}
 	defer func() { _ = resp.Body.Close() }()
-	buf, _ := io.ReadAll(resp.Body)
+	buf, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read es _search response from %s: %w", idx, err)
+	}
 	if resp.StatusCode >= 400 {
 		return nil, fmt.Errorf("es _search: %s: %s", resp.Status, string(buf))
 	}
@@ -872,32 +911,40 @@ type esRequestOut struct {
 // treeman. Reads (GET/HEAD, and POST to read endpoints) run freely;
 // mutations require write=true+ack so an agent can't drop an index by
 // accident.
-func esRequestTool(ctx context.Context, _ *mcpsdk.CallToolRequest, in esRequestIn) (*mcpsdk.CallToolResult, esRequestOut, error) {
-	method := strings.ToUpper(strings.TrimSpace(in.Method))
+func esRequestTarget(in esRequestIn) (method, path string, err error) {
+	method = strings.ToUpper(strings.TrimSpace(in.Method))
 	if method == "" {
 		method = http.MethodGet
 	}
 	switch method {
 	case http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut, http.MethodDelete:
 	default:
-		return nil, esRequestOut{}, fmt.Errorf("unsupported method %q (want GET|HEAD|POST|PUT|DELETE)", method)
+		return "", "", fmt.Errorf("unsupported method %q (want GET|HEAD|POST|PUT|DELETE)", method)
 	}
-	path := strings.TrimPrefix(strings.TrimSpace(in.Path), "/")
+	path = strings.TrimPrefix(strings.TrimSpace(in.Path), "/")
 	if path == "" {
-		return nil, esRequestOut{}, errors.New("path is required")
+		return "", "", errors.New("path is required")
 	}
 	read, err := esIsReadRequest(method, path)
 	if err != nil {
-		return nil, esRequestOut{}, err
+		return "", "", err
 	}
-	// A non-read request is a mutation — gate it behind write+ack.
-	if !read {
-		if !in.Write {
-			return nil, esRequestOut{}, fmt.Errorf("%s /%s looks like a write — set write=true (and ack=true) to run it", method, path)
-		}
-		if !in.Ack {
-			return nil, esRequestOut{}, errors.New("write=true requires ack=true (you are about to mutate the live cluster)")
-		}
+	if read {
+		return method, path, nil
+	}
+	if !in.Write {
+		return "", "", fmt.Errorf("%s /%s looks like a write — set write=true (and ack=true) to run it", method, path)
+	}
+	if !in.Ack {
+		return "", "", errors.New("write=true requires ack=true (you are about to mutate the live cluster)")
+	}
+	return method, path, nil
+}
+
+func esRequestTool(ctx context.Context, _ *mcpsdk.CallToolRequest, in esRequestIn) (*mcpsdk.CallToolResult, esRequestOut, error) {
+	method, path, err := esRequestTarget(in)
+	if err != nil {
+		return nil, esRequestOut{}, err
 	}
 	cfg, err := loadCfgForRepo(ctx, in.Repo)
 	if err != nil {
@@ -932,7 +979,10 @@ func esRequestTool(ctx context.Context, _ *mcpsdk.CallToolRequest, in esRequestI
 		return nil, esRequestOut{}, err
 	}
 	defer func() { _ = resp.Body.Close() }()
-	buf, _ := io.ReadAll(resp.Body)
+	buf, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, esRequestOut{}, fmt.Errorf("read es %s /%s response: %w", method, path, err)
+	}
 	out := esRequestOut{Status: resp.StatusCode, Method: method, Path: path, Wrote: in.Write}
 	var parsed any
 	if json.Unmarshal(buf, &parsed) == nil {
@@ -1004,6 +1054,7 @@ type snapshotInspectOut struct {
 	TemplateExists   bool           `json:"template_exists"`
 	TemplateSizeKB   int64          `json:"template_size_kb,omitempty"`
 	EngineVersionNow string         `json:"engine_version_now,omitempty"`
+	ProbeError       string         `json:"probe_error,omitempty"        jsonschema:"why the engine-side template could not be checked; template_exists is unknown when set"`
 }
 
 func snapshotInspectTool(
@@ -1034,9 +1085,16 @@ func snapshotInspectTool(
 	out := snapshotInspectOut{Record: snapshotRecordToMap(rec)}
 
 	cfg, err := loadCfgForRepo(ctx, in.Repo)
-	if err == nil {
-		out.TemplateExists, out.TemplateSizeKB, out.EngineVersionNow = probeTemplate(ctx, cfg, rec.Engine, rec.Connection, rec.TemplateName)
+	if err != nil {
+		out.ProbeError = "load config: " + err.Error()
+		return nil, out, nil
 	}
+	probe, err := probeTemplate(ctx, cfg, rec.Engine, rec.Connection, rec.TemplateName)
+	if err != nil {
+		out.ProbeError = err.Error()
+		return nil, out, nil
+	}
+	out.TemplateExists, out.TemplateSizeKB, out.EngineVersionNow = probe.exists, probe.sizeKB, probe.version
 	return nil, out, nil
 }
 
@@ -1206,7 +1264,10 @@ func dbDumpTool(ctx context.Context, _ *mcpsdk.CallToolRequest, in dbDumpIn) (*m
 	}
 	outDir := in.OutputDir
 	if outDir == "" {
-		repoRoot, _ := resolveRepo(ctx, in.Repo)
+		repoRoot, err := resolveRepo(ctx, in.Repo)
+		if err != nil {
+			return nil, dbDumpOut{}, fmt.Errorf("resolve the repo for the default dump directory (pass output_dir to choose one): %w", err)
+		}
 		outDir = filepath.Join(repoRoot, "storage", "dumps")
 	}
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
@@ -1335,7 +1396,9 @@ func listMysqlDatabases(ctx context.Context, drv *dbmysql.Driver) ([]string, err
 	var out []string
 	for rows.Next() {
 		var s string
-		_ = rows.Scan(&s)
+		if err := rows.Scan(&s); err != nil {
+			return nil, fmt.Errorf("scan database name: %w", err)
+		}
 		out = append(out, s)
 	}
 	if err := rows.Err(); err != nil {
@@ -1357,7 +1420,9 @@ func listPostgresDatabases(ctx context.Context, drv *dbpostgres.Driver) ([]strin
 	var out []string
 	for rows.Next() {
 		var s string
-		_ = rows.Scan(&s)
+		if err := rows.Scan(&s); err != nil {
+			return nil, fmt.Errorf("scan database name: %w", err)
+		}
 		out = append(out, s)
 	}
 	if err := rows.Err(); err != nil {
@@ -1384,7 +1449,9 @@ func mysqlSchema(ctx context.Context, drv *dbmysql.Driver, db string) (map[strin
 	var names []string
 	for rows.Next() {
 		var n string
-		_ = rows.Scan(&n)
+		if err := rows.Scan(&n); err != nil {
+			return nil, fmt.Errorf("scan table name of %s: %w", db, err)
+		}
 		names = append(names, n)
 	}
 	if err := rows.Err(); err != nil {
@@ -1393,15 +1460,12 @@ func mysqlSchema(ctx context.Context, drv *dbmysql.Driver, db string) (map[strin
 	for _, n := range names {
 		qn, err := ident.QuoteMySQL(n)
 		if err != nil {
-			// Defensive: information_schema returned a name that
-			// fails our identifier rules. Skip it rather than
-			// inject — operator should investigate.
-			continue
+			return nil, fmt.Errorf("table %q of %s: %w", n, db, err)
 		}
 		row := drv.DB.QueryRowContext(ctx, "SHOW CREATE TABLE "+qdb+"."+qn)
 		var gotName, ddl string
 		if err := row.Scan(&gotName, &ddl); err != nil {
-			continue
+			return nil, fmt.Errorf("SHOW CREATE TABLE %s.%s: %w", qdb, qn, err)
 		}
 		tables[n] = ddl
 	}
@@ -1428,7 +1492,9 @@ func postgresSchema(ctx context.Context, drv *dbpostgres.Driver, db string) (map
 	var tables []tablePair
 	for rows.Next() {
 		var p tablePair
-		_ = rows.Scan(&p.schema, &p.name)
+		if err := rows.Scan(&p.schema, &p.name); err != nil {
+			return nil, fmt.Errorf("scan table name of %s: %w", db, err)
+		}
 		tables = append(tables, p)
 	}
 	if err := rows.Err(); err != nil {
@@ -1436,20 +1502,16 @@ func postgresSchema(ctx context.Context, drv *dbpostgres.Driver, db string) (map
 	}
 	schema := map[string]any{}
 	for _, t := range tables {
-		cols, ok := postgresTableColumns(ctx, scoped, t.schema, t.name)
-		if !ok {
-			continue
+		cols, err := postgresTableColumns(ctx, scoped, t.schema, t.name)
+		if err != nil {
+			return nil, fmt.Errorf("columns of %s.%s in %s: %w", t.schema, t.name, db, err)
 		}
 		schema[t.schema+"."+t.name] = cols
 	}
 	return map[string]any{"tables": schema}, nil
 }
 
-// postgresTableColumns reads one table's column metadata. ok is false
-// when the column query fails, so the caller can omit the table from
-// the schema map (a partial schema is better than aborting the whole
-// dump for one unreadable table).
-func postgresTableColumns(ctx context.Context, scoped *sql.DB, schema, name string) ([]map[string]any, bool) {
+func postgresTableColumns(ctx context.Context, scoped *sql.DB, schema, name string) ([]map[string]any, error) {
 	colRows, err := scoped.QueryContext(ctx, `
 		SELECT column_name, data_type, is_nullable, column_default
 		FROM information_schema.columns
@@ -1457,24 +1519,23 @@ func postgresTableColumns(ctx context.Context, scoped *sql.DB, schema, name stri
 		ORDER BY ordinal_position
 	`, schema, name)
 	if err != nil {
-		return nil, false
+		return nil, err
 	}
 	defer func() { _ = colRows.Close() }()
 	var cols []map[string]any
 	for colRows.Next() {
 		var colName, dtype, nullable string
 		var def sql.NullString
-		_ = colRows.Scan(&colName, &dtype, &nullable, &def)
+		if err := colRows.Scan(&colName, &dtype, &nullable, &def); err != nil {
+			return nil, err
+		}
 		cols = append(cols, map[string]any{
 			"name": colName, "type": dtype,
 			"nullable": nullable == "YES",
 			"default":  def.String,
 		})
 	}
-	if err := colRows.Err(); err != nil {
-		return nil, false
-	}
-	return cols, true
+	return cols, colRows.Err()
 }
 
 func mongoSchema(ctx context.Context, drv *dbmongo.Driver, db string) (map[string]any, error) {
@@ -1486,7 +1547,10 @@ func mongoSchema(ctx context.Context, drv *dbmongo.Driver, db string) (map[strin
 	samples := map[string]any{}
 	for _, c := range cols {
 		var doc bson.M
-		_ = drv.Client.Database(db).Collection(c).FindOne(ctx, struct{}{}).Decode(&doc)
+		err := drv.Client.Database(db).Collection(c).FindOne(ctx, struct{}{}).Decode(&doc)
+		if err != nil && !errors.Is(err, mongo.ErrNoDocuments) {
+			return nil, fmt.Errorf("sample a document of %s.%s: %w", db, c, err)
+		}
 		samples[c] = doc
 	}
 	return map[string]any{"collections": cols, "samples": samples}, nil
@@ -1506,9 +1570,17 @@ func esSchema(ctx context.Context, drv *dbes.Driver, indexPattern string) (map[s
 		return nil, err
 	}
 	defer func() { _ = resp.Body.Close() }()
-	body, _ := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read es mappings of %s: %w", target, err)
+	}
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("es mappings of %s: %s: %s", target, resp.Status, string(body))
+	}
 	var parsed map[string]any
-	_ = json.Unmarshal(body, &parsed)
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return nil, fmt.Errorf("parse es mappings of %s: %w", target, err)
+	}
 	return map[string]any{"mappings": parsed}, nil
 }
 
@@ -1582,7 +1654,10 @@ func runSQLQuery(ctx context.Context, tx *sql.Tx, q string, limit int) ([]any, [
 		return nil, nil, err
 	}
 	defer func() { _ = rows.Close() }()
-	cols, _ := rows.Columns()
+	cols, err := rows.Columns()
+	if err != nil {
+		return nil, nil, fmt.Errorf("read result columns: %w", err)
+	}
 	out := []any{}
 	for rows.Next() {
 		if len(out) >= limit {

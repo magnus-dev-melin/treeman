@@ -171,8 +171,11 @@ func TestRepoRemove_DryRunCountsRows(t *testing.T) {
 		t.Fatal(err)
 	}
 	repoID, _ := s.EnsureRepo(ctx, repo, filepath.Base(repo))
-	_, _ = s.EnsureWorktree(ctx, repoID, filepath.Join(repo, ".wt", "x"), "x", "main")
+	wtID, _ := s.EnsureWorktree(ctx, repoID, filepath.Join(repo, ".wt", "x"), "x", "main")
 	_ = s.WriteEvent(ctx, store.LevelInfo, "demo", "msg", repoID, 0, "", 0, nil)
+	if _, err := s.WriteHookRun(ctx, wtID, "create-before-engines", 0, "true", 1, 2, 0, "", ""); err != nil {
+		t.Fatal(err)
+	}
 	_ = s.Close()
 
 	_, out, err := repoRemoveTool(ctx, nil, repoRemoveIn{
@@ -190,6 +193,9 @@ func TestRepoRemove_DryRunCountsRows(t *testing.T) {
 	}
 	if out.WouldDrop["events"] < 1 {
 		t.Errorf("WouldDrop[events] = %d, want ≥ 1", out.WouldDrop["events"])
+	}
+	if out.WouldDrop["hook_runs"] != 1 {
+		t.Errorf("WouldDrop[hook_runs] = %d, want 1", out.WouldDrop["hook_runs"])
 	}
 
 	// Verify the repo row is still on disk.

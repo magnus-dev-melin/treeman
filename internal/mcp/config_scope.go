@@ -237,9 +237,8 @@ func configDeleteTool(ctx context.Context, _ *mcpsdk.CallToolRequest, in configD
 	}
 	// Snapshot the content first so the delete is reversible via
 	// config_restore, then remove the file.
-	if st, serr := openStore(ctx); serr == nil {
-		_, _ = st.SnapshotConfig(ctx, histRoot, target, prev)
-		_ = st.Close()
+	if err := snapshotConfig(ctx, histRoot, target, prev); err != nil {
+		return nil, configDeleteOut{}, err
 	}
 	if err := os.Remove(target); err != nil {
 		return nil, configDeleteOut{}, fmt.Errorf("delete %s: %w", target, err)

@@ -18,7 +18,6 @@ import (
 	"github.com/stubbedev/treeman/internal/hooks"
 	"github.com/stubbedev/treeman/internal/prepare"
 	"github.com/stubbedev/treeman/internal/resolve"
-	"github.com/stubbedev/treeman/internal/slug"
 	"github.com/stubbedev/treeman/internal/store"
 	wtpkg "github.com/stubbedev/treeman/internal/wt"
 )
@@ -196,20 +195,22 @@ func openStore(ctx context.Context) (*store.Store, error) {
 	return store.Open(ctx, p)
 }
 
-// runPrepare is the self-contained equivalent of cmd's
-// RunPrepareOnWorktree. Discovers repo + cfg, opens the store,
-// dispatches prepare.Run.
-func runPrepare(ctx context.Context, worktree, repoOverride string) ([]prepare.Outcome, error) {
+type worktreeScope struct {
+	wt, repoRoot string
+	cfg          config.Config
+	st           *store.Store
+	repoID       int64
+	id           wtpkg.Identity
+}
+
+func openWorktreeScope(ctx context.Context, worktree, repoOverride string) (*worktreeScope, error) {
 	wt, branch, err := resolveWorktree(ctx, worktree)
 	if err != nil {
 		return nil, err
 	}
-	repoRoot, err := resolveRepo(ctx, repoOverride)
+	repoRoot, err := worktreeRepoRoot(ctx, wt, repoOverride)
 	if err != nil {
-		repoRoot, err = gitenv.MainRoot(ctx, wt)
-		if err != nil {
-			return nil, err
-		}
+		return nil, err
 	}
 	cfg, err := resolve.LoadResolved(repoRoot)
 	if err != nil {
@@ -217,24 +218,39 @@ func runPrepare(ctx context.Context, worktree, repoOverride string) ([]prepare.O
 	}
 	st, err := openStore(ctx)
 	if err != nil {
+		return nil, fmt.Errorf("open the store for worktree %s: %w", wt, err)
+	}
+	repoID, err := st.EnsureRepo(ctx, repoRoot, filepath.Base(repoRoot))
+	if err != nil {
+		_ = st.Close()
+		return nil, fmt.Errorf("register repo %s: %w", repoRoot, err)
+	}
+	id, err := wtpkg.ResolveIdentity(ctx, st, &cfg, repoRoot, wt, branch, repoID)
+	if err != nil {
+		_ = st.Close()
 		return nil, err
 	}
-	defer func() { _ = st.Close() }()
-	repoID, _ := st.EnsureRepo(ctx, repoRoot, filepath.Base(repoRoot))
-	// Route through ResolveIdentity so MCP matches the daemon + CLI: the
-	// main-worktree overlay is applied (bare active DB name) and a linked
-	// worktree's slug is its branch-independent path slug. Required for
-	// branch_scoped to keep a stable active namespace across an in-worktree
-	// checkout — bare slug.For(wt, branch) would churn the namespace.
-	id, err := wtpkg.ResolveIdentity(ctx, st, &cfg, repoRoot, wt, branch, repoID)
+	return &worktreeScope{wt: wt, repoRoot: repoRoot, cfg: cfg, st: st, repoID: repoID, id: id}, nil
+}
+
+func worktreeRepoRoot(ctx context.Context, wt, repoOverride string) (string, error) {
+	if repoOverride != "" {
+		return resolveRepo(ctx, repoOverride)
+	}
+	return gitenv.MainRoot(ctx, wt)
+}
+
+func runPrepare(ctx context.Context, worktree, repoOverride string) ([]prepare.Outcome, error) {
+	sc, err := openWorktreeScope(ctx, worktree, repoOverride)
 	if err != nil {
 		return nil, err
 	}
-	outs, err := prepare.Run(ctx, &cfg, wt, id.Slug, st, repoID, id.WtID, captureEnv())
+	defer func() { _ = sc.st.Close() }()
+	outs, err := prepare.Run(ctx, &sc.cfg, sc.wt, sc.id.Slug, sc.st, sc.repoID, sc.id.WtID, captureEnv())
 	if err != nil {
 		return outs, err
 	}
-	if err := runPostEngineHooks(ctx, st, &cfg, repoRoot, wt, id.Slug.Value, id.IsMain, repoID, id.WtID); err != nil {
+	if err := runPostEngineHooks(ctx, sc); err != nil {
 		return outs, err
 	}
 	return outs, nil
@@ -244,21 +260,14 @@ func runPrepare(ctx context.Context, worktree, repoOverride string) ([]prepare.O
 // prepare/db_reset, mirroring the daemon pipeline's post-hook step —
 // these paths mutate engine content just like finalize, so hooks that
 // react to fresh data (cache flushes) must run here too.
-func runPostEngineHooks(
-	ctx context.Context,
-	st *store.Store,
-	cfg *config.Config,
-	repoRoot, wtRoot, slugVal string,
-	isMain bool,
-	repoID, wtID int64,
-) error {
-	actions := cfg.Hooks.OnCreateAfterEngines
+func runPostEngineHooks(ctx context.Context, sc *worktreeScope) error {
+	actions := sc.cfg.Hooks.OnCreateAfterEngines
 	if len(actions) == 0 {
 		return nil
 	}
-	started := hooks.EmitHookStart(ctx, st, repoID, wtID, "create-after-engines", len(actions))
-	out, err := hooks.RunHooks(ctx, "create-after-engines", actions, repoRoot, wtRoot, slugVal, isMain, captureEnv(), true)
-	runIDs := hooks.PersistOutcome(ctx, st, repoID, wtID, "create-after-engines", started, time.Now().UnixMilli(), out)
+	started := hooks.EmitHookStart(ctx, sc.st, sc.repoID, sc.id.WtID, "create-after-engines", len(actions))
+	out, err := hooks.RunHooks(ctx, "create-after-engines", actions, sc.repoRoot, sc.wt, sc.id.Slug.Value, sc.id.IsMain, captureEnv(), true)
+	runIDs := hooks.PersistOutcome(ctx, sc.st, sc.repoID, sc.id.WtID, "create-after-engines", started, time.Now().UnixMilli(), out)
 	if err != nil {
 		return fmt.Errorf("create-after-engines: %w", err)
 	}
@@ -272,41 +281,19 @@ func runPostEngineHooks(
 // restricts the reset to one engine family when non-empty. Returns only
 // the branch_scoped outcomes the reset actually re-seeded.
 func runDbReset(ctx context.Context, worktree, repoOverride, engineFilter string) ([]prepare.Outcome, error) {
-	wt, branch, err := resolveWorktree(ctx, worktree)
+	sc, err := openWorktreeScope(ctx, worktree, repoOverride)
 	if err != nil {
 		return nil, err
 	}
-	repoRoot, err := resolveRepo(ctx, repoOverride)
-	if err != nil {
-		repoRoot, err = gitenv.MainRoot(ctx, wt)
-		if err != nil {
-			return nil, err
-		}
-	}
-	cfg, err := resolve.LoadResolved(repoRoot)
-	if err != nil {
+	defer func() { _ = sc.st.Close() }()
+	if err := prepare.ResetBranchScoped(ctx, &sc.cfg, sc.wt, sc.repoID, sc.id.WtID, sc.st, engineFilter); err != nil {
 		return nil, err
 	}
-	st, err := openStore(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = st.Close() }()
-	repoID, _ := st.EnsureRepo(ctx, repoRoot, filepath.Base(repoRoot))
-	// Same identity routing as runPrepare — reset must operate on the very
-	// active namespace the swap lifecycle created (bare on the main worktree).
-	id, err := wtpkg.ResolveIdentity(ctx, st, &cfg, repoRoot, wt, branch, repoID)
-	if err != nil {
-		return nil, err
-	}
-	if err := prepare.ResetBranchScoped(ctx, &cfg, wt, repoID, id.WtID, st, engineFilter); err != nil {
-		return nil, err
-	}
-	outs, err := prepare.Run(ctx, &cfg, wt, id.Slug, st, repoID, id.WtID, captureEnv())
+	outs, err := prepare.Run(ctx, &sc.cfg, sc.wt, sc.id.Slug, sc.st, sc.repoID, sc.id.WtID, captureEnv())
 	if err != nil {
 		return outs, err
 	}
-	if err := runPostEngineHooks(ctx, st, &cfg, repoRoot, wt, id.Slug.Value, id.IsMain, repoID, id.WtID); err != nil {
+	if err := runPostEngineHooks(ctx, sc); err != nil {
 		return outs, err
 	}
 	// Surface only the branch_scoped databases the reset touched, matched on
@@ -320,7 +307,7 @@ func runDbReset(ctx context.Context, worktree, repoOverride, engineFilter string
 	}
 	var seeded []prepare.Outcome
 	for _, o := range outs {
-		for _, d := range cfg.Databases {
+		for _, d := range sc.cfg.Databases {
 			if !d.BranchScoped {
 				continue
 			}
@@ -345,65 +332,21 @@ func runDbReset(ctx context.Context, worktree, repoOverride, engineFilter string
 // the current branch's durable copies without switching branches. Same
 // identity routing as runDbReset.
 func runDbSave(ctx context.Context, worktree, repoOverride, engineFilter string) ([]prepare.BranchScopedSave, error) {
-	wt, branch, err := resolveWorktree(ctx, worktree)
+	sc, err := openWorktreeScope(ctx, worktree, repoOverride)
 	if err != nil {
 		return nil, err
 	}
-	repoRoot, err := resolveRepo(ctx, repoOverride)
-	if err != nil {
-		repoRoot, err = gitenv.MainRoot(ctx, wt)
-		if err != nil {
-			return nil, err
-		}
-	}
-	cfg, err := resolve.LoadResolved(repoRoot)
-	if err != nil {
-		return nil, err
-	}
-	st, err := openStore(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = st.Close() }()
-	repoID, _ := st.EnsureRepo(ctx, repoRoot, filepath.Base(repoRoot))
-	id, err := wtpkg.ResolveIdentity(ctx, st, &cfg, repoRoot, wt, branch, repoID)
-	if err != nil {
-		return nil, err
-	}
-	return prepare.SaveBranchScoped(ctx, &cfg, wt, repoID, id.WtID, st, engineFilter)
+	defer func() { _ = sc.st.Close() }()
+	return prepare.SaveBranchScoped(ctx, &sc.cfg, sc.wt, sc.repoID, sc.id.WtID, sc.st, engineFilter)
 }
 
-// runBranchScopedStatus reports the swap state of a worktree's
-// branch_scoped databases. Routes through ResolveIdentity so the active
-// namespace renders the same name the swap lifecycle uses (bare on the
-// main worktree).
 func runBranchScopedStatus(ctx context.Context, worktree, repoOverride string) ([]prepare.BranchScopedDB, error) {
-	wt, branch, err := resolveWorktree(ctx, worktree)
+	sc, err := openWorktreeScope(ctx, worktree, repoOverride)
 	if err != nil {
 		return nil, err
 	}
-	repoRoot, err := resolveRepo(ctx, repoOverride)
-	if err != nil {
-		repoRoot, err = gitenv.MainRoot(ctx, wt)
-		if err != nil {
-			return nil, err
-		}
-	}
-	cfg, err := resolve.LoadResolved(repoRoot)
-	if err != nil {
-		return nil, err
-	}
-	st, err := openStore(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = st.Close() }()
-	repoID, _ := st.EnsureRepo(ctx, repoRoot, filepath.Base(repoRoot))
-	id, err := wtpkg.ResolveIdentity(ctx, st, &cfg, repoRoot, wt, branch, repoID)
-	if err != nil {
-		return nil, err
-	}
-	return prepare.BranchScopedStatus(ctx, &cfg, repoRoot, wt, id.WtID, st)
+	defer func() { _ = sc.st.Close() }()
+	return prepare.BranchScopedStatus(ctx, &sc.cfg, sc.repoRoot, sc.wt, sc.id.WtID, sc.st)
 }
 
 // confirmInputID keys the confirmation prompt in a tool call's
@@ -460,38 +403,14 @@ func canElicit(req *mcpsdk.CallToolRequest) bool {
 // tweak one var (e.g. retry a flaky setup with `DEBUG=1`) without
 // editing .treeman.yaml.
 func runHookPhase(ctx context.Context, phase, worktree string, envOverrides map[string]string) (hooks.RunOutcome, error) {
-	wt, branch, err := resolveWorktree(ctx, worktree)
+	sc, err := openWorktreeScope(ctx, worktree, "")
 	if err != nil {
 		return hooks.RunOutcome{}, err
 	}
-	repoRoot, err := gitenv.MainRoot(ctx, wt)
-	if err != nil {
-		return hooks.RunOutcome{}, err
-	}
-	cfg, err := resolve.LoadResolved(repoRoot)
-	if err != nil {
-		return hooks.RunOutcome{}, err
-	}
+	defer func() { _ = sc.st.Close() }()
+	cfg := sc.cfg
 	env := captureEnv()
 	maps.Copy(env, envOverrides)
-
-	st, dbErr := openStore(ctx)
-	var repoID, wtID int64
-	var sl slug.Slug
-	var isMain bool
-	if dbErr == nil {
-		defer func() { _ = st.Close() }()
-		repoID, _ = st.EnsureRepo(ctx, repoRoot, filepath.Base(repoRoot))
-		id, idErr := wtpkg.ResolveIdentity(ctx, st, &cfg, repoRoot, wt, branch, repoID)
-		if idErr != nil {
-			return hooks.RunOutcome{}, idErr
-		}
-		sl, wtID, isMain = id.Slug, id.WtID, id.IsMain
-	} else {
-		// No store reachable — fall back to a path-hash slug just so
-		// the hook env has something. $TREEMAN_IS_MAIN reads "0".
-		sl = slug.For(wt, branch)
-	}
 
 	var entries []config.Action
 	switch phase {
@@ -512,8 +431,8 @@ func runHookPhase(ctx context.Context, phase, worktree string, envOverrides map[
 		)
 	}
 
-	started := hooks.EmitHookStart(ctx, st, repoID, wtID, phase, len(entries))
-	out, rErr := hooks.RunHooks(ctx, phase, entries, repoRoot, wt, sl.Value, isMain, env, true)
-	hooks.PersistOutcome(ctx, st, repoID, wtID, phase, started, time.Now().UnixMilli(), out)
+	started := hooks.EmitHookStart(ctx, sc.st, sc.repoID, sc.id.WtID, phase, len(entries))
+	out, rErr := hooks.RunHooks(ctx, phase, entries, sc.repoRoot, sc.wt, sc.id.Slug.Value, sc.id.IsMain, env, true)
+	hooks.PersistOutcome(ctx, sc.st, sc.repoID, sc.id.WtID, phase, started, time.Now().UnixMilli(), out)
 	return out, rErr
 }
