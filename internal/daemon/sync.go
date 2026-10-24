@@ -84,7 +84,9 @@ func SyncNow(ctx context.Context, st *State, target string) ([]rpc.SyncRepoStatu
 				return nil
 			}
 			st.RecordSyncSuccess(r.Path)
-			_ = SyncWorktree(gctx, st, r.ID, wtFilter, cfg.AutoFetch.ResolvedMode())
+			if err := SyncWorktree(gctx, st, r.ID, wtFilter, cfg.AutoFetch.ResolvedMode()); err != nil {
+				errs[i] = fmt.Sprintf("%s: sync %s: %v", r.Path, wtFilter, err)
+			}
 			return nil
 		})
 	}
@@ -95,15 +97,19 @@ func SyncNow(ctx context.Context, st *State, target string) ([]rpc.SyncRepoStatu
 			filtered = append(filtered, e)
 		}
 	}
-	errs = filtered
 	// Snapshot only the repos this call touched so the response shape
 	// matches the request scope. Passing "" here would leak status for
 	// every registered repo into a targeted sync_now's reply.
 	out := make([]rpc.SyncRepoStatus, 0, len(repos))
 	for _, r := range repos {
-		out = append(out, SyncStatusSnapshot(ctx, st, r.Path)...)
+		statuses, err := SyncStatusSnapshot(ctx, st, r.Path)
+		if err != nil {
+			filtered = append(filtered, err.Error())
+			continue
+		}
+		out = append(out, statuses...)
 	}
-	return out, errs
+	return out, filtered
 }
 
 // selectReposForTarget maps a sync_now target string to the set of
@@ -134,7 +140,11 @@ func selectReposForTarget(ctx context.Context, st *State, target string) ([]stor
 	// Try worktree → owning repo. A worktree path lives under the
 	// repo dir for the main worktree, or under .worktrees/... for a
 	// linked worktree; both cases resolve via SQLite.
-	if row, err := st.Store.LookupActiveWorktreeByPath(ctx, abs); err == nil && row.ID != 0 {
+	row, err := st.Store.LookupActiveWorktreeByPath(ctx, abs)
+	if err != nil {
+		return nil, fmt.Errorf("resolve target %s to its worktree: %w", abs, err)
+	}
+	if row.ID != 0 {
 		for _, r := range all {
 			if r.ID == row.RepoID {
 				return []store.RepoRef{r}, nil
@@ -174,17 +184,20 @@ func isSameRepoRoot(abs string, repos []store.RepoRef) bool {
 // registered repo (or just one, when repoFilter is non-empty). For
 // each repo it also lists every linked worktree's ahead/behind/dirty
 // counts plus the last skip reason recorded by the auto-fetch sweep.
-func SyncStatusSnapshot(ctx context.Context, st *State, repoFilter string) []rpc.SyncRepoStatus {
+func SyncStatusSnapshot(ctx context.Context, st *State, repoFilter string) ([]rpc.SyncRepoStatus, error) {
 	repos, err := st.Store.ListRepoRefs(ctx)
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("sync status: list repos: %w", err)
 	}
 	out := make([]rpc.SyncRepoStatus, 0, len(repos))
 	for _, r := range repos {
 		if repoFilter != "" && r.Path != repoFilter {
 			continue
 		}
-		cfg, _ := resolve.LoadResolved(r.Path)
+		cfg, err := resolve.LoadResolved(r.Path)
+		if err != nil {
+			return nil, fmt.Errorf("sync status of %s: load config: %w", r.Path, err)
+		}
 		rs := rpc.SyncRepoStatus{
 			RepoPath:       r.Path,
 			Mode:           cfg.AutoFetch.ResolvedMode(),
@@ -198,7 +211,10 @@ func SyncStatusSnapshot(ctx context.Context, st *State, repoFilter string) []rpc
 		}
 
 		paths := []string{r.Path}
-		linked, _ := wtreg.GitWorktreePaths(ctx, r.Path)
+		linked, err := wtreg.GitWorktreePaths(ctx, r.Path)
+		if err != nil {
+			return nil, fmt.Errorf("sync status of %s: list its worktrees: %w", r.Path, err)
+		}
 		paths = append(paths, linked...)
 		// Probe worktrees concurrently: each worktreeSyncStatus spawns 3
 		// git subprocesses and they're fully independent across worktrees,
@@ -216,7 +232,7 @@ func SyncStatusSnapshot(ctx context.Context, st *State, repoFilter string) []rpc
 		_ = g.Wait()
 		out = append(out, rs)
 	}
-	return out
+	return out, nil
 }
 
 // worktreeSyncStatus probes one working tree for ahead/behind counts

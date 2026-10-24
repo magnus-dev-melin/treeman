@@ -217,7 +217,12 @@ func (lw *LifecycleWatcher) onCreate(ctx context.Context, adminDir string) {
 	// True external `git worktree add` (no CLI) trips neither guard:
 	// the row doesn't exist yet, no finalize is in flight, so the
 	// watcher proceeds to register + finalize.
-	if existing, err := lw.st.Store.LookupActiveWorktreeByPath(ctx, wtPath); err == nil && existing.ID != 0 {
+	existing, err := lw.st.Store.LookupActiveWorktreeByPath(ctx, wtPath)
+	if err != nil {
+		slog.Error("lifecycle: skip setup (cannot tell whether the CLI already registered it)", "wt", wtPath, "err", err)
+		return
+	}
+	if existing.ID != 0 {
 		slog.Debug("lifecycle: skip setup (CLI already registered)",
 			"wt", wtPath, "id", existing.ID)
 		return
@@ -244,12 +249,10 @@ func (lw *LifecycleWatcher) onCreate(ctx context.Context, adminDir string) {
 		return
 	}
 	slog.Info("lifecycle: setup dispatched", "repo", lw.repoPath, "wt", wtPath)
-	// Best-effort env rehydration — when an external `git worktree
-	// add` runs without the CLI, there's no captured env yet, so
-	// LoadInheritedEnvByPath returns nil and FinalizeWorktree gets
-	// an empty env. The next user-driven `wt finalize` will populate
-	// the cache.
-	env, _ := lw.st.Store.LoadInheritedEnvByPath(ctx, wtPath)
+	env, ok := inheritedEnvOrSkip(ctx, lw.st, lw.repoID, wtPath, "setup of the externally added worktree")
+	if !ok {
+		return
+	}
 	if env == nil {
 		env = map[string]string{}
 	}
@@ -427,8 +430,11 @@ func teardownOrphan(ctx context.Context, st *State, repoPath, wtPath string) err
 			return
 		}
 		started := hooks.EmitHookStart(ctx, st.Store, repoID, row.ID, trigger, len(actions))
-		out, _ := hooks.RunHooksOrphan(ctx, trigger, actions,
+		out, runErr := hooks.RunHooksOrphan(ctx, trigger, actions,
 			repoPath, wtPath, row.Slug, logDir, row.IsMain, map[string]string{}, true)
+		if runErr != nil {
+			slog.Warn("lifecycle teardown: hooks failed; teardown continues", "trigger", trigger, "wt", wtPath, "err", runErr)
+		}
 		hooks.PersistOutcome(ctx, st.Store, repoID, row.ID, trigger, started, nowMillis(), out)
 	}
 	runOrphan("delete-before-engines", cfg.Hooks.OnDeleteBeforeEngines)

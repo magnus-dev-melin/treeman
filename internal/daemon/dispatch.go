@@ -265,7 +265,15 @@ func streamEvents(ctx context.Context, st *State, conn net.Conn, req rpc.Request
 	if req.EventSubscribe != nil {
 		args = *req.EventSubscribe
 	}
-	repoID, worktreeID := resolveSubscribeIDs(ctx, st, args)
+	repoID, worktreeID, err := resolveSubscribeIDs(ctx, st, args)
+	if err != nil {
+		refusal := rpc.Response{Kind: rpc.KindError, Message: err.Error()}
+		stampIdentity(&refusal)
+		if werr := json.NewEncoder(conn).Encode(&refusal); werr != nil {
+			slog.Warn("event subscribe: send refusal", "err", werr, "refusal", err)
+		}
+		return
+	}
 
 	// Buffered channel keeps the hook fast even when the socket peer
 	// is slow. On overflow the oldest queued event is dropped, so the
@@ -366,19 +374,27 @@ func encodeEventBatch(enc *json.Encoder, first rpc.EventEnvelope, ch <-chan rpc.
 
 // resolveSubscribeIDs resolves the repo/worktree path filters to ids
 // once before the hot path, so every WriteEvent doesn't re-look-up.
-func resolveSubscribeIDs(ctx context.Context, st *State, args rpc.EventSubscribeArgs) (repoID, worktreeID int64) {
+func resolveSubscribeIDs(ctx context.Context, st *State, args rpc.EventSubscribeArgs) (repoID, worktreeID int64, err error) {
 	if args.RepoPath != "" {
-		if id, err := st.Store.LookupRepoID(ctx, args.RepoPath); err == nil {
-			repoID = id
+		repoID, err = st.Store.LookupRepoID(ctx, args.RepoPath)
+		if err != nil {
+			return 0, 0, fmt.Errorf("resolve the subscription's repo %s: %w", args.RepoPath, err)
+		}
+		if repoID == 0 {
+			return 0, 0, fmt.Errorf("subscribe to repo %s: not registered", args.RepoPath)
 		}
 	}
 	if args.WorktreePath != "" {
 		row, err := st.Store.LookupActiveWorktreeByPath(ctx, args.WorktreePath)
-		if err == nil && row.ID != 0 {
-			worktreeID = row.ID
+		if err != nil {
+			return 0, 0, fmt.Errorf("resolve the subscription's worktree %s: %w", args.WorktreePath, err)
 		}
+		if row.ID == 0 {
+			return 0, 0, fmt.Errorf("subscribe to worktree %s: not registered", args.WorktreePath)
+		}
+		worktreeID = row.ID
 	}
-	return repoID, worktreeID
+	return repoID, worktreeID, nil
 }
 
 // buildSubscribeFilter closes over the resolved args + ids and returns
@@ -550,7 +566,10 @@ func handleSyncStatus(ctx context.Context, st *State, req rpc.Request) rpc.Respo
 	if req.SyncStatus != nil {
 		filter = req.SyncStatus.RepoPath
 	}
-	statuses := SyncStatusSnapshot(ctx, st, filter)
+	statuses, err := SyncStatusSnapshot(ctx, st, filter)
+	if err != nil {
+		return errResp(err.Error())
+	}
 	return rpc.Response{
 		Kind:        rpc.KindSyncStatus,
 		SyncedRepos: statuses,
@@ -702,10 +721,10 @@ func startWorktreeWatcher(ctx context.Context, st *State, repoPath, wtPath strin
 				"wt":  wtPath,
 				"ref": newRef,
 			})
-		// Rehydrate the user's env captured at the last `wt create` /
-		// `wt finalize` so PATH-sensitive scripts work in this
-		// daemon-driven re-run.
-		env, _ := st.Store.LoadInheritedEnvByPath(st.BgCtx, wtPath)
+		env, ok := inheritedEnvOrSkip(evCtx, st, repoID, wtPath, "HEAD-triggered finalize")
+		if !ok {
+			return
+		}
 		// Fire user-defined checkout actions in parallel with
 		// the regular finalize re-run (no ordering — both react to
 		// the same event independently).
@@ -833,7 +852,10 @@ func makeWtFSDispatcher(st *State, repoPath string, repoID int64, wtPath string)
 				"label":  first.Label,
 				"wt":     wtPath,
 			})
-		env, _ := st.Store.LoadInheritedEnvByPath(st.BgCtx, wtPath)
+		env, ok := inheritedEnvOrSkip(evCtx, st, repoID, wtPath, "watch re-prepare")
+		if !ok {
+			return nil
+		}
 		// Fire the file-change actions in parallel with the
 		// re-prep — both react to the same event independently.
 		safeGo(lblWatchActions, wtPath, func() {
@@ -896,10 +918,12 @@ func fireOnFileChange(
 	}
 	repoID, err := st.Store.EnsureRepo(ctx, repoPath, filepath.Base(repoPath))
 	if err != nil {
+		slog.Warn("file-change: ensure repo", "wt", wtPath, "repo", repoPath, "err", err)
 		return
 	}
 	id, err := wt.ResolveIdentity(ctx, st.Store, &cfg, repoPath, wtPath, detectBranch(wtPath), repoID)
 	if err != nil {
+		slog.Warn("file-change: resolve identity", "wt", wtPath, "err", err)
 		return
 	}
 	sl, wtID, isMain := id.Slug, id.WtID, id.IsMain
@@ -920,9 +944,13 @@ func fireOnFileChange(
 		if tmpl == "" {
 			tmpl = d.KeyPrefix
 		}
-		if rendered, err := template.Render(tmpl, template.FromSlug(sl)); err == nil {
-			dbName = rendered
+		rendered, err := template.Render(tmpl, template.FromSlug(sl))
+		if err != nil {
+			slog.Warn("file-change: render the database name for TREEMAN_WATCH_DB_NAME",
+				"wt", wtPath, "db_idx", dbIdx, "template", tmpl, "err", err)
+			return
 		}
+		dbName = rendered
 	}
 	// Layer the watch-context env on top of the user's cached env.
 	env := make(map[string]string, len(inheritedEnv)+4)
@@ -931,7 +959,9 @@ func fireOnFileChange(
 	env["TREEMAN_WATCH_LABEL"] = label
 	env["TREEMAN_WATCH_ENGINE"] = engine
 	env["TREEMAN_WATCH_DB_NAME"] = dbName
-	_ = runTriggerActions(ctx, st, "file-change", matched, repoPath, wtPath, sl.Value, isMain, repoID, wtID, env)
+	if err := runTriggerActions(ctx, st, "file-change", matched, repoPath, wtPath, sl.Value, isMain, repoID, wtID, env); err != nil {
+		slog.Warn("file-change: run actions", "wt", wtPath, "err", err)
+	}
 }
 
 // fireTriggerActions loads the resolved config for a worktree and
@@ -989,4 +1019,21 @@ func fireTriggerActions(
 		slog.Warn("trigger actions: run",
 			"trigger", trigger, "wt", wtPath, "err", err)
 	}
+}
+
+func inheritedEnvOrSkip(ctx context.Context, st *State, repoID int64, wtPath, run string) (map[string]string, bool) {
+	env, err := st.Store.LoadInheritedEnvByPath(ctx, wtPath)
+	if err == nil {
+		return env, true
+	}
+	msg := fmt.Sprintf(
+		"%s skipped for %s: load the environment captured at its last create/finalize: %v; run `treeman worktree finalize` in it",
+		run,
+		wtPath,
+		err,
+	)
+	slog.Error(msg)
+	_ = st.Store.WriteEvent(ctx, store.LevelError, store.EvtWatchSkip, msg, repoID, 0, "", 0,
+		map[string]string{"wt": wtPath, "error": err.Error()})
+	return nil, false
 }

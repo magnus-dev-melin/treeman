@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -541,8 +542,15 @@ func runTaskConfigWrite(ctx context.Context, st *State, task rpc.Task) (json.Raw
 		return nil, errors.New("config_write: missing path")
 	}
 	body := []byte(task.Params[rpc.ParamBody])
-	if prev, err := os.ReadFile(path); err == nil {
-		_, _ = st.Store.SnapshotConfig(ctx, task.RepoPath, path, prev)
+	prev, err := os.ReadFile(path)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+	case err != nil:
+		return nil, fmt.Errorf("config_write: read the current %s to snapshot it: %w", path, err)
+	default:
+		if _, err := st.Store.SnapshotConfig(ctx, task.RepoPath, path, prev); err != nil {
+			return nil, fmt.Errorf("config_write: snapshot the current %s into config history (nothing written): %w", path, err)
+		}
 	}
 	if err := atomicfile.Write(path, body, 0o600); err != nil {
 		return nil, err

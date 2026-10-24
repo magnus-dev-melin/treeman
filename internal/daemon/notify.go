@@ -85,21 +85,32 @@ func dispatchNotification(
 	}
 }
 
-// notificationSubject resolves the repo display name and the worktree
-// branch (falling back to the worktree dir name) for the banner. Best-
-// effort: any lookup miss yields an empty string, which Compose handles.
 func notificationSubject(ctx context.Context, st *State, ev store.Event) (repo, target string) {
 	if ev.RepoID.Valid {
-		if p, err := st.Store.RepoPath(ctx, ev.RepoID.Int64); err == nil && p != "" {
+		p, err := st.Store.RepoPath(ctx, ev.RepoID.Int64)
+		if err != nil {
+			slog.Warn("notifications: repo name for the banner", "repo_id", ev.RepoID.Int64, "err", err)
+		}
+		if p != "" {
 			repo = filepath.Base(p)
 		}
 	}
-	if ev.WorktreeID.Valid {
-		if b, err := st.Store.WorktreeBranch(ctx, ev.WorktreeID.Int64); err == nil && b != "" {
-			target = b
-		} else if p, err := st.Store.WorktreePathByID(ctx, ev.WorktreeID.Int64); err == nil && p != "" {
-			target = filepath.Base(p)
-		}
+	if !ev.WorktreeID.Valid {
+		return repo, target
+	}
+	b, err := st.Store.WorktreeBranch(ctx, ev.WorktreeID.Int64)
+	if err != nil {
+		slog.Warn("notifications: worktree branch for the banner", "worktree_id", ev.WorktreeID.Int64, "err", err)
+	}
+	if b != "" {
+		return repo, b
+	}
+	p, err := st.Store.WorktreePathByID(ctx, ev.WorktreeID.Int64)
+	if err != nil {
+		slog.Warn("notifications: worktree path for the banner", "worktree_id", ev.WorktreeID.Int64, "err", err)
+	}
+	if p != "" {
+		target = filepath.Base(p)
 	}
 	return repo, target
 }

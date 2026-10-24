@@ -525,7 +525,14 @@ func applyFinalizePatches(
 	sl slug.Slug,
 	repoID, wtID int64,
 ) {
-	portMap, _ := st.Store.LoadWorktreePorts(ctx, wtID)
+	portMap, err := st.Store.LoadWorktreePorts(ctx, wtID)
+	if err != nil {
+		slog.Warn("patches skipped: the worktree's ports could not be read, so {{ port.* }} would render empty",
+			"wt", wtRoot, "err", err)
+		_ = st.Store.WriteEvent(ctx, store.LevelWarn, store.EvtPatchesApply,
+			"patches skipped: read the worktree's ports: "+err.Error(), repoID, wtID, "", 0, map[string]string{"error": err.Error()})
+		return
+	}
 	tplCtx := template.FromSlug(sl).WithPorts(portMap)
 	files := make([]string, 0, len(cfg.Patches))
 	for _, p := range cfg.Patches {
@@ -1032,14 +1039,15 @@ func TeardownWorktree(
 		slog.Warn("release worktree ports (freed ports stay blocked for reallocation)", "wt", wtRoot, "err", err)
 	}
 
-	_ = st.Store.MarkWorktreeDeleted(ctx, wtID)
-	_ = st.Store.WriteEvent(ctx, store.LevelInfo, store.EvtWorktreeDeleteEnd,
-		"daemon-detached teardown complete",
-		repoID, wtID, "", 0, nil)
-
 	if trashPath != "" {
 		scheduleBackgroundReap(st, repoRoot, trashPath)
 	}
+	if err := st.Store.MarkWorktreeDeleted(ctx, wtID); err != nil {
+		return fmt.Errorf("mark worktree %s deleted in the registry: %w", wtRoot, err)
+	}
+	_ = st.Store.WriteEvent(ctx, store.LevelInfo, store.EvtWorktreeDeleteEnd,
+		"daemon-detached teardown complete",
+		repoID, wtID, "", 0, nil)
 	return nil
 }
 
