@@ -68,16 +68,9 @@ func FailedBeforeEngines(last Event) bool {
 }
 
 func (s *Store) LatestWorktreeStateEvent(ctx context.Context, wtID int64) (Event, error) {
-	rows, err := s.QueryEvents(ctx, EventFilter{
-		WorktreeID: wtID,
-		EventTypes: WorktreeStateEventTypes,
-		Limit:      1,
-	})
+	latest, err := s.LatestEventPerWorktree(ctx, []int64{wtID}, WorktreeStateEventTypes)
 	if err != nil {
 		return Event{}, fmt.Errorf("latest lifecycle event of worktree %d: %w", wtID, err)
 	}
-	if len(rows) == 0 {
-		return Event{}, nil
-	}
-	return rows[0], nil
+	return latest[wtID], nil
 }

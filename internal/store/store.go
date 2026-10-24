@@ -951,7 +951,7 @@ func (s *Store) RemoveRepo(ctx context.Context, repoID int64) error {
 	stmts := []string{
 		`DELETE FROM hook_runs WHERE worktree_id IN (SELECT id FROM worktrees WHERE repo_id = ?)`,
 		// Two deletes, not one OR across columns: each is served by its
-		// own index (idx_events_repo, idx_events_worktree).
+		// own index (idx_events_repo_recent, idx_events_worktree_recent).
 		`DELETE FROM events    WHERE repo_id = ?`,
 		`DELETE FROM events    WHERE worktree_id IN (SELECT id FROM worktrees WHERE repo_id = ?)`,
 		`DELETE FROM snapshots WHERE repo_id = ?`,

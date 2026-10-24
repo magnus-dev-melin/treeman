@@ -46,10 +46,6 @@ func TestLatestEventPerWorktree(t *testing.T) {
 	}
 }
 
-// TestLatestEventPerWorktreeBounded pins the GROUP BY MAX(id) bounding:
-// with 10k matching events across 5 worktrees, exactly one row per
-// worktree is returned — the max-id one — instead of walking the full
-// ordered set and discarding all but the first per worktree.
 func TestLatestEventPerWorktreeBounded(t *testing.T) {
 	ctx := context.Background()
 	st, err := Open(ctx, filepath.Join(t.TempDir(), "treeman.db"))
@@ -111,7 +107,7 @@ func TestLatestEventPerWorktreeBounded(t *testing.T) {
 			t.Fatalf("worktree %d missing from result", id)
 		}
 		if e.Message != "newest" {
-			t.Errorf("worktree %d latest = %q, want the max-id event (newest)", id, e.Message)
+			t.Errorf("worktree %d latest = %q, want the newest event", id, e.Message)
 		}
 	}
 }

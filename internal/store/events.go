@@ -114,27 +114,7 @@ func queryEventsWhere(f EventFilter) (where []string, args []any) {
 // newest-first; pass OldestFirst=true to stream chronologically (used
 // by --follow and oldest-first tail output).
 func (s *Store) QueryEvents(ctx context.Context, f EventFilter) ([]Event, error) {
-	cols := `e.id, e.ts, e.level, e.repo_id, e.worktree_id, e.event_type,
-		COALESCE(e.phase,''), COALESCE(e.message,''), e.payload_json, e.duration_ms`
-	from := `FROM events e`
-	if f.HydrateWT {
-		cols += `, COALESCE(w.slug,''), COALESCE(w.branch,''), COALESCE(w.path,'')`
-		from += ` LEFT JOIN worktrees w ON w.id = e.worktree_id`
-	}
-	q := "SELECT " + cols + " " + from
-	where, args := queryEventsWhere(f)
-	if len(where) > 0 {
-		q += " WHERE " + strings.Join(where, " AND ") //nolint:gosec // only placeholder fragments joined; values are parameterized
-	}
-	if f.OldestFirst {
-		q += " ORDER BY e.ts ASC, e.id ASC"
-	} else {
-		q += " ORDER BY e.ts DESC, e.id DESC"
-	}
-	if f.Limit > 0 {
-		q += " LIMIT ?"
-		args = append(args, f.Limit)
-	}
+	q, args := queryEventsSQL(f)
 	rows, err := s.DB.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query events: %w", err)
@@ -155,38 +135,43 @@ func (s *Store) QueryEvents(ctx context.Context, f EventFilter) ([]Event, error)
 	return out, rows.Err()
 }
 
+func queryEventsSQL(f EventFilter) (string, []any) {
+	cols := `e.id, e.ts, e.level, e.repo_id, e.worktree_id, e.event_type,
+		COALESCE(e.phase,''), COALESCE(e.message,''), e.payload_json, e.duration_ms`
+	from := `FROM events e`
+	if f.HydrateWT {
+		cols += `, COALESCE(w.slug,''), COALESCE(w.branch,''), COALESCE(w.path,'')`
+		from += ` LEFT JOIN worktrees w ON w.id = e.worktree_id`
+	}
+	q := "SELECT " + cols + " " + from
+	where, args := queryEventsWhere(f)
+	if len(where) > 0 {
+		q += " WHERE " + strings.Join(where, " AND ")
+	}
+	if f.OldestFirst {
+		q += " ORDER BY e.ts ASC, e.id ASC"
+	} else {
+		q += " ORDER BY e.ts DESC, e.id DESC"
+	}
+	if f.Limit > 0 {
+		q += " LIMIT ?"
+		args = append(args, f.Limit)
+	}
+	return q, args
+}
+
 // LatestEventPerWorktree returns the newest event among eventTypes
-// for each listed worktree — the batched form of the per-worktree
-// QueryEvents(Limit 1) lookups the status widget used to fire per row
-// per bar tick (N+1 queries). A MAX(id)-per-worktree subquery bounds
-// the materialized rows to <= len(wtIDs) instead of every matching
-// event in retention; worktrees with no matching event are absent
-// from the map.
+// for each listed worktree, in one query. Worktrees with no matching
+// event are absent from the map.
 func (s *Store) LatestEventPerWorktree(ctx context.Context, wtIDs []int64, eventTypes []string) (map[int64]Event, error) {
-	out := map[int64]Event{}
+	out := make(map[int64]Event, len(wtIDs))
 	if len(wtIDs) == 0 || len(eventTypes) == 0 {
 		return out, nil
 	}
-	//nolint:gosec // only placeholder fragments; values are parameterized
-	q := `SELECT e.id, e.ts, e.level, e.repo_id, e.worktree_id, e.event_type,
-		COALESCE(e.phase,''), COALESCE(e.message,''), e.payload_json, e.duration_ms
-		FROM events e
-		JOIN (
-			SELECT worktree_id, MAX(id) AS id FROM events
-			WHERE worktree_id IN (` + placeholders(len(wtIDs)) + `)
-			AND event_type IN (` + placeholders(len(eventTypes)) + `)
-			GROUP BY worktree_id
-		) m ON m.id = e.id`
-	args := make([]any, 0, len(wtIDs)+len(eventTypes))
-	for _, id := range wtIDs {
-		args = append(args, id)
-	}
-	for _, t := range eventTypes {
-		args = append(args, t)
-	}
+	q, args := latestEventPerWorktreeSQL(wtIDs, eventTypes)
 	rows, err := s.DB.QueryContext(ctx, q, args...)
 	if err != nil {
-		return nil, fmt.Errorf("query latest events per worktree: %w", err)
+		return nil, fmt.Errorf("query latest %v event of worktrees %v: %w", eventTypes, wtIDs, err)
 	}
 	defer func() { _ = rows.Close() }()
 	for rows.Next() {
@@ -203,14 +188,37 @@ func (s *Store) LatestEventPerWorktree(ctx context.Context, wtIDs []int64, event
 			&e.PayloadJSON,
 			&e.DurationMs,
 		); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("scan latest event of worktrees %v: %w", wtIDs, err)
 		}
-		id := e.WorktreeID.Int64
-		if _, seen := out[id]; !seen {
-			out[id] = e
-		}
+		out[e.WorktreeID.Int64] = e
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read latest %v event of worktrees %v: %w", eventTypes, wtIDs, err)
+	}
+	return out, nil
+}
+
+func latestEventPerWorktreeSQL(wtIDs []int64, eventTypes []string) (string, []any) {
+	q := `SELECT e.id, e.ts, e.level, e.repo_id, e.worktree_id, e.event_type,
+		COALESCE(e.phase,''), COALESCE(e.message,''), e.payload_json, e.duration_ms
+		FROM events e
+		WHERE e.id IN (
+			SELECT (
+				SELECT x.id FROM events x
+				WHERE x.worktree_id = w.column1
+				AND x.event_type IN (` + placeholders(len(eventTypes)) + `)
+				ORDER BY x.ts DESC, x.id DESC
+				LIMIT 1
+			) FROM (VALUES ` + strings.TrimSuffix(strings.Repeat("(?),", len(wtIDs)), ",") + `) w
+		)`
+	args := make([]any, 0, len(eventTypes)+len(wtIDs))
+	for _, t := range eventTypes {
+		args = append(args, t)
+	}
+	for _, id := range wtIDs {
+		args = append(args, id)
+	}
+	return q, args
 }
 
 // LastEventTsPerWorktree returns the newest event timestamp (unix ms,
