@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/stubbedev/treeman/internal/fspath"
 )
 
 func TestResolveWorktreeOverHTTPWithoutARootFailsInsteadOfUsingTheServerCwd(t *testing.T) {
@@ -27,7 +29,7 @@ func TestResolveWorktreeJoinsARelativePathToTheWorkspaceRoot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := canonicalDir(filepath.Join(root, "sub")); wt != want {
+	if want := fspath.Canonical(filepath.Join(root, "sub")); wt != want {
 		t.Fatalf("resolveWorktree(\"sub\") = %q, want %q under the request's root, not the server cwd", wt, want)
 	}
 }

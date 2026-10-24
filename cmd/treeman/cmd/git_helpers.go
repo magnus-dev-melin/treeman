@@ -16,6 +16,7 @@ import (
 
 	"github.com/urfave/cli/v3"
 
+	"github.com/stubbedev/treeman/internal/fspath"
 	"github.com/stubbedev/treeman/internal/gitcmd"
 	"github.com/stubbedev/treeman/internal/gitenv"
 	"github.com/stubbedev/treeman/internal/gitx"
@@ -277,24 +278,13 @@ func isGitWorktreeDir(ctx context.Context, repoRoot, path string) bool {
 	if err != nil {
 		return false
 	}
-	cand := resolvePath(path)
+	cand := fspath.Canonical(path)
 	for _, p := range paths {
-		if resolvePath(p) == cand {
+		if fspath.Canonical(p) == cand {
 			return true
 		}
 	}
 	return false
-}
-
-// resolvePath canonicalises a path for comparison: Clean plus symlink
-// resolution when the path exists (EvalSymlinks errors on missing
-// paths, which stay Clean-only).
-func resolvePath(p string) string {
-	p = filepath.Clean(p)
-	if resolved, err := filepath.EvalSymlinks(p); err == nil {
-		return filepath.Clean(resolved)
-	}
-	return p
 }
 
 // switchAction is the `git switch` handler; `worktree switch` runs the

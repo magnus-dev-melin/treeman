@@ -15,6 +15,7 @@ import (
 
 	"github.com/stubbedev/treeman/internal/config"
 	"github.com/stubbedev/treeman/internal/engine"
+	"github.com/stubbedev/treeman/internal/fspath"
 	"github.com/stubbedev/treeman/internal/gitenv"
 	"github.com/stubbedev/treeman/internal/hooks"
 	"github.com/stubbedev/treeman/internal/prepare"
@@ -96,7 +97,7 @@ func resolveWorktree(ctx context.Context, path string) (wt, branch string, err e
 		if cwdErr != nil {
 			return "", "", fmt.Errorf("resolve the worktree: %w", cwdErr)
 		}
-		wt = canonicalDir(cwd)
+		wt = fspath.Canonical(cwd)
 		return wt, detectBranch(wt), nil
 	}
 	switch {
@@ -110,7 +111,7 @@ func resolveWorktree(ctx context.Context, path string) (wt, branch string, err e
 	fi, statErr := os.Stat(wt)
 	switch {
 	case statErr == nil && fi.IsDir():
-		wt = canonicalDir(wt)
+		wt = fspath.Canonical(wt)
 		return wt, detectBranch(wt), nil
 	case statErr != nil && !errors.Is(statErr, fs.ErrNotExist):
 		return "", "", fmt.Errorf("resolve worktree %q: %w", path, statErr)
@@ -135,14 +136,6 @@ type noWorktreeMatchError struct {
 
 func (e *noWorktreeMatchError) Error() string {
 	return fmt.Sprintf("no worktree matches %q (try worktree_list)", e.name)
-}
-
-func canonicalDir(path string) string {
-	abs, _ := filepath.Abs(path)
-	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
-		return resolved
-	}
-	return abs
 }
 
 func detectBranch(worktree string) string {

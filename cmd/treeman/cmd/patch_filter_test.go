@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stubbedev/treeman/internal/fspath"
 	"github.com/stubbedev/treeman/internal/store"
 )
 
@@ -23,7 +24,11 @@ func gitT(t *testing.T, dir string, args ...string) {
 
 func TestPatchFilterLeavesTheFileUnpatchedAndWarnsWhenTheRegistryIsUnreadable(t *testing.T) {
 	ctx := context.Background()
-	repo := filepath.Join(t.TempDir(), "repo")
+	base := filepath.Join(t.TempDir(), "via-symlink")
+	if err := os.Symlink(t.TempDir(), base); err != nil {
+		t.Fatal(err)
+	}
+	repo := filepath.Join(base, "repo")
 	gitT(t, "", "init", "-q", "-b", "main", repo)
 	gitT(t, repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "init")
 	if err := os.WriteFile(filepath.Join(repo, ".treeman.yaml"),
@@ -41,11 +46,11 @@ func TestPatchFilterLeavesTheFileUnpatchedAndWarnsWhenTheRegistryIsUnreadable(t 
 		t.Fatal(err)
 	}
 	defer func() { _ = st.Close() }()
-	repoID, err := st.EnsureRepo(ctx, repo, "repo")
+	repoID, err := st.EnsureRepo(ctx, fspath.Canonical(repo), "repo")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.EnsureWorktree(ctx, repoID, wt, "ticket-42", "feat"); err != nil {
+	if _, err := st.EnsureWorktree(ctx, repoID, fspath.Canonical(wt), "ticket-42", "feat"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := st.DB.ExecContext(ctx, "DROP TABLE worktree_ports"); err != nil {

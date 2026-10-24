@@ -15,6 +15,7 @@ import (
 	"github.com/fsnotify/fsnotify"
 
 	"github.com/stubbedev/treeman/internal/config"
+	"github.com/stubbedev/treeman/internal/fspath"
 	"github.com/stubbedev/treeman/internal/hooks"
 	"github.com/stubbedev/treeman/internal/resolve"
 	"github.com/stubbedev/treeman/internal/slug"
@@ -323,7 +324,7 @@ func (lw *LifecycleWatcher) reconcile(ctx context.Context) error {
 		case w.AdminDir != "":
 			dbByAdmin[w.AdminDir] = w
 		case !w.Deleted:
-			unstampedByPath[w.Path] = w
+			unstampedByPath[worktreePathKey(w.Path)] = w
 		}
 	}
 
@@ -342,7 +343,7 @@ func (lw *LifecycleWatcher) reconcile(ctx context.Context) error {
 		lw.seen[admin] = wtPath
 		lw.mu.Unlock()
 		row, ok := dbByAdmin[admin]
-		if unstamped, found := unstampedByPath[wtPath]; !ok && found {
+		if unstamped, found := unstampedByPath[worktreePathKey(wtPath)]; !ok && found {
 			if err := lw.st.Store.SetWorktreeAdminDir(ctx, unstamped.ID, admin); err != nil {
 				errs = append(errs, fmt.Errorf("record admin dir %s for worktree %s: %w", admin, wtPath, err))
 			}
@@ -409,11 +410,12 @@ func (lw *LifecycleWatcher) reapUnstamped(
 ) []error {
 	onDiskPaths := make(map[string]bool, len(onDisk))
 	for _, p := range onDisk {
-		onDiskPaths[p] = true
+		onDiskPaths[worktreePathKey(p)] = true
 	}
 	var errs []error
-	for path, row := range unstampedByPath {
-		if row.IsMain || onDiskPaths[path] {
+	for key, row := range unstampedByPath {
+		path := row.Path
+		if row.IsMain || onDiskPaths[key] {
 			continue
 		}
 		if _, err := os.Stat(path); err == nil {
@@ -608,6 +610,10 @@ func resolveGitCommonDir(repoPath string) (string, error) {
 // linked worktree is created. The file's content is the absolute path
 // of the working tree's `.git` gitlink file — strip the trailing
 // `/.git` to get the working tree root.
+func worktreePathKey(p string) string {
+	return strings.ToLower(fspath.Canonical(p))
+}
+
 func readGitdirFile(adminDir string) (string, bool, error) {
 	p := filepath.Join(adminDir, "gitdir")
 	b, err := os.ReadFile(p)

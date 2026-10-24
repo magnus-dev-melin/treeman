@@ -136,7 +136,11 @@ func TestReconcileStampsCLIRowsAndReapsTheirVanishedWorktrees(t *testing.T) {
 	t.Setenv("TREEMAN_CONFIG", "")
 	st := newTestState(t)
 	ctx := t.Context()
-	repo := filepath.Join(t.TempDir(), "repo")
+	base := filepath.Join(t.TempDir(), "via-symlink")
+	if err := os.Symlink(t.TempDir(), base); err != nil {
+		t.Fatal(err)
+	}
+	repo := filepath.Join(base, "repo")
 	gitRun(t, "", "init", "-q", "-b", "main", repo)
 	gitRun(t, repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "init")
 	live := filepath.Join(repo, ".worktrees", "live")

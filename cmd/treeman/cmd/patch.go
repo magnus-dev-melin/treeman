@@ -11,6 +11,7 @@ import (
 	"github.com/urfave/cli/v3"
 
 	"github.com/stubbedev/treeman/internal/config"
+	"github.com/stubbedev/treeman/internal/fspath"
 	"github.com/stubbedev/treeman/internal/gitcmd"
 	"github.com/stubbedev/treeman/internal/patcher"
 	"github.com/stubbedev/treeman/internal/resolve"
@@ -76,10 +77,11 @@ func runPatchFilter(ctx context.Context, mode, relPath string, in io.Reader, out
 		ui.Warn("patch-filter %s %s: %s: %v; leaving the file unpatched", mode, relPath, what, err)
 		return passthrough(out, body)
 	}
-	worktreePath, err := os.Getwd()
+	cwd, err := os.Getwd()
 	if err != nil {
 		return unchanged("resolve the worktree", err)
 	}
+	worktreePath := fspath.Canonical(cwd)
 	repoRoot, err := DiscoverRepoRoot(worktreePath)
 	if err != nil {
 		return unchanged("resolve the repo of "+worktreePath, err)
@@ -151,15 +153,7 @@ func findPatchEntry(patches []config.Patch, relPath string) (config.Patch, bool)
 // canonical `.env` belongs to the developer), so the filter must
 // also no-op when invoked from the main worktree.
 func isMainWorktreePath(repoRoot, worktreePath string) bool {
-	a, _ := filepath.EvalSymlinks(repoRoot)
-	b, _ := filepath.EvalSymlinks(worktreePath)
-	if a == "" {
-		a = repoRoot
-	}
-	if b == "" {
-		b = worktreePath
-	}
-	return filepath.Clean(a) == filepath.Clean(b)
+	return fspath.Canonical(repoRoot) == fspath.Canonical(worktreePath)
 }
 
 func buildTemplateContext(ctx context.Context, repoRoot, worktreePath string) (template.Context, error) {
