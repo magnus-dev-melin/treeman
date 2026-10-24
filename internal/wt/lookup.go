@@ -34,7 +34,7 @@ func LookupWorktree(ctx context.Context, repoRoot, name string, sink Sink) (stri
 	rows, err := st.DB.QueryContext(ctx, `
 		SELECT w.path, w.slug, COALESCE(w.branch,'')
 		FROM worktrees w JOIN repos r ON r.id = w.repo_id
-		WHERE w.deleted_at IS NULL AND r.path = ?
+		WHERE w.deleted_at IS NULL AND r.path = ? COLLATE NOCASE
 		AND `+store.WorktreeNotTearingDown, repoRoot)
 	if err != nil {
 		return "", false, fmt.Errorf("look up worktree %q in %s: %w", name, repoRoot, err)
@@ -94,7 +94,7 @@ func IsMatchingExistingWorktree(ctx context.Context, repoRoot, wtPath, branch st
 	var n int
 	err = st.DB.QueryRowContext(ctx,
 		`SELECT 1 FROM worktrees w JOIN repos r ON r.id = w.repo_id
-		 WHERE r.path = ? AND w.path = ? AND w.deleted_at IS NULL`,
+		 WHERE r.path = ? COLLATE NOCASE AND w.path = ? COLLATE NOCASE AND w.deleted_at IS NULL`,
 		repoRoot, wtPath).Scan(&n)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil

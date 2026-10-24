@@ -1034,7 +1034,7 @@ func branchOccupancyFromStore(ctx context.Context, repoRoot string) (map[string]
 	rows, err := st.DB.QueryContext(ctx, `
 		SELECT COALESCE(w.branch, ''), w.path
 		FROM worktrees w JOIN repos r ON r.id = w.repo_id
-		WHERE r.path = ? AND w.deleted_at IS NULL AND w.branch IS NOT NULL
+		WHERE r.path = ? COLLATE NOCASE AND w.deleted_at IS NULL AND w.branch IS NOT NULL
 		AND `+store.WorktreeNotTearingDown, repoRoot)
 	if err != nil {
 		return nil, err

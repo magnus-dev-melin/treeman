@@ -95,3 +95,25 @@ func TestLookupWorktreeAndIdempotencyCheckSurfaceStoreErrors(t *testing.T) {
 		t.Fatalf("LookupWorktree on a broken store = %q, %v, nil; want the query error", got, ok)
 	}
 }
+
+func TestLookupWorktreeMatchesTheRepoPathCaseInsensitivelyLikeEnsureRepo(t *testing.T) {
+	ctx := context.Background()
+	st := withTempStore(t)
+	base := t.TempDir()
+	registered := filepath.Join(base, "MyApp")
+	repoID, err := st.EnsureRepo(ctx, registered, "myapp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again, err := st.EnsureRepo(ctx, filepath.Join(base, "myapp"), "myapp"); err != nil || again != repoID {
+		t.Fatalf("EnsureRepo treats a case variant as the same repo: id %d vs %d, %v", again, repoID, err)
+	}
+	wtPath := filepath.Join(registered, ".worktrees", "feature-x")
+	if _, err := st.EnsureWorktree(ctx, repoID, wtPath, "app_feature-x", "feature/x"); err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err := LookupWorktree(ctx, filepath.Join(base, "myapp"), "feature-x", NoopSink{})
+	if err != nil || !ok || got != wtPath {
+		t.Fatalf("lookup through a case variant of the repo path = %q, %v, %v; want %s like EnsureRepo", got, ok, err, wtPath)
+	}
+}

@@ -452,7 +452,7 @@ func checkRegistry(ctx context.Context, repoRoot string) doctorResult {
 	}
 	defer func() { _ = st.Close() }()
 	rows, err := st.DB.QueryContext(ctx, `SELECT w.path FROM worktrees w
-		JOIN repos r ON r.id = w.repo_id WHERE r.path = ? AND w.deleted_at IS NULL`, repoRoot)
+		JOIN repos r ON r.id = w.repo_id WHERE r.path = ? COLLATE NOCASE AND w.deleted_at IS NULL`, repoRoot)
 	if err != nil {
 		return doctorResult{Name: "registry", Status: "fail", Detail: err.Error()}
 	}
@@ -736,7 +736,7 @@ func worktreeListTool(ctx context.Context, _ *mcpsdk.CallToolRequest, in worktre
 		if err != nil {
 			return nil, worktreeListOut{}, err
 		}
-		q += " AND r.path = ?"
+		q += " AND r.path = ? COLLATE NOCASE"
 		args = append(args, repo)
 	}
 	limit := in.Limit
