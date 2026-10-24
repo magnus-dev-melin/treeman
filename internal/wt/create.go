@@ -88,10 +88,7 @@ func Create(ctx context.Context, req CreateRequest, sink Sink) (CreateResult, er
 	if sink == nil {
 		sink = NoopSink{}
 	}
-	dbPath, _ := store.DefaultDBPath()
-	// Shared handle (#79): one SQLite open per `wt` invocation; helpers
-	// never close a shared store.
-	st, err := store.OpenShared(ctx, dbPath)
+	st, err := openSharedDefaultStore(ctx)
 	if err != nil {
 		return CreateResult{}, err
 	}

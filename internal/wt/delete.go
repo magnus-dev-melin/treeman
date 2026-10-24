@@ -2,6 +2,7 @@ package wt
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"os"
@@ -117,9 +118,15 @@ func Delete(ctx context.Context, req DeleteRequest, sink Sink) (DeleteResult, er
 	// rows, but an explicit path target bypasses the lookup, so check
 	// the path directly. Force stays as the escape hatch for a
 	// teardown that hung without landing delete:end / delete:error.
-	if !req.Force && teardownInFlight(ctx, req.RepoRoot, wtPath) {
-		return DeleteResult{}, fmt.Errorf(
-			"teardown already in progress for %s (use --force to run it again)", wtPath)
+	if !req.Force {
+		inFlight, err := teardownInFlight(ctx, req.RepoRoot, wtPath)
+		if err != nil {
+			return DeleteResult{}, err
+		}
+		if inFlight {
+			return DeleteResult{}, fmt.Errorf(
+				"teardown already in progress for %s (use --force to run it again)", wtPath)
+		}
 	}
 
 	if err := EnsureNotInUse(ctx, wtPath); err != nil {
@@ -148,28 +155,24 @@ func Delete(ctx context.Context, req DeleteRequest, sink Sink) (DeleteResult, er
 	return DeleteResult{WtPath: wtPath, Status: DeleteInline}, nil
 }
 
-// teardownInFlight reports whether the live registry row at wtPath is
-// mid-teardown (latest delete event is delete:start). Best-effort: an
-// unreadable store answers false and the delete proceeds.
-func teardownInFlight(ctx context.Context, repoRoot, wtPath string) bool {
-	dbPath, err := store.DefaultDBPath()
+func teardownInFlight(ctx context.Context, repoRoot, wtPath string) (bool, error) {
+	st, err := openSharedDefaultStore(ctx)
 	if err != nil {
-		return false
-	}
-	// Shared handle: this guard runs alongside LookupWorktree et al in
-	// the same invocation, and a shared store is never closed by
-	// helpers (#79).
-	st, err := store.OpenShared(ctx, dbPath)
-	if err != nil {
-		return false
+		return false, err
 	}
 	var one int
-	qErr := st.DB.QueryRowContext(ctx, `
+	err = st.DB.QueryRowContext(ctx, `
 		SELECT 1 FROM worktrees w JOIN repos r ON r.id = w.repo_id
 		WHERE r.path = ? COLLATE NOCASE AND w.path = ? COLLATE NOCASE
 		AND w.deleted_at IS NULL AND NOT (`+store.WorktreeNotTearingDown+`)`,
 		repoRoot, wtPath).Scan(&one)
-	return qErr == nil
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("check whether a teardown of %s is already running: %w", wtPath, err)
+	}
+	return true, nil
 }
 
 // pathsEqual reports whether two paths point at the same directory.

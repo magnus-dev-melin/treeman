@@ -188,3 +188,19 @@ func TestInlineTeardownRecordsTheDeleteLifecycle(t *testing.T) {
 		t.Fatalf("a failed in-process teardown must end in an error-level delete:error, got %+v", evs)
 	}
 }
+
+func TestDeleteRefusesWhenItCannotTellWhetherATeardownIsRunning(t *testing.T) {
+	ctx := context.Background()
+	st := withTempStore(t)
+	repoRoot := t.TempDir()
+	wtPath := filepath.Join(repoRoot, ".worktrees", "feature-x")
+	if err := os.MkdirAll(wtPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.DB.ExecContext(ctx, "DROP TABLE events"); err != nil {
+		t.Fatal(err)
+	}
+	if inFlight, err := teardownInFlight(ctx, repoRoot, wtPath); err == nil {
+		t.Fatalf("teardownInFlight on an unreadable event log = %v, nil; want the error, not \"no teardown running\"", inFlight)
+	}
+}

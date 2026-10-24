@@ -32,7 +32,7 @@ func TestOneSharedHandlePerInvocation(t *testing.T) {
 		if _, _, err := LookupWorktree(ctx, repo, "whatever", nil); err != nil {
 			t.Fatal(err)
 		}
-		if teardownInFlight(ctx, repo, filepath.Join(repo, "wt-a")) {
+		if inFlight, err := teardownInFlight(ctx, repo, filepath.Join(repo, "wt-a")); err != nil || inFlight {
 			t.Errorf("teardownInFlight must answer false on a fresh store")
 		}
 	}
