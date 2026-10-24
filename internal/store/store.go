@@ -755,9 +755,15 @@ func (s *Store) EnsureWorktreeWithAdmin(ctx context.Context, repoID int64, path,
 		// the winner's row and refresh it instead of failing loud.
 		if isUniqueConflict(err) {
 			row := s.DB.QueryRowContext(ctx, "SELECT id FROM worktrees WHERE path = ? COLLATE NOCASE", path)
-			if serr := row.Scan(&id); serr == nil {
+			serr := row.Scan(&id)
+			if serr == nil {
 				return refresh(id)
 			}
+			return 0, fmt.Errorf(
+				"register worktree %s: lost the insert race and could not read the winner's row: %w",
+				path,
+				errors.Join(err, serr),
+			)
 		}
 		return 0, err
 	}

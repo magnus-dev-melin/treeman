@@ -271,3 +271,24 @@ func TestBatchDirHashes_OverwriteOnConflict(t *testing.T) {
 		t.Errorf("conflict overwrite failed: %+v", got[dir])
 	}
 }
+
+func TestFileHashChunkReportsAnUnreadableRowInsteadOfSkippingIt(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(ctx, filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+	if _, err := st.DB.ExecContext(ctx,
+		`INSERT INTO file_hashes(path, size, mtime_ns, hash, cached_at) VALUES ('/a', 'not-a-size', 1, 'h', 1)`); err != nil {
+		t.Fatal(err)
+	}
+	cached := map[string]struct {
+		size  int64
+		mtime int64
+		hash  string
+	}{}
+	if st.loadFileHashChunk(ctx, []string{"/a"}, cached) {
+		t.Fatalf("an unreadable cache row was skipped as if the lookup succeeded: %+v", cached)
+	}
+}

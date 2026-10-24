@@ -51,7 +51,16 @@ func (s *Store) AllocateWorktreePort(ctx context.Context, repoID, worktreeID int
 		//   - (repo, name, port): another live worktree holds this
 		//     exact port. Caller picks the next candidate.
 		if isUniqueConflict(err) {
-			if held, herr := s.LookupWorktreePort(ctx, worktreeID, name); herr == nil && held > 0 {
+			held, herr := s.LookupWorktreePort(ctx, worktreeID, name)
+			if herr != nil {
+				return fmt.Errorf(
+					"reserve port slot %q for worktree %d: classify the conflict: %w",
+					name,
+					worktreeID,
+					errors.Join(err, herr),
+				)
+			}
+			if held > 0 {
 				return ErrSlotHeld
 			}
 			return ErrPortInUse

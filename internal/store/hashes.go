@@ -224,7 +224,8 @@ func (s *Store) loadFileHashChunk(ctx context.Context, batch []string, cached ma
 		var p, h string
 		var sz, mt int64
 		if err := rows.Scan(&p, &sz, &mt, &h); err != nil {
-			continue
+			slog.Warn("file_hashes batch scan failed", "err", err)
+			return false
 		}
 		cached[p] = struct {
 			size  int64
