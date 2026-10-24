@@ -188,7 +188,11 @@ func (lw *LifecycleWatcher) cancelPendingCreate(adminDir string) {
 }
 
 func (lw *LifecycleWatcher) onCreate(ctx context.Context, adminDir string) {
-	wtPath, ok := readGitdirFile(adminDir)
+	wtPath, ok, err := readGitdirFile(adminDir)
+	if err != nil {
+		slog.Error("lifecycle: skip setup", "admin", adminDir, "err", err)
+		return
+	}
 	if !ok {
 		slog.Warn("lifecycle: gitdir not resolvable", "admin", adminDir)
 		return
@@ -306,27 +310,20 @@ func (lw *LifecycleWatcher) reconcile(ctx context.Context) error {
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("read %s: %w", lw.adminRoot, err)
 	}
-	onDisk := map[string]string{}
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		admin := filepath.Join(lw.adminRoot, e.Name())
-		wtPath, ok := readGitdirFile(admin)
-		if !ok {
-			continue
-		}
-		onDisk[admin] = wtPath
-	}
+	onDisk, errs := lw.adminDirsOnDisk(entries)
 
 	dbRows, err := lw.st.Store.ListWorktreesForRepo(ctx, lw.repoID)
 	if err != nil {
 		return fmt.Errorf("list worktrees: %w", err)
 	}
 	dbByAdmin := map[string]store.WorktreeRow{}
+	unstampedByPath := map[string]store.WorktreeRow{}
 	for _, w := range dbRows {
-		if w.AdminDir != "" {
+		switch {
+		case w.AdminDir != "":
 			dbByAdmin[w.AdminDir] = w
+		case !w.Deleted:
+			unstampedByPath[w.Path] = w
 		}
 	}
 
@@ -345,6 +342,12 @@ func (lw *LifecycleWatcher) reconcile(ctx context.Context) error {
 		lw.seen[admin] = wtPath
 		lw.mu.Unlock()
 		row, ok := dbByAdmin[admin]
+		if unstamped, found := unstampedByPath[wtPath]; !ok && found {
+			if err := lw.st.Store.SetWorktreeAdminDir(ctx, unstamped.ID, admin); err != nil {
+				errs = append(errs, fmt.Errorf("record admin dir %s for worktree %s: %w", admin, wtPath, err))
+			}
+			continue
+		}
 		if !ok || row.Deleted {
 			wg.Add(1)
 			sem <- struct{}{}
@@ -353,13 +356,6 @@ func (lw *LifecycleWatcher) reconcile(ctx context.Context) error {
 				defer func() { <-sem }()
 				lw.onCreate(ctx, admin)
 			})
-			continue
-		}
-		// Row exists and active — make sure admin_dir is stamped
-		// even if the row was first inserted via the CLI path that
-		// doesn't yet populate it.
-		if row.AdminDir == "" {
-			_ = lw.st.Store.SetWorktreeAdminDir(ctx, row.ID, admin)
 		}
 	}
 
@@ -379,8 +375,68 @@ func (lw *LifecycleWatcher) reconcile(ctx context.Context) error {
 			lw.onRemove(ctx, admin)
 		})
 	}
+	errs = append(errs, lw.reapUnstamped(ctx, unstampedByPath, onDisk, &wg, sem)...)
 	wg.Wait()
-	return nil
+	return errors.Join(errs...)
+}
+
+func (lw *LifecycleWatcher) adminDirsOnDisk(entries []fs.DirEntry) (map[string]string, []error) {
+	onDisk := map[string]string{}
+	var errs []error
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		admin := filepath.Join(lw.adminRoot, e.Name())
+		wtPath, ok, err := readGitdirFile(admin)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		if ok {
+			onDisk[admin] = wtPath
+		}
+	}
+	return onDisk, errs
+}
+
+func (lw *LifecycleWatcher) reapUnstamped(
+	ctx context.Context,
+	unstampedByPath map[string]store.WorktreeRow,
+	onDisk map[string]string,
+	wg *sync.WaitGroup,
+	sem chan struct{},
+) []error {
+	onDiskPaths := make(map[string]bool, len(onDisk))
+	for _, p := range onDisk {
+		onDiskPaths[p] = true
+	}
+	var errs []error
+	for path, row := range unstampedByPath {
+		if row.IsMain || onDiskPaths[path] {
+			continue
+		}
+		if _, err := os.Stat(path); err == nil {
+			continue
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			errs = append(errs, fmt.Errorf("check whether worktree %s still exists: %w", path, err))
+			continue
+		}
+		wg.Add(1)
+		sem <- struct{}{}
+		safeGo(lblLifecycle, path, func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+			if lw.st.IsTeardownInFlight(path) {
+				return
+			}
+			slog.Info("lifecycle: teardown dispatched", "repo", lw.repoPath, "wt", path)
+			if err := teardownOrphan(ctx, lw.st, lw.repoPath, path); err != nil {
+				slog.Warn("lifecycle: teardown failed", "wt", path, "err", err)
+			}
+		})
+	}
+	return errs
 }
 
 // teardownOrphan is the "working tree already gone" variant of
@@ -552,20 +608,21 @@ func resolveGitCommonDir(repoPath string) (string, error) {
 // linked worktree is created. The file's content is the absolute path
 // of the working tree's `.git` gitlink file — strip the trailing
 // `/.git` to get the working tree root.
-func readGitdirFile(adminDir string) (string, bool) {
-	b, err := os.ReadFile(filepath.Join(adminDir, "gitdir"))
+func readGitdirFile(adminDir string) (string, bool, error) {
+	p := filepath.Join(adminDir, "gitdir")
+	b, err := os.ReadFile(p)
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", false, nil
+	}
 	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return "", false
-		}
-		return "", false
+		return "", false, fmt.Errorf("read %s: %w", p, err)
 	}
 	line := strings.TrimSpace(string(b))
 	if line == "" {
-		return "", false
+		return "", false, nil
 	}
 	if before, ok := strings.CutSuffix(line, "/.git"); ok {
-		return before, true
+		return before, true, nil
 	}
-	return filepath.Dir(line), true
+	return filepath.Dir(line), true, nil
 }

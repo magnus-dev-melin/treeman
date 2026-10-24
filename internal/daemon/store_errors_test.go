@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stubbedev/treeman/internal/store"
 	"github.com/stubbedev/treeman/pkg/rpc"
@@ -125,5 +126,61 @@ func TestTeardownFailureRecordsDeleteError(t *testing.T) {
 	}
 	if state, _ := store.DeriveWorktreeState(last); state != store.StateError {
 		t.Fatalf("a failed teardown must read as error, not %q", state)
+	}
+}
+
+func TestReconcileStampsCLIRowsAndReapsTheirVanishedWorktrees(t *testing.T) {
+	requireGitAutofetch(t)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("TREEMAN_CONFIG", "")
+	st := newTestState(t)
+	ctx := t.Context()
+	repo := filepath.Join(t.TempDir(), "repo")
+	gitRun(t, "", "init", "-q", "-b", "main", repo)
+	gitRun(t, repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "init")
+	live := filepath.Join(repo, ".worktrees", "live")
+	gitRun(t, repo, "worktree", "add", "-q", "-b", "live", live)
+	gone := filepath.Join(repo, ".worktrees", "gone")
+
+	repoID, err := st.Store.EnsureRepo(ctx, repo, "repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	liveID, err := st.Store.EnsureWorktree(ctx, repoID, live, "live", "live")
+	if err != nil {
+		t.Fatal(err)
+	}
+	goneID, err := st.Store.EnsureWorktree(ctx, repoID, gone, "gone", "gone")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	lw := &LifecycleWatcher{
+		repoID: repoID, repoPath: repo, adminRoot: filepath.Join(repo, ".git", "worktrees"), st: st,
+		seen: map[string]string{}, pendingCreate: map[string]*time.Timer{},
+	}
+	if err := lw.reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	admin := filepath.Join(repo, ".git", "worktrees", "live")
+	byAdmin, err := st.Store.LookupWorktreeByAdminDir(ctx, admin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if byAdmin.ID != liveID {
+		t.Fatalf("reconcile must record admin dir %s for the CLI-registered worktree #%d, got row %+v", admin, liveID, byAdmin)
+	}
+	rows, err := st.Store.ListWorktreesForRepo(ctx, repoID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range rows {
+		if r.ID == goneID && !r.Deleted {
+			t.Fatalf("a CLI-registered worktree removed while the daemon was down must be reaped, got %+v", r)
+		}
+		if r.ID == liveID && r.Deleted {
+			t.Fatalf("the live worktree was reaped: %+v", r)
+		}
 	}
 }
