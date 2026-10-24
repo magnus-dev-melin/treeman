@@ -2,6 +2,7 @@ package prepare
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"strconv"
 	"sync"
@@ -77,5 +78,68 @@ func TestSpareClaimRestoreDistinctBoundedSlots(t *testing.T) {
 	}
 	if plain != restores-2 {
 		t.Errorf("plain restores = %d, want %d (restores beyond the pool fall back)", plain, restores-2)
+	}
+}
+
+type replenishConn struct {
+	engineconn.Conn
+	mu         sync.Mutex
+	probeErr   map[string]error
+	createErr  map[string]error
+	created    []string
+	createSeen []string
+}
+
+func (c *replenishConn) Exists(_ context.Context, name string) (bool, error) {
+	if err := c.probeErr[name]; err != nil {
+		return false, err
+	}
+	return name == "tpl", nil
+}
+
+func (c *replenishConn) CreateSnapshot(ctx context.Context, _, name string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.createSeen = append(c.createSeen, name)
+	if err := c.createErr[name]; err != nil {
+		return err
+	}
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	c.created = append(c.created, name)
+	return nil
+}
+
+func (c *replenishConn) ListMatching(context.Context, string) ([]string, error) { return nil, nil }
+
+func TestReplenishSparesSkipsOnlyWhatItCannotProbeAndKeepsGoingPastAFailedRestore(t *testing.T) {
+	ctx := context.Background()
+	probeFail := snapshot.SpareName("tpl", 2)
+	restoreFail := snapshot.SpareName("tpl", 1)
+	conn := &replenishConn{
+		probeErr:  map[string]error{probeFail: errors.New("probe down")},
+		createErr: map[string]error{restoreFail: errors.New("disk full")},
+	}
+	se := &spareEngine{engine: "postgres", conn: conn, creator: conn}
+	got := replenishSpares(ctx, se, "tpl", 4)
+	if got != 2 {
+		t.Fatalf("created %d spares (%v), want 2: slot 1 fails, slot 2 is unprobeable, slots 3 and 4 succeed", got, conn.created)
+	}
+	for _, name := range conn.createSeen {
+		if name == probeFail {
+			t.Errorf("restored %s although its existence could not be probed", name)
+		}
+	}
+
+	dead := &replenishConn{probeErr: map[string]error{"tpl": errors.New("template probe down")}}
+	if got := replenishSpares(
+		ctx,
+		&spareEngine{engine: "postgres", conn: dead, creator: dead},
+		"tpl",
+		2,
+	); got != 0 ||
+		len(dead.createSeen) != 0 {
+		t.Fatalf("an unprobeable template still got %d spares (%v)", got, dead.createSeen)
 	}
 }

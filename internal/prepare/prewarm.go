@@ -218,49 +218,7 @@ func spawnPrewarm(
 		// The template can vanish between the triggering prepare and
 		// this goroutine running (eviction raced the pin). Spares of a
 		// dead template are unreachable, so just bail.
-		if alive, _ := se.conn.Exists(ctx, templateName); !alive {
-			return
-		}
-
-		created := atomic.Int64{}
-		// Missing slots are restored concurrently: each restore is a full
-		// template copy, so serial top-up after a burst made the tail of
-		// the burst wait n x copy (the exact cost the pool exists to
-		// avoid). Slot names are distinct so restores can't collide; the
-		// cap keeps us from piling copy load onto the server beyond a
-		// small multiple of what a create burst needs.
-		restoreLimit := int(min(n, 4))
-		g, gctx := errgroup.WithContext(ctx)
-		g.SetLimit(restoreLimit)
-		for slot := 1; slot <= int(n); slot++ {
-			name := snapshot.SpareName(templateName, slot)
-			if exists, _ := se.conn.Exists(ctx, name); exists {
-				continue
-			}
-			g.Go(func() error {
-				if err := se.creator.CreateSnapshot(gctx, templateName, name); err != nil {
-					slog.Warn("prewarm restore", "spare", name, "template", templateName, "err", err)
-					return err
-				}
-				created.Add(1)
-				return nil
-			})
-		}
-		_ = g.Wait()
-		createdN := int(created.Load())
-
-		// Reap slots beyond n so shrinking `prewarm` in config actually
-		// shrinks the pool instead of leaving zombie spares around until
-		// template eviction.
-		if names, err := se.conn.ListMatching(ctx, templateName+snapshot.PrewarmSuffix); err == nil {
-			for _, name := range names {
-				if slot, ok := snapshot.SpareSlot(name, templateName); ok && slot > int(n) {
-					if err := se.conn.DropSnapshot(ctx, name); err != nil {
-						slog.Warn("prewarm reap extra slot", "spare", name, "err", err)
-					}
-				}
-			}
-		}
+		createdN := replenishSpares(ctx, se, templateName, n)
 
 		if createdN > 0 {
 			_ = st.WriteEvent(ctx, store.LevelInfo, store.EvtSnapshotsPrewarm,
@@ -273,4 +231,62 @@ func spawnPrewarm(
 				})
 		}
 	})
+}
+
+func replenishSpares(ctx context.Context, se *spareEngine, templateName string, n uint32) int {
+	alive, err := se.conn.Exists(ctx, templateName)
+	if err != nil {
+		slog.Warn("prewarm probe template", "engine", se.engine, "template", templateName, "err", err)
+		return 0
+	}
+	if !alive {
+		return 0
+	}
+
+	created := atomic.Int64{}
+	// Missing slots are restored concurrently: each restore is a full
+	// template copy, so serial top-up after a burst made the tail of
+	// the burst wait n x copy (the exact cost the pool exists to
+	// avoid). Slot names are distinct so restores can't collide; the
+	// cap keeps us from piling copy load onto the server beyond a
+	// small multiple of what a create burst needs.
+	restoreLimit := int(min(n, 4))
+	var g errgroup.Group
+	g.SetLimit(restoreLimit)
+	for slot := 1; slot <= int(n); slot++ {
+		name := snapshot.SpareName(templateName, slot)
+		exists, err := se.conn.Exists(ctx, name)
+		if err != nil {
+			slog.Warn("prewarm probe spare", "spare", name, "template", templateName, "err", err)
+			continue
+		}
+		if exists {
+			continue
+		}
+		g.Go(func() error {
+			if err := se.creator.CreateSnapshot(ctx, templateName, name); err != nil {
+				slog.Warn("prewarm restore", "spare", name, "template", templateName, "err", err)
+				return err
+			}
+			created.Add(1)
+			return nil
+		})
+	}
+	_ = g.Wait()
+
+	// Reap slots beyond n so shrinking `prewarm` in config actually
+	// shrinks the pool instead of leaving zombie spares around until
+	// template eviction.
+	names, err := se.conn.ListMatching(ctx, templateName+snapshot.PrewarmSuffix)
+	if err != nil {
+		slog.Warn("prewarm list spares to reap", "template", templateName, "err", err)
+	}
+	for _, name := range names {
+		if slot, ok := snapshot.SpareSlot(name, templateName); ok && slot > int(n) {
+			if err := se.conn.DropSnapshot(ctx, name); err != nil {
+				slog.Warn("prewarm reap extra slot", "spare", name, "err", err)
+			}
+		}
+	}
+	return int(created.Load())
 }
