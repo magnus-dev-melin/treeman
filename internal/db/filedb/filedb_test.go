@@ -59,8 +59,8 @@ func TestExistsAndSizeKB(t *testing.T) {
 	if ok, err := Exists(p); !ok || err != nil {
 		t.Fatalf("regular file: Exists=%t err=%v", ok, err)
 	}
-	if got := SizeKB(p); got != 4 {
-		t.Errorf("SizeKB=%d, want 4", got)
+	if got, err := SizeKB(p); err != nil || got != 4 {
+		t.Errorf("SizeKB=%d, %v; want 4", got, err)
 	}
 	// A directory is not a database file.
 	if ok, err := Exists(dir); ok || err != nil {

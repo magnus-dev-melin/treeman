@@ -1160,8 +1160,7 @@ func (d *Driver) DropSnapshot(ctx context.Context, template string) error {
 		return err
 	}
 	_, err = d.DB.ExecContext(ctx, "DROP DATABASE IF EXISTS "+qtemplate)
-	d.dropStage(ctx, template)
-	return err
+	return errors.Join(err, d.dropStage(ctx, template))
 }
 
 // DropDatabase drops EXACTLY the named database — never a prefix match.

@@ -723,9 +723,11 @@ func (d *Driver) copyObjectMultipart(ctx context.Context, src, dst, key string, 
 		})
 	}
 	if err := g.Wait(); err != nil {
-		_, _ = d.Client.AbortMultipartUpload(ctx, &awss3.AbortMultipartUploadInput{
+		if _, aerr := d.Client.AbortMultipartUpload(ctx, &awss3.AbortMultipartUploadInput{
 			Bucket: &dst, Key: &key, UploadId: uploadID,
-		})
+		}); aerr != nil {
+			return errors.Join(err, fmt.Errorf("abort the multipart upload of %s/%s: %w", dst, key, aerr))
+		}
 		return err
 	}
 	_, err = d.Client.CompleteMultipartUpload(ctx, &awss3.CompleteMultipartUploadInput{

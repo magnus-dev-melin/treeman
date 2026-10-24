@@ -15,6 +15,7 @@ package engineconn
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/stubbedev/treeman/internal/config"
 	dbes "github.com/stubbedev/treeman/internal/db/es"
@@ -51,7 +52,7 @@ type Conn interface {
 	ListMatching(ctx context.Context, prefix string) ([]string, error)
 	// SizeKB is the on-disk size of `name` in KiB, or 0 when the engine
 	// exposes no size.
-	SizeKB(ctx context.Context, name string) int64
+	SizeKB(ctx context.Context, name string) (int64, error)
 }
 
 // SnapshotCreator is the optional capability of creating `target` as a
@@ -127,15 +128,15 @@ func (c mysqlConn) ListMatching(ctx context.Context, p string) ([]string, error)
 	return c.d.ListMatching(ctx, p)
 }
 
-func (c mysqlConn) SizeKB(ctx context.Context, n string) int64 {
-	// SUM(data_length+index_length) — bytes-on-disk per
-	// information_schema.tables.
+func (c mysqlConn) SizeKB(ctx context.Context, n string) (int64, error) {
 	var size int64
-	_ = c.d.DB.QueryRowContext(ctx, `
+	if err := c.d.DB.QueryRowContext(ctx, `
 		SELECT IFNULL(SUM(data_length + index_length), 0)
 		FROM information_schema.tables WHERE table_schema = ?
-	`, n).Scan(&size)
-	return size / 1024
+	`, n).Scan(&size); err != nil {
+		return 0, fmt.Errorf("mysql: size of %s: %w", n, err)
+	}
+	return size / 1024, nil
 }
 
 type postgresConn struct{ d *dbpostgres.Driver }
@@ -166,10 +167,12 @@ func (c postgresConn) ListMatching(ctx context.Context, p string) ([]string, err
 	return c.d.ListMatching(ctx, p)
 }
 
-func (c postgresConn) SizeKB(ctx context.Context, n string) int64 {
+func (c postgresConn) SizeKB(ctx context.Context, n string) (int64, error) {
 	var size int64
-	_ = c.d.DB.QueryRowContext(ctx, "SELECT pg_database_size($1)/1024", n).Scan(&size)
-	return size
+	if err := c.d.DB.QueryRowContext(ctx, "SELECT pg_database_size($1)/1024", n).Scan(&size); err != nil {
+		return 0, fmt.Errorf("postgres: size of %s: %w", n, err)
+	}
+	return size, nil
 }
 
 // mongoConn carries the connect-time ctx so Close can satisfy the
@@ -199,9 +202,12 @@ func (c mongoConn) ListMatching(ctx context.Context, p string) ([]string, error)
 	return c.d.ListMatching(ctx, p)
 }
 
-func (c mongoConn) SizeKB(ctx context.Context, n string) int64 {
-	b, _ := c.d.DataSizeBytes(ctx, n)
-	return b / 1024
+func (c mongoConn) SizeKB(ctx context.Context, n string) (int64, error) {
+	b, err := c.d.DataSizeBytes(ctx, n)
+	if err != nil {
+		return 0, fmt.Errorf("mongodb: size of %s: %w", n, err)
+	}
+	return b / 1024, nil
 }
 
 type redisConn struct{ d *dbredis.Driver }
@@ -233,7 +239,7 @@ func (c redisConn) ListMatching(ctx context.Context, p string) ([]string, error)
 // SizeKB is 0 for Redis: prefix size has no cheap server-side query —
 // it would need a SCAN + per-key MEMORY USAGE, too expensive for an
 // inspection probe. Left unimplemented rather than stubbed misleadingly.
-func (redisConn) SizeKB(context.Context, string) int64 { return 0 }
+func (redisConn) SizeKB(context.Context, string) (int64, error) { return 0, nil }
 
 // esConn — the ES driver holds no closable handle, so Close is a no-op.
 type esConn struct{ d *dbes.Driver }
@@ -256,9 +262,12 @@ func (c esConn) ListMatching(ctx context.Context, p string) ([]string, error) {
 	return c.d.ListMatching(ctx, p)
 }
 
-func (c esConn) SizeKB(ctx context.Context, n string) int64 {
-	b, _ := c.d.StoreSizeBytes(ctx, n)
-	return b / 1024
+func (c esConn) SizeKB(ctx context.Context, n string) (int64, error) {
+	b, err := c.d.StoreSizeBytes(ctx, n)
+	if err != nil {
+		return 0, fmt.Errorf("elasticsearch: size of %s: %w", n, err)
+	}
+	return b / 1024, nil
 }
 
 // s3Conn — bucket-scoped object store. The aws-sdk client holds no
@@ -290,7 +299,7 @@ func (c s3Conn) ListMatching(ctx context.Context, p string) ([]string, error) {
 
 // SizeKB is 0 for S3: ListBuckets exposes no per-bucket byte count and a
 // full object walk is too expensive for an inspection probe.
-func (s3Conn) SizeKB(context.Context, string) int64 { return 0 }
+func (s3Conn) SizeKB(context.Context, string) (int64, error) { return 0, nil }
 
 // Configured reports whether (fam, name) has a usable connection in
 // cfg — i.e. whether Connect would return configured=true. Lets callers

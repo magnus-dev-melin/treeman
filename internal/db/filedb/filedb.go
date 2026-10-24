@@ -57,12 +57,12 @@ func Exists(path string) (bool, error) {
 
 // SizeKB is the main file's size in KiB (sidecars excluded, matching
 // how the networked engines report data-only sizes).
-func SizeKB(path string) int64 {
+func SizeKB(path string) (int64, error) {
 	info, err := os.Stat(path)
 	if err != nil {
-		return 0
+		return 0, fmt.Errorf("size of %s: %w", path, err)
 	}
-	return info.Size() / 1024
+	return info.Size() / 1024, nil
 }
 
 // CopyDatabase copies the main file plus any sidecars present. The

@@ -37,8 +37,8 @@ func (f *fakeConn) Drop(context.Context, string) error { return errors.ErrUnsupp
 func (f *fakeConn) Exists(context.Context, string) (bool, error) {
 	return false, errors.ErrUnsupported
 }
-func (f *fakeConn) SizeKB(context.Context, string) int64       { return 0 }
-func (f *fakeConn) DropSnapshot(context.Context, string) error { return nil }
+func (f *fakeConn) SizeKB(context.Context, string) (int64, error) { return 0, nil }
+func (f *fakeConn) DropSnapshot(context.Context, string) error    { return nil }
 
 func (f *fakeConn) DropDatabase(_ context.Context, name string) error {
 	_, err := f.DropMatching(context.Background(), name)

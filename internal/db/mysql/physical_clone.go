@@ -3,6 +3,7 @@ package mysql
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -136,9 +137,7 @@ func (d *Driver) tryPhysicalSnapshotCreate(ctx context.Context, source, template
 		}
 		dropCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		_, _ = d.DB.ExecContext(dropCtx, "DROP DATABASE IF EXISTS "+qtemplate)
-		_ = exec.CommandContext(dropCtx, engineBin,
-			"exec", cid, "rm", "-rf", datadir+"/"+template).Run()
+		err = errors.Join(err, cleanupPartialSchema(dropCtx, d, engineBin, cid, datadir, template, qtemplate))
 	}()
 
 	// Recreate every table on the template + discard its tablespace.
@@ -272,4 +271,15 @@ func recreateAndDiscard(ctx context.Context, conn *sql.Conn, qsource, t string) 
 		return fmt.Errorf("DISCARD TABLESPACE %s: %w", qt, err)
 	}
 	return nil
+}
+
+func cleanupPartialSchema(ctx context.Context, d *Driver, engineBin, cid, datadir, name, qname string) error {
+	var errs []error
+	if _, err := d.DB.ExecContext(ctx, "DROP DATABASE IF EXISTS "+qname); err != nil {
+		errs = append(errs, fmt.Errorf("drop the partially built %s: %w", name, err))
+	}
+	if out, err := exec.CommandContext(ctx, engineBin, "exec", cid, "rm", "-rf", datadir+"/"+name).CombinedOutput(); err != nil {
+		errs = append(errs, fmt.Errorf("remove the data directory of %s: %w: %s", name, err, strings.TrimSpace(string(out))))
+	}
+	return errors.Join(errs...)
 }

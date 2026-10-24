@@ -37,7 +37,7 @@ func (c countingConn) DropDatabase(_ context.Context, n string) error {
 func (c countingConn) ListMatching(context.Context, string) ([]string, error) {
 	return nil, nil
 }
-func (c countingConn) SizeKB(context.Context, string) int64 { return 0 }
+func (c countingConn) SizeKB(context.Context, string) (int64, error) { return 0, nil }
 
 // TestTeardownSlugsConnReusePins the #88 contract: a batch teardown
 // over N slugs dials each engine family at most once, still renders

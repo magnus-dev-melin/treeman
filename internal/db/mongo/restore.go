@@ -410,7 +410,10 @@ func (s *wireStager) cleanup(ctx context.Context) {
 	bgctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	defer cancel()
 	for _, p := range s.staged {
-		_ = s.client.Database(p.db).Collection(restoreStagePrefix + p.coll).Drop(bgctx)
+		if err := s.client.Database(p.db).Collection(restoreStagePrefix + p.coll).Drop(bgctx); err != nil {
+			slog.Warn("mongo restore: staging collection left behind after a failed restore",
+				"ns", p.db+"."+restoreStagePrefix+p.coll, "err", err)
+		}
 	}
 }
 

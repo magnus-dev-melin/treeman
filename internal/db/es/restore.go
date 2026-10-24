@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -96,8 +97,7 @@ func (d *Driver) Restore(ctx context.Context, sourcePrefix, dumpPath string) err
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		_ = g.Wait()
-		return fmt.Errorf("read dump: %w", err)
+		return errors.Join(fmt.Errorf("read dump: %w", err), g.Wait())
 	}
 	flush()
 	if err := g.Wait(); err != nil {

@@ -6,9 +6,11 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -71,7 +73,12 @@ func containerToolConfig(ctx context.Context, engineBin, cid, uri string) (path 
 		return "", nil, fmt.Errorf("%s exec: write mongo tool config: %w (%s)", engineBin, err, strings.TrimSpace(string(out)))
 	}
 	remove = func() {
-		_ = exec.Command(engineBin, "exec", cid, "rm", "-f", path).Run() //nolint:noctx // cleanup must run even after ctx is cancelled
+		rmCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		defer cancel()
+		if out, err := exec.CommandContext(rmCtx, engineBin, "exec", cid, "rm", "-f", path).CombinedOutput(); err != nil {
+			slog.Error("mongo tool config holding credentials was not removed from the container",
+				"container", cid, "path", path, "err", err, "output", strings.TrimSpace(string(out)))
+		}
 	}
 	return path, remove, nil
 }

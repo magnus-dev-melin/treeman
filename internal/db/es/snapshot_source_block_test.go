@@ -107,7 +107,9 @@ func TestSourceBlockRefcount(t *testing.T) {
 		t.Errorf("set called %d times, want 1", sets)
 	}
 	for i := range 5 {
-		releaseSourceReadOnly(ctx, "base", idx, clearFn)
+		if err := releaseSourceReadOnly(ctx, "base", idx, clearFn); err != nil {
+			t.Fatal(err)
+		}
 		want := 0
 		if i == 4 {
 			want = 1
@@ -124,7 +126,9 @@ func TestSourceBlockRefcount(t *testing.T) {
 		t.Fatalf("acquire want boom, got %v", err)
 	}
 	cleared := 0
-	releaseSourceReadOnly(ctx, "base", idx2, func(context.Context) error { cleared++; return nil })
+	if err := releaseSourceReadOnly(ctx, "base", idx2, func(context.Context) error { cleared++; return nil }); err != nil {
+		t.Fatal(err)
+	}
 	if cleared != 0 {
 		t.Errorf("release after failed acquire cleared %d times, want 0", cleared)
 	}
@@ -244,7 +248,9 @@ func TestSourceBlockRetiredAfterRelease(t *testing.T) {
 	if !present() {
 		t.Fatal("entry missing while held")
 	}
-	releaseSourceReadOnly(ctx, "base", idx, noop)
+	if err := releaseSourceReadOnly(ctx, "base", idx, noop); err != nil {
+		t.Fatal(err)
+	}
 	if present() {
 		t.Errorf("entry not retired after final release")
 	}
@@ -266,7 +272,9 @@ func TestSourceBlockConcurrentChurn(t *testing.T) {
 				t.Error(err)
 				return
 			}
-			releaseSourceReadOnly(ctx, "base", idx, noop)
+			if err := releaseSourceReadOnly(ctx, "base", idx, noop); err != nil {
+				t.Fatal(err)
+			}
 		})
 	}
 	wg.Wait()
@@ -285,4 +293,16 @@ func readAll(r *http.Request) string {
 	}
 	b, _ := io.ReadAll(r.Body)
 	return string(b)
+}
+
+func TestReleaseSourceReadOnlyReportsAFailedUnblock(t *testing.T) {
+	ctx := context.Background()
+	idx := "release-fail-" + t.Name()
+	if err := acquireSourceReadOnly(ctx, "base", idx, func(context.Context) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	err := releaseSourceReadOnly(ctx, "base", idx, func(context.Context) error { return errors.New("cluster read-only") })
+	if err == nil || !strings.Contains(err.Error(), idx) || !strings.Contains(err.Error(), "cluster read-only") {
+		t.Fatalf("release with a failing unblock = %v, want an error naming the index and the cause", err)
+	}
 }

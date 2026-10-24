@@ -39,7 +39,7 @@ func (c countingDropConn) DropMatching(_ context.Context, n string) (int, error)
 func (c countingDropConn) ListMatching(context.Context, string) ([]string, error) {
 	return nil, nil
 }
-func (c countingDropConn) SizeKB(context.Context, string) int64 { return 0 }
+func (c countingDropConn) SizeKB(context.Context, string) (int64, error) { return 0, nil }
 
 // TestEvictCandidatesOneDialPerFamily pins the #55 acceptance
 // criterion: evicting N templates performs at most #engines connects

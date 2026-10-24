@@ -86,8 +86,11 @@ func (d *Driver) SnapshotRestore(ctx context.Context, template, target string) e
 // DropSnapshot drops the named template database. Used by the
 // snapshot GC sweep. Also reaps the cached dump archive (best-effort).
 func (d *Driver) DropSnapshot(ctx context.Context, template string) error {
-	d.dropArchive(ctx, template)
-	return d.Client.Database(template).Drop(ctx)
+	archiveErr := d.dropArchive(ctx, template)
+	if err := d.Client.Database(template).Drop(ctx); err != nil {
+		return errors.Join(fmt.Errorf("drop template %s: %w", template, err), archiveErr)
+	}
+	return archiveErr
 }
 
 // DropDatabase drops EXACTLY the named database — never a prefix match.
@@ -119,7 +122,9 @@ func (d *Driver) cloneViaOut(ctx context.Context, source, dest string) error {
 		if _, err := sentinel.InsertOne(ctx, bson.D{{Key: "_treeman", Value: 1}}); err != nil {
 			return fmt.Errorf("seed empty dest %s: %w", dest, err)
 		}
-		_ = sentinel.Drop(ctx)
+		if err := sentinel.Drop(ctx); err != nil {
+			return fmt.Errorf("drop the seed collection from empty dest %s: %w", dest, err)
+		}
 		return nil
 	}
 	g, gctx := errgroup.WithContext(ctx)

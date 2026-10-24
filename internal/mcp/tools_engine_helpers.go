@@ -101,7 +101,9 @@ func probeTemplate(ctx context.Context, cfg *config.Config, eng, connName, templ
 	}
 	p := templateProbe{exists: exists, version: ver}
 	if exists {
-		p.sizeKB = conn.SizeKB(ctx, template)
+		if p.sizeKB, err = conn.SizeKB(ctx, template); err != nil {
+			return templateProbe{}, fmt.Errorf("read the size of %s template %s: %w", eng, template, err)
+		}
 	}
 	return p, nil
 }

@@ -126,16 +126,16 @@ func isSnapshotTemplate(name string) bool {
 	return strings.HasPrefix(name, "_tm")
 }
 
-// dropArchive best-effort removes a template's cached dump archive and
-// forgets the in-memory entry. Silent on every failure — the archive is
-// a cache, not state.
-func (d *Driver) dropArchive(ctx context.Context, template string) {
+func (d *Driver) dropArchive(ctx context.Context, template string) error {
 	d.archives.Delete(template)
+	if d.cfg.Container == "" && d.cfg.ComposeService == "" {
+		return nil
+	}
 	cid, engineBin, err := d.resolveContainer(ctx)
 	if err != nil {
-		return
+		return fmt.Errorf("remove the dump archive of %s: %w", template, err)
 	}
-	_ = dockerExecSh(ctx, engineBin, cid,
+	return dockerExecSh(ctx, engineBin, cid,
 		"rm -f "+shQuote(mongoStageDir+"/"+template+".archive"), "rm archive")
 }
 

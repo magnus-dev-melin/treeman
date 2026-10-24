@@ -190,7 +190,9 @@ func (d *Driver) stageTemplate(ctx context.Context, st *templateStage, template 
 		copyErr = fmt.Errorf("UNLOCK TABLES: %w", err)
 	}
 	if copyErr != nil {
-		_ = dockerExecRoot(ctx, engineBin, cid, "rm", "-rf", stageDir)
+		if rmErr := dockerExecRoot(ctx, engineBin, cid, "rm", "-rf", stageDir); rmErr != nil {
+			copyErr = errors.Join(copyErr, fmt.Errorf("remove the partial stage %s: %w", stageDir, rmErr))
+		}
 		st.err = copyErr
 		return
 	}
@@ -300,9 +302,7 @@ func (d *Driver) physicalRestoreFromStage(ctx context.Context, st *templateStage
 		}
 		dropCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		_, _ = d.DB.ExecContext(dropCtx, "DROP DATABASE IF EXISTS "+qtarget)
-		_ = exec.CommandContext(dropCtx, st.engineBin,
-			"exec", st.cid, "rm", "-rf", st.datadir+"/"+target).Run()
+		err = errors.Join(err, cleanupPartialSchema(dropCtx, d, st.engineBin, st.cid, st.datadir, target, qtarget))
 	}()
 
 	prepConn, releasePrepConn, err := sessionConn(ctx, d.DB)
@@ -392,8 +392,8 @@ func buildImportScript(tables []string) (string, error) {
 // dropStage best-effort removes a template's staging dir. Resolves the
 // path from secure_file_priv rather than the in-memory map so a daemon
 // that never staged this template (e.g. after a restart) still cleans
-// up. Silent on every failure: staging is a cache, not state.
-func (d *Driver) dropStage(ctx context.Context, template string) {
+// up.
+func (d *Driver) dropStage(ctx context.Context, template string) error {
 	d.stagesMu.Lock()
 	if d.stages != nil {
 		delete(d.stages, template)
@@ -401,7 +401,7 @@ func (d *Driver) dropStage(ctx context.Context, template string) {
 	d.stagesMu.Unlock()
 
 	if d.cfg.Container == "" && d.cfg.ComposeService == "" {
-		return
+		return nil
 	}
 	opts := containerip.Opts{
 		Container:      d.cfg.Container,
@@ -410,26 +410,31 @@ func (d *Driver) dropStage(ctx context.Context, template string) {
 		Engine:         d.cfg.ContainerEngine,
 		Network:        d.cfg.Network,
 	}
-	cid, err := containerip.ContainerID(ctx, opts)
-	if err != nil {
-		return
-	}
 	engineBin := opts.Engine
 	if engineBin == "" {
 		engineBin = "docker"
 	}
-	if _, err := exec.LookPath(engineBin); err != nil {
-		return
+	if _, err := exec.LookPath(engineBin); errors.Is(err, exec.ErrNotFound) {
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("remove the tablespace stage of %s: look up %s: %w", template, engineBin, err)
+	}
+	cid, err := containerip.ContainerID(ctx, opts)
+	if err != nil {
+		return fmt.Errorf("remove the tablespace stage of %s: resolve the mysql container: %w", template, err)
 	}
 	var secureDir sql.NullString
 	if err := d.DB.QueryRowContext(ctx, "SELECT @@secure_file_priv").Scan(&secureDir); err != nil {
-		return
+		return fmt.Errorf("remove the tablespace stage of %s: read @@secure_file_priv: %w", template, err)
 	}
 	if !secureDir.Valid || strings.TrimSpace(secureDir.String) == "" {
-		return
+		return nil
 	}
 	stageDir := templateStageRoot(secureDir.String, template)
-	_ = dockerExecRoot(ctx, engineBin, cid, "rm", "-rf", stageDir)
+	if err := dockerExecRoot(ctx, engineBin, cid, "rm", "-rf", stageDir); err != nil {
+		return fmt.Errorf("remove the tablespace stage %s: %w", stageDir, err)
+	}
+	return nil
 }
 
 func templateStageRoot(secureFilePriv, template string) string {

@@ -114,10 +114,10 @@ func (c fileConn) ListMatching(_ context.Context, prefix string) ([]string, erro
 	return out, nil
 }
 
-func (c fileConn) SizeKB(_ context.Context, n string) int64 {
+func (c fileConn) SizeKB(_ context.Context, n string) (int64, error) {
 	p, err := absName(n)
 	if err != nil {
-		return 0
+		return 0, err
 	}
 	return dbfile.SizeKB(p)
 }

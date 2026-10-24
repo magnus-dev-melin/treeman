@@ -5,6 +5,7 @@ package postgres
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
@@ -194,9 +195,9 @@ func (d *Driver) DropMatching(ctx context.Context, prefix string) ([]string, err
 			if err != nil {
 				return err
 			}
-			// Boot any straggler connections so DROP can proceed.
-			_, _ = d.DB.ExecContext(gctx,
-				"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1", n)
+			if err := d.terminateBackends(gctx, n); err != nil {
+				return err
+			}
 			if err := d.execOutsideTx(gctx, "DROP DATABASE IF EXISTS "+qn); err != nil {
 				return fmt.Errorf("DROP DATABASE %s: %w", qn, err)
 			}
@@ -243,7 +244,7 @@ func (d *Driver) FlushDatabase(ctx context.Context, name string) error {
 
 // SnapshotCreate uses native `CREATE DATABASE … TEMPLATE` — the
 // fastest path Postgres offers for cloning a database.
-func (d *Driver) SnapshotCreate(ctx context.Context, source, template string) error {
+func (d *Driver) SnapshotCreate(ctx context.Context, source, template string) (err error) {
 	qsource, err := ident.QuotePostgres(source)
 	if err != nil {
 		return err
@@ -258,18 +259,18 @@ func (d *Driver) SnapshotCreate(ctx context.Context, source, template string) er
 		return err
 	}
 	defer func() {
-		// Use a fresh, short-lived context so the unfence runs even
-		// when ctx has been cancelled or timed out mid-clone.
-		// Otherwise a cancellation can leave the source DB
-		// read-only-to-new-clients forever.
 		bgctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		_ = d.execOutsideTx(bgctx,
-			"ALTER DATABASE "+qsource+" ALLOW_CONNECTIONS = true")
+		if uerr := d.execOutsideTx(bgctx, "ALTER DATABASE "+qsource+" ALLOW_CONNECTIONS = true"); uerr != nil {
+			err = errors.Join(err, fmt.Errorf("re-allow connections to %s after cloning it: %w", source, uerr))
+		}
 	}()
-	_, _ = d.DB.ExecContext(ctx,
-		"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1", source)
-	_ = d.execOutsideTx(ctx, "DROP DATABASE IF EXISTS "+qtemplate)
+	if err := d.terminateBackends(ctx, source); err != nil {
+		return err
+	}
+	if err := d.execOutsideTx(ctx, "DROP DATABASE IF EXISTS "+qtemplate); err != nil {
+		return fmt.Errorf("drop the previous template %s: %w", template, err)
+	}
 	if err := d.execOutsideTx(ctx,
 		"CREATE DATABASE "+qtemplate+" TEMPLATE "+qsource); err != nil {
 		return err
@@ -362,4 +363,12 @@ func (d *Driver) execOutsideTx(ctx context.Context, stmt string) error {
 	defer func() { _ = conn.Close() }()
 	_, err = conn.ExecContext(ctx, stmt)
 	return err
+}
+
+func (d *Driver) terminateBackends(ctx context.Context, name string) error {
+	if _, err := d.DB.ExecContext(ctx,
+		"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1", name); err != nil {
+		return fmt.Errorf("terminate the connections to %s: %w", name, err)
+	}
+	return nil
 }

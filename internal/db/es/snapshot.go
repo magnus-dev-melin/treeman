@@ -107,29 +107,34 @@ func acquireSourceReadOnly(ctx context.Context, base, index string, set func(con
 // release pairs with a prior successful acquire whose +1 keeps the entry alive
 // until now, so the lookup below always finds this exact ref (a lookup miss
 // means an unpaired release — treated as a no-op).
-func releaseSourceReadOnly(ctx context.Context, base, index string, clearFn func(context.Context) error) {
+func releaseSourceReadOnly(ctx context.Context, base, index string, clearFn func(context.Context) error) error {
 	srcBlockRegMu.Lock()
 	key := srcBlockKey(base, index)
 	ref := srcBlockReg[key]
 	srcBlockRegMu.Unlock()
 	if ref == nil {
-		return
+		return nil
 	}
 	ref.mu.Lock()
 	defer ref.mu.Unlock()
 	if ref.count == 0 {
-		return
+		return nil
 	}
 	ref.count--
-	if ref.count == 0 {
-		_ = clearFn(ctx)
-		ref.dead = true
-		srcBlockRegMu.Lock()
-		if srcBlockReg[key] == ref {
-			delete(srcBlockReg, key)
-		}
-		srcBlockRegMu.Unlock()
+	if ref.count != 0 {
+		return nil
 	}
+	err := clearFn(ctx)
+	ref.dead = true
+	srcBlockRegMu.Lock()
+	if srcBlockReg[key] == ref {
+		delete(srcBlockReg, key)
+	}
+	srcBlockRegMu.Unlock()
+	if err != nil {
+		return fmt.Errorf("make %s writable again: %w", index, err)
+	}
+	return nil
 }
 
 // IndexExists reports whether `name` is a live index in the cluster.
@@ -293,7 +298,7 @@ func (d *Driver) cloneIndices(ctx context.Context, srcIndices []string, srcPrefi
 // dance for a single index. Idempotent against pre-existing dst —
 // we don't drop it here (the caller's `DropMatching` already cleared
 // the prefix).
-func (d *Driver) cloneOneIndex(ctx context.Context, src, dst, srcPrefix, dstPrefix string) error {
+func (d *Driver) cloneOneIndex(ctx context.Context, src, dst, srcPrefix, dstPrefix string) (err error) {
 	// 1. Mark src read-only — refcounted process-wide so concurrent clones of
 	// the SAME shared source (sibling worktrees seeding off the live `dev_*`
 	// parent) don't clear each other's block mid-clone. First acquirer flips
@@ -311,9 +316,9 @@ func (d *Driver) cloneOneIndex(ctx context.Context, src, dst, srcPrefix, dstPref
 		// indefinitely.
 		bgctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		releaseSourceReadOnly(bgctx, d.Base, src, func(c context.Context) error {
+		err = errors.Join(err, releaseSourceReadOnly(bgctx, d.Base, src, func(c context.Context) error {
 			return d.setIndexBlock(c, src, false)
-		})
+		}))
 	}()
 
 	// 2. POST /<src>/_clone/<dst>. The source must stay read-only for the whole
@@ -407,8 +412,11 @@ func (d *Driver) copyAliases(ctx context.Context, src, dst, srcPrefix, dstPrefix
 	if err != nil {
 		return err
 	}
-	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, d.Base+"/_aliases",
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, d.Base+"/_aliases",
 		bytes.NewReader(payload))
+	if err != nil {
+		return fmt.Errorf("build POST /_aliases: %w", err)
+	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := d.HTTP.Do(req)
 	if err != nil {
@@ -448,9 +456,12 @@ func (d *Driver) cloneAPICall(ctx context.Context, src, dst string) error {
 	// async dispatch keeps each HTTP round-trip short. We poll _recovery
 	// below until all shards reach DONE, with the caller's context deadline
 	// (finalizeTimeout) as the safety net.
-	req, _ := http.NewRequestWithContext(ctx, http.MethodPost,
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		fmt.Sprintf("%s/%s/_clone/%s?wait_for_active_shards=0", d.Base, src, dst),
 		bytes.NewReader(cloneBody))
+	if err != nil {
+		return fmt.Errorf("build POST /%s/_clone/%s: %w", src, dst, err)
+	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := d.HTTP.Do(req)
 	if err != nil {
