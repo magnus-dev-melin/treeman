@@ -116,6 +116,7 @@ const (
 	EvtWorktreeDeleteError    = "worktree:delete:error"
 	EvtWorktreeReapStart      = "worktree:reap:start"
 	EvtWorktreeReapEnd        = "worktree:reap:end"
+	EvtWorktreeReapError      = "worktree:reap:error"
 	EvtWorktreeRecoverDrop    = "worktree:recover:drop"
 	EvtWorktreeRecoverError   = "worktree:recover:error"
 

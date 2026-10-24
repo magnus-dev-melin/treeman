@@ -156,6 +156,7 @@ that emits it.
 | `worktree:delete:error` | `store.EvtWorktreeDeleteError` |
 | `worktree:reap:start` | `store.EvtWorktreeReapStart` |
 | `worktree:reap:end` | `store.EvtWorktreeReapEnd` |
+| `worktree:reap:error` | `store.EvtWorktreeReapError` |
 | `worktree:recover:drop` | `store.EvtWorktreeRecoverDrop` |
 | `worktree:recover:error` | `store.EvtWorktreeRecoverError` |
 

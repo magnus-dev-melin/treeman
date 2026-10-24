@@ -108,3 +108,17 @@ func TestNewSenderNoneIsUnavailable(t *testing.T) {
 		t.Errorf("none.Send returned error: %v", err)
 	}
 }
+
+func TestFailedTeardownsNotifyAsFailed(t *testing.T) {
+	for _, evt := range []string{store.EvtWorktreeDeleteError, store.EvtWorktreeReapError} {
+		if got := Bucket(evt, store.LevelError); got != store.BucketFailed {
+			t.Errorf("Bucket(%s, error) = %q, want failed", evt, got)
+		}
+		if got := Bucket(evt, store.LevelWarn); got != "" {
+			t.Errorf("Bucket(%s, warn) = %q, want no notification", evt, got)
+		}
+		if state, _ := store.DeriveWorktreeState(store.Event{EventType: evt, Level: store.LevelError}); state != store.StateError {
+			t.Errorf("state after %s = %q, want error", evt, state)
+		}
+	}
+}

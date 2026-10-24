@@ -923,7 +923,7 @@ func TeardownWorktree(
 	repoPath, worktreePath string,
 	force bool,
 	inheritedEnv map[string]string,
-) error {
+) (err error) {
 	repoRoot := repoPath
 	wtRoot := worktreePath
 
@@ -999,6 +999,12 @@ func TeardownWorktree(
 	_ = st.Store.WriteEvent(ctx, store.LevelInfo, store.EvtWorktreeDeleteStart,
 		"daemon-detached teardown hooks + db teardown + git remove beginning",
 		repoID, wtID, "", 0, triggerPayload(ctx))
+	defer func() {
+		if err != nil {
+			_ = st.Store.WriteEvent(context.WithoutCancel(ctx), store.LevelError, store.EvtWorktreeDeleteError,
+				err.Error(), repoID, wtID, "", 0, map[string]string{"worktree_path": wtRoot})
+		}
+	}()
 
 	// Three-step teardown: delete-before-engines actions →
 	// engine drop (inline + synchronous so post-engine actions can

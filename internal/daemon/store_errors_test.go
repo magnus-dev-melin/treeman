@@ -88,3 +88,42 @@ func TestDaemonRunsSkipWithAnErrorWhenTheCapturedEnvIsUnreadable(t *testing.T) {
 		t.Fatalf("the skip must be recorded as an error naming the worktree, got %+v", evs)
 	}
 }
+
+func TestTeardownFailureRecordsDeleteError(t *testing.T) {
+	requireGitAutofetch(t)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("TREEMAN_CONFIG", "")
+	st, repo, wt := newWatchWorktreeWithConfig(t, "auto_fetch:\n  enabled: false\n")
+	if err := FinalizeWorktree(t.Context(), st, repo, wt, nil, false); err != nil {
+		t.Fatal(err)
+	}
+	row, err := st.Store.LookupActiveWorktreeByPath(t.Context(), wt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Store.DB.ExecContext(t.Context(),
+		`CREATE TRIGGER block_delete BEFORE UPDATE OF deleted_at ON worktrees BEGIN SELECT RAISE(ABORT, 'blocked'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if err := TeardownWorktree(t.Context(), st, repo, wt, false, nil); err == nil || !strings.Contains(err.Error(), "blocked") {
+		t.Fatalf("a teardown that cannot mark the row deleted must fail with the cause, got %v", err)
+	}
+	evs, err := st.Store.QueryEvents(t.Context(), store.EventFilter{
+		WorktreeID: row.ID,
+		EventTypes: []string{store.EvtWorktreeDeleteStart, store.EvtWorktreeDeleteEnd, store.EvtWorktreeDeleteError},
+		Limit:      1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(evs) != 1 || evs[0].EventType != store.EvtWorktreeDeleteError || evs[0].Level != store.LevelError {
+		t.Fatalf("a failed teardown must end in delete:error so the worktree stops reading as tearing down, got %+v", evs)
+	}
+	last, err := st.Store.LatestWorktreeStateEvent(t.Context(), row.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state, _ := store.DeriveWorktreeState(last); state != store.StateError {
+		t.Fatalf("a failed teardown must read as error, not %q", state)
+	}
+}

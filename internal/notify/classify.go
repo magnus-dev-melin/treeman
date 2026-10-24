@@ -30,10 +30,7 @@ func Bucket(eventType, level string) string {
 		return store.BucketUp
 	case store.EvtWorktreeCreateEnd:
 		return store.BucketStable
-	case store.EvtWorktreeCreateError:
-		// Only ever written as the terminal error event (see
-		// finalize.go / stale_finalize.go); gate on level so a future
-		// non-error use can't masquerade as a failure.
+	case store.EvtWorktreeCreateError, store.EvtWorktreeDeleteError, store.EvtWorktreeReapError:
 		if level == store.LevelError {
 			return store.BucketFailed
 		}

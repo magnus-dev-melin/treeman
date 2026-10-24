@@ -388,7 +388,7 @@ func (lw *LifecycleWatcher) reconcile(ctx context.Context) error {
 // is gone) cwd'd into the repo root, drops the per-worktree
 // databases, and marks the row deleted. Does NOT call `git worktree
 // remove` — git already did.
-func teardownOrphan(ctx context.Context, st *State, repoPath, wtPath string) error {
+func teardownOrphan(ctx context.Context, st *State, repoPath, wtPath string) (err error) {
 	if !st.MarkTeardownInFlight(wtPath) {
 		return nil
 	}
@@ -420,6 +420,12 @@ func teardownOrphan(ctx context.Context, st *State, repoPath, wtPath string) err
 	_ = st.Store.WriteEvent(ctx, store.LevelInfo, store.EvtWorktreeReapStart,
 		"lifecycle watcher: teardown hooks + db teardown beginning",
 		repoID, row.ID, "", 0, nil)
+	defer func() {
+		if err != nil {
+			_ = st.Store.WriteEvent(context.WithoutCancel(ctx), store.LevelError, store.EvtWorktreeReapError,
+				err.Error(), repoID, row.ID, "", 0, map[string]string{"worktree_path": wtPath})
+		}
+	}()
 
 	// Orphan teardown — the working tree is gone, so we run
 	// before-engines + after-engines hooks against a log dir under

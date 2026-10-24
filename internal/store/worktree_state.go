@@ -33,8 +33,8 @@ const PhaseBeforeEngines = "before-engines"
 var WorktreeStateEventTypes = []string{
 	EvtWorktreeCreateStart, EvtWorktreeCreateEnd, EvtWorktreeCreateError,
 	EvtWorktreeCreateDeferred,
-	EvtWorktreeDeleteStart, EvtWorktreeDeleteEnd,
-	EvtWorktreeReapStart, EvtWorktreeReapEnd,
+	EvtWorktreeDeleteStart, EvtWorktreeDeleteEnd, EvtWorktreeDeleteError,
+	EvtWorktreeReapStart, EvtWorktreeReapEnd, EvtWorktreeReapError,
 	EvtPrepareEnd, EvtPrepareError,
 }
 
@@ -46,7 +46,7 @@ func DeriveWorktreeState(last Event) (state, bucket string) {
 		return StatePreparing, BucketUp
 	case EvtWorktreeCreateDeferred:
 		return StateDeferred, BucketStable
-	case EvtWorktreeCreateError, EvtPrepareError:
+	case EvtWorktreeCreateError, EvtPrepareError, EvtWorktreeDeleteError, EvtWorktreeReapError:
 		if last.Level == LevelError {
 			return StateError, BucketFailed
 		}
