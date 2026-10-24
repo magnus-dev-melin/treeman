@@ -988,7 +988,9 @@ func wtList() *cli.Command {
 			withStatus := c.Bool("with-status")
 			withState := c.Bool("with-state")
 			withSize := c.Bool("with-size")
-			enrichAndSortWtRows(ctx, c, st, all, withStatus, withState, withSize)
+			if err := enrichAndSortWtRows(ctx, c, st, all, withStatus, withState, withSize); err != nil {
+				return err
+			}
 
 			if c.Bool("tsv") {
 				for _, r := range all {
@@ -1069,10 +1071,12 @@ func loadWtRows(ctx context.Context, st *store.Store, repoFilter, sortMode strin
 // list flags (state, status, HEAD ts, sizes) and applies the --sort
 // mode. Extracted from wtList's action to keep it under the
 // complexity gate.
-func enrichAndSortWtRows(ctx context.Context, c *cli.Command, st *store.Store, all []wtRow, withStatus, withState, withSize bool) {
+func enrichAndSortWtRows(ctx context.Context, c *cli.Command, st *store.Store, all []wtRow, withStatus, withState, withSize bool) error {
 	sortMode := c.String("sort")
 	needHeadTs := sortMode == "mtime" || c.Bool("json") || withSize
-	enrichWtRows(ctx, st, all, withStatus, withState, needHeadTs, c.Bool("json") || withSize)
+	if err := enrichWtRows(ctx, st, all, withStatus, withState, needHeadTs, c.Bool("json") || withSize); err != nil {
+		return err
+	}
 	if withSize {
 		paths := make([]string, len(all))
 		for i := range all {
@@ -1086,6 +1090,7 @@ func enrichAndSortWtRows(ctx context.Context, c *cli.Command, st *store.Store, a
 	if sortMode == "mtime" {
 		sort.SliceStable(all, func(i, j int) bool { return all[i].HeadTs > all[j].HeadTs })
 	}
+	return nil
 }
 
 // wtRow is one row of `treeman worktree list` output.
@@ -1115,7 +1120,7 @@ type wtRow struct {
 // per row; dirty/unpushed probes fan out concurrently like the switch
 // menu; finalize states come from one batched events query instead of
 // one query per row.
-func enrichWtRows(ctx context.Context, st *store.Store, all []wtRow, withStatus, withState, needHeadTs, asJSON bool) {
+func enrichWtRows(ctx context.Context, st *store.Store, all []wtRow, withStatus, withState, needHeadTs, asJSON bool) error {
 	if needHeadTs {
 		fillHeadTimestamps(ctx, all)
 	}
@@ -1124,7 +1129,10 @@ func enrichWtRows(ctx context.Context, st *store.Store, all []wtRow, withStatus,
 		for i := range all {
 			ids[i] = all[i].ID
 		}
-		latest, _ := st.LatestEventPerWorktree(ctx, ids, store.WorktreeStateEventTypes)
+		latest, err := st.LatestEventPerWorktree(ctx, ids, store.WorktreeStateEventTypes)
+		if err != nil {
+			return fmt.Errorf("read the setup state of %d worktrees: %w", len(ids), err)
+		}
 		for i := range all {
 			all[i].FinalState = finalizeStateLabel(latest[all[i].ID])
 		}
@@ -1140,6 +1148,7 @@ func enrichWtRows(ctx context.Context, st *store.Store, all []wtRow, withStatus,
 		}
 		_ = g.Wait()
 	}
+	return nil
 }
 
 // fillHeadTimestamps sets HeadTs on every row via one
@@ -1868,7 +1877,11 @@ func goSpawnWorktree(ctx context.Context, repoRoot, branch string, opts spawnOpt
 // into it doesn't hide the failure (#129).
 func landExisting(ctx context.Context, path string) {
 	touchVisitedByPath(ctx, path)
-	if msg, failed := failedSetup(ctx, path); failed {
+	msg, failed, err := failedSetup(ctx, path)
+	if err != nil {
+		PrintWarn("could not check the last setup of %s: %v", path, err)
+	}
+	if failed {
 		PrintWarn("last setup of %s failed: %s", path, msg)
 		PrintHint("fix the cause, then run `treeman worktree finalize` in it")
 	}
@@ -1877,18 +1890,24 @@ func landExisting(ctx context.Context, path string) {
 
 // failedSetup reports whether the latest finalize of the worktree at
 // path failed, with its error message.
-func failedSetup(ctx context.Context, path string) (string, bool) {
+func failedSetup(ctx context.Context, path string) (msg string, failed bool, err error) {
 	st, err := openSharedStore(ctx)
 	if err != nil {
-		return "", false
+		return "", false, fmt.Errorf("open the treeman store: %w", err)
 	}
 	row, err := st.LookupActiveWorktreeByPath(ctx, path)
-	if err != nil || row.ID == 0 {
-		return "", false
+	if err != nil {
+		return "", false, fmt.Errorf("look up the worktree at %s: %w", path, err)
 	}
-	last := latestStateEvent(ctx, st, row.ID)
+	if row.ID == 0 {
+		return "", false, nil
+	}
+	last, err := st.LatestWorktreeStateEvent(ctx, row.ID)
+	if err != nil {
+		return "", false, fmt.Errorf("read the setup state of %s: %w", path, err)
+	}
 	state, _ := store.DeriveWorktreeState(last)
-	return last.Message, state == store.StateError
+	return last.Message, state == store.StateError, nil
 }
 
 // registryWorktreeForBranch finds the live worktree on <branch> for

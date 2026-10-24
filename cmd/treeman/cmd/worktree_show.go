@@ -97,7 +97,10 @@ func showWorktree(ctx context.Context, opts showOpts, target string) error {
 
 	if opts.asJSON {
 		runs, _ := st.QueryHookRuns(ctx, wt.ID, opts.hooks)
-		state, detail := finalizeState(ctx, st, wt.ID)
+		state, detail, err := finalizeState(ctx, st, wt.ID)
+		if err != nil {
+			return err
+		}
 		ports, _ := st.LoadWorktreePorts(ctx, wt.ID)
 		branches, _ := st.ListActiveBranches(ctx, wt.ID)
 		return jsonStream(map[string]any{
@@ -115,7 +118,9 @@ func showWorktree(ctx context.Context, opts showOpts, target string) error {
 		})
 	}
 
-	printWtHeader(ctx, st, wt)
+	if err := printWtHeader(ctx, st, wt); err != nil {
+		return err
+	}
 	printWtPrepareSummary(ctx, st, wt.ID)
 	if len(evs) > 0 {
 		_, _ = fmt.Fprintln(ui.Out, ui.Bold("recent events"))
@@ -150,11 +155,15 @@ func resolveShowRepoID(ctx context.Context, st *store.Store, repoOverride string
 
 // printWtHeader prints the metadata block (slug, branch, path, state,
 // ports, branch-scoped DBs) for a worktree.
-func printWtHeader(ctx context.Context, st *store.Store, wt worktreeRow) {
+func printWtHeader(ctx context.Context, st *store.Store, wt worktreeRow) error {
+	stateLine, err := finalizeStatusLine(ctx, st, wt.ID)
+	if err != nil {
+		return err
+	}
 	_, _ = fmt.Fprintln(ui.Out, ui.Bold(wt.Slug)+ui.Dim("  #"+strconv.FormatInt(wt.ID, 10)))
 	_, _ = fmt.Fprintf(ui.Out, "  branch: %s\n", wt.Branch)
 	_, _ = fmt.Fprintf(ui.Out, "  path:   %s\n", wt.Path)
-	_, _ = fmt.Fprintf(ui.Out, "  state:  %s\n", finalizeStatusLine(ctx, st, wt.ID))
+	_, _ = fmt.Fprintf(ui.Out, "  state:  %s\n", stateLine)
 	if portMap, _ := st.LoadWorktreePorts(ctx, wt.ID); len(portMap) > 0 {
 		_, _ = fmt.Fprintf(ui.Out, "  ports:  %s\n", formatPortMap(portMap))
 	}
@@ -164,6 +173,7 @@ func printWtHeader(ctx context.Context, st *store.Store, wt worktreeRow) {
 		}
 	}
 	_, _ = fmt.Fprintln(ui.Out)
+	return nil
 }
 
 // printWtPrepareSummary prints the "last prepare" block: per-database
@@ -579,26 +589,25 @@ func loadWorktreeRow(ctx context.Context, st *store.Store, repoID int64, name st
 // finalizeStatusLine derives a human "state" label for `wt show` by
 // inspecting the most recent finalize-related event. Returns the
 // long form (state + parenthetical timestamp / error message).
-func finalizeStatusLine(ctx context.Context, st *store.Store, wtID int64) string {
-	state, detail := finalizeState(ctx, st, wtID)
-	if detail == "" {
-		return state
+func finalizeStatusLine(ctx context.Context, st *store.Store, wtID int64) (string, error) {
+	state, detail, err := finalizeState(ctx, st, wtID)
+	if err != nil {
+		return "", err
 	}
-	return state + ui.Dim(" "+detail)
+	if detail == "" {
+		return state, nil
+	}
+	return state + ui.Dim(" "+detail), nil
 }
 
 // finalizeState splits the state derivation so both forms share one
 // query path. detail is "" when there's nothing extra worth showing.
-func finalizeState(ctx context.Context, st *store.Store, wtID int64) (state, detail string) {
-	last := latestStateEvent(ctx, st, wtID)
-	return finalizeStateLabel(last), finalizeStateDetail(last)
-}
-
-// latestStateEvent returns the newest store.WorktreeStateEventTypes
-// event of the worktree, or the zero Event when it has none.
-func latestStateEvent(ctx context.Context, st *store.Store, wtID int64) store.Event {
-	last, _ := st.LatestWorktreeStateEvent(ctx, wtID)
-	return last
+func finalizeState(ctx context.Context, st *store.Store, wtID int64) (state, detail string, err error) {
+	last, err := st.LatestWorktreeStateEvent(ctx, wtID)
+	if err != nil {
+		return "", "", fmt.Errorf("read the setup state of worktree #%d: %w", wtID, err)
+	}
+	return finalizeStateLabel(last), finalizeStateDetail(last), nil
 }
 
 // finalizeFailed reports whether ev is a failed finalize.
