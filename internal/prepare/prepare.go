@@ -631,6 +631,10 @@ type RunOptions struct {
 	Fresh bool
 }
 
+func (o RunOptions) Includes(dbIdx int) bool {
+	return !o.FilterDBs || o.OnlyDBIndex == dbIdx
+}
+
 // RunFiltered prepares the configured databases, optionally
 // restricted to one DB and/or forced to rebuild past the cache.
 // Used by the daemon's watcher dispatch path so `on: rebuild` on a
@@ -686,7 +690,7 @@ func RunFiltered(
 	// failures are collected into one RunError.
 	var g errgroup.Group
 	for i, d := range cfg.Databases {
-		if opts.FilterDBs && opts.OnlyDBIndex != i {
+		if !opts.Includes(i) {
 			continue
 		}
 		g.Go(func() error {
@@ -736,7 +740,9 @@ type DBError struct {
 	Err    error
 }
 
-func (e *DBError) Error() string { return e.Err.Error() }
+func (e *DBError) Error() string {
+	return fmt.Sprintf("databases[%d] (%s): %v", e.Index, e.Engine, e.Err)
+}
 func (e *DBError) Unwrap() error { return e.Err }
 
 // RunError is the error RunFiltered returns: every database that failed,

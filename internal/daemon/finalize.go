@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -50,6 +51,7 @@ type finalizeFailure struct {
 	// enginesTouched is true only when engine prepare was entered — the
 	// gate on the recovery drops below.
 	enginesTouched bool
+	phase          string
 	err            error
 }
 
@@ -97,7 +99,7 @@ func recordFinalizeFailure(ctx context.Context, st *State, cfg *config.Config, f
 			prepare.FailedDBIndices(f.err))
 	}
 	_ = st.Store.WriteEvent(termCtx, store.LevelError, store.EvtWorktreeCreateError, withRetryHint(f.err.Error()),
-		f.repoID, f.wtID, "", 0, map[string]string{
+		f.repoID, f.wtID, f.phase, 0, map[string]string{
 			"repo_path":     f.repoRoot,
 			"worktree_path": f.wtRoot,
 		})
@@ -161,7 +163,13 @@ func finalizeWorktree(
 		// dropping them turns the documented `worktree finalize` retry
 		// into a rebuild-from-nothing (#21).
 		enginesTouched bool
+		release        func()
 	)
+	defer func() {
+		if release != nil {
+			release()
+		}
+	}()
 	defer func() {
 		if err == nil {
 			return
@@ -176,6 +184,7 @@ func finalizeWorktree(
 			repoID:         termRepoID,
 			wtID:           termWtID,
 			enginesTouched: enginesTouched,
+			phase:          store.FinalizeFailurePhase(enginesTouched),
 			err:            err,
 		})
 	}()
@@ -212,11 +221,10 @@ func finalizeWorktree(
 	// slips through (e.g. an explicit `treeman worktree finalize` while
 	// one is still running), it returns immediately instead of
 	// re-running setup hooks in parallel.
-	release, err := beginFinalize(ctx, st, wtRoot, claim(cancel))
+	release, err = beginFinalize(ctx, st, wtRoot, claim(cancel))
 	if release == nil {
 		return err
 	}
-	defer release()
 
 	if err := awaitIndexUnlocked(ctx, wtRoot, indexLockWait, indexLockPoll); err != nil {
 		return unlessCancelled(ctx, err)
@@ -679,6 +687,13 @@ func replayReruns(st *State, wtRoot string, q QueuedReruns) {
 	})
 }
 
+func watchRunOptions(prior store.Event, dbIdx, dbCount int) prepare.RunOptions {
+	if state, _ := store.DeriveWorktreeState(prior); state != store.StateReady || dbIdx < 0 || dbIdx >= dbCount {
+		return prepare.RunOptions{}
+	}
+	return prepare.RunOptions{FilterDBs: true, OnlyDBIndex: dbIdx}
+}
+
 // unlessCancelled drops err when ctx was cancelled: a run stopped by
 // its own cancellation is a clean stop, not a failure.
 func unlessCancelled(ctx context.Context, err error) error {
@@ -706,7 +721,8 @@ func cancelledBefore(ctx context.Context, st *State, phase string, repoID, wtID 
 // FinalizeWorktreeForWatch is the watcher-driven re-prepare path.
 // Called when a file matching one of the owning database's
 // `inputs:` globs changes. Re-applies patches (cheap, idempotent)
-// and re-runs prepare scoped to the matched database. The cache-
+// and re-runs prepare scoped to the matched database while the
+// worktree is ready, every database otherwise. The cache-
 // hit / cold-build decision is derived purely from the input hash
 // fingerprint — no force-rebuild override.
 //
@@ -726,8 +742,16 @@ func FinalizeWorktreeForWatch(
 ) (err error) {
 	repoRoot := repoPath
 	wtRoot := worktreePath
-	var cfg config.Config
+	var (
+		cfg     config.Config
+		release func()
+	)
 	failure := finalizeFailure{repoRoot: repoRoot, wtRoot: wtRoot}
+	defer func() {
+		if release != nil {
+			release()
+		}
+	}()
 	defer func() {
 		if err == nil {
 			return
@@ -752,11 +776,10 @@ func FinalizeWorktreeForWatch(
 	if !claimed {
 		slog.Info("watch re-prepare queued behind in-flight finalize", "wt", wtRoot, "db_idx", dbIdx)
 	}
-	release, err := beginFinalize(ctx, st, wtRoot, claimed)
+	release, err = beginFinalize(ctx, st, wtRoot, claimed)
 	if release == nil {
 		return err
 	}
-	defer release()
 
 	// A watched input changing is often git rewriting the tree (merge,
 	// checkout, pull). Wait for it to finish so config and inputs are
@@ -813,6 +836,18 @@ func FinalizeWorktreeForWatch(
 	if ctx.Err() != nil {
 		return nil
 	}
+	st.Store.FlushEvents(ctx)
+	prior, err := st.Store.LatestWorktreeStateEvent(ctx, wtID)
+	if err != nil {
+		return err
+	}
+	if store.FailedBeforeEngines(prior) {
+		_ = st.Store.WriteEvent(ctx, store.LevelWarn, store.EvtWatchSkip,
+			"watch re-prepare skipped: the last finalize failed before it prepared the databases, "+
+				"so they stay as it left them until `treeman worktree finalize` succeeds",
+			repoID, wtID, "", 0, map[string]string{"db_idx": strconv.Itoa(dbIdx), "failure": prior.Message})
+		return nil
+	}
 	// Bracketed by the same finalize lifecycle events as a full
 	// finalize: the clones stay stale until the re-prepare lands, so the
 	// worktree must read `preparing`, then `ready` or `error`, never a
@@ -824,11 +859,7 @@ func FinalizeWorktreeForWatch(
 	// The fingerprint hashes every declared input + dump + the
 	// migrate/seed run-strings. If anything changed, prepare cold-
 	// builds; otherwise cache-hits. No separate force-rebuild knob.
-	opts := prepare.RunOptions{}
-	if dbIdx >= 0 && dbIdx < len(cfg.Databases) {
-		opts.FilterDBs = true
-		opts.OnlyDBIndex = dbIdx
-	}
+	opts := watchRunOptions(prior, dbIdx, len(cfg.Databases))
 	var prepErr error
 	failure.enginesTouched = true
 	st.withWorktreePrepare(wtRoot, func() {

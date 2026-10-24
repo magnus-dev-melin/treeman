@@ -131,6 +131,7 @@ that emits it.
 | `watch:start` | `store.EvtWatchStart` |
 | `watch:input` | `store.EvtWatchInput` |
 | `watch:head` | `store.EvtWatchHead` |
+| `watch:skip` | `store.EvtWatchSkip` |
 
 ## main_worktree
 

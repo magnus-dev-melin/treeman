@@ -48,9 +48,10 @@ func RunLocalFinalize(
 	defer unlock()
 	_ = st.WriteEvent(ctx, store.LevelInfo, store.EvtWorktreeCreateStart,
 		"local setup + prepare beginning", repoID, wtID, "", 0, nil)
-	if err := runLocalFinalizeSteps(ctx, cfg, repoRoot, wtPath, sl, isMain, st, repoID, wtID, env, skipPrepare, sink); err != nil {
+	enginesTouched, err := runLocalFinalizeSteps(ctx, cfg, repoRoot, wtPath, sl, isMain, st, repoID, wtID, env, skipPrepare, sink)
+	if err != nil {
 		_ = st.WriteEvent(context.WithoutCancel(ctx), store.LevelError, store.EvtWorktreeCreateError,
-			err.Error(), repoID, wtID, "", 0, nil)
+			err.Error(), repoID, wtID, store.FinalizeFailurePhase(enginesTouched), 0, nil)
 		return err
 	}
 	_ = st.WriteEvent(ctx, store.LevelInfo, store.EvtWorktreeCreateEnd,
@@ -69,7 +70,7 @@ func runLocalFinalizeSteps(
 	env map[string]string,
 	skipPrepare bool,
 	sink Sink,
-) error {
+) (enginesTouched bool, err error) {
 	runTrigger := func(trigger string, actions []config.Action) error {
 		if len(actions) == 0 {
 			return nil
@@ -91,28 +92,28 @@ func runLocalFinalizeSteps(
 	// worktree (src == dst), matching the daemon.
 	if !isMain {
 		if err := BringInFiles(ctx, repoRoot, wtPath, cfg.Worktrees.Links, "link", sink); err != nil {
-			return err
+			return false, err
 		}
 		if err := BringInFiles(ctx, repoRoot, wtPath, cfg.Worktrees.Copies, "copy", sink); err != nil {
-			return err
+			return false, err
 		}
 		if _, err := ports.New().Allocate(ctx, st, cfg, repoID, wtID); err != nil {
-			return fmt.Errorf("allocate ports for %s: %w", wtPath, err)
+			return false, fmt.Errorf("allocate ports for %s: %w", wtPath, err)
 		}
 		portMap, err := st.LoadWorktreePorts(ctx, wtID)
 		if err != nil {
-			return fmt.Errorf("load ports for %s: %w", wtPath, err)
+			return false, fmt.Errorf("load ports for %s: %w", wtPath, err)
 		}
 		tplCtx := template.FromSlug(sl).WithPorts(portMap)
 		if err := applyPatches(ctx, cfg.Patches, wtPath, tplCtx, sink); err != nil {
-			return err
+			return false, err
 		}
 	}
 	if err := runTrigger("create-before-engines", cfg.Hooks.OnCreateBeforeEngines); err != nil {
-		return err
+		return false, err
 	}
 	if skipPrepare || len(cfg.Databases) == 0 {
-		return runTrigger("create-after-engines", cfg.Hooks.OnCreateAfterEngines)
+		return false, runTrigger("create-after-engines", cfg.Hooks.OnCreateAfterEngines)
 	}
 	outs, err := prepare.Run(ctx, cfg, wtPath, sl, st, repoID, wtID, env)
 	for _, o := range outs {
@@ -123,7 +124,7 @@ func runLocalFinalizeSteps(
 		// Fail the run, as the daemon's finalize does: create-after-engines
 		// hooks assume ready databases, and exiting 0 here reported success
 		// over a stale or half-built database (#123).
-		return fmt.Errorf("prepare: %w", err)
+		return true, fmt.Errorf("prepare: %w", err)
 	}
-	return runTrigger("create-after-engines", cfg.Hooks.OnCreateAfterEngines)
+	return true, runTrigger("create-after-engines", cfg.Hooks.OnCreateAfterEngines)
 }

@@ -597,15 +597,8 @@ func finalizeState(ctx context.Context, st *store.Store, wtID int64) (state, det
 // latestStateEvent returns the newest store.WorktreeStateEventTypes
 // event of the worktree, or the zero Event when it has none.
 func latestStateEvent(ctx context.Context, st *store.Store, wtID int64) store.Event {
-	rows, _ := st.QueryEvents(ctx, store.EventFilter{
-		WorktreeID: wtID,
-		EventTypes: store.WorktreeStateEventTypes,
-		Limit:      1,
-	})
-	if len(rows) == 0 {
-		return store.Event{}
-	}
-	return rows[0]
+	last, _ := st.LatestWorktreeStateEvent(ctx, wtID)
+	return last
 }
 
 // finalizeFailed reports whether ev is a failed finalize.

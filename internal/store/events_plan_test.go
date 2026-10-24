@@ -83,3 +83,18 @@ func TestConcurrentOpensApplyMigrationsOnce(t *testing.T) {
 		}
 	}
 }
+
+func TestWorktreeLifecycleEventQueryUsesTheWorktreeIndex(t *testing.T) {
+	st, err := Open(context.Background(), filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+
+	where, args := queryEventsWhere(EventFilter{WorktreeID: 1, EventTypes: WorktreeStateEventTypes})
+	q := "SELECT e.id FROM events e WHERE " + strings.Join(where, " AND ") + " ORDER BY e.ts DESC, e.id DESC LIMIT 1"
+	plan := explain(t, st, q, args...)
+	if !strings.Contains(plan, "idx_events_worktree") || strings.Contains(plan, "SCAN events") {
+		t.Errorf("%s\nplan:\n%s\nwant it served by idx_events_worktree", q, plan)
+	}
+}

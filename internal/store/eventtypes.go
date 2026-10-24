@@ -97,6 +97,7 @@ const (
 	EvtWatchStart = "watch:start"
 	EvtWatchInput = "watch:input"
 	EvtWatchHead  = "watch:head"
+	EvtWatchSkip  = "watch:skip"
 
 	// main_worktree
 	EvtMainEnroll  = "main:enroll"

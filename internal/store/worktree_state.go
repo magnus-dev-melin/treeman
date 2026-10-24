@@ -1,5 +1,10 @@
 package store
 
+import (
+	"context"
+	"fmt"
+)
+
 // Status buckets a worktree's lifecycle state falls into, as shown by
 // `treeman status`, the MCP status tool and the notification filter.
 const (
@@ -17,6 +22,8 @@ const (
 	StateError     = "error"
 	StateTeardown  = "teardown"
 )
+
+const PhaseBeforeEngines = "before-engines"
 
 // WorktreeStateEventTypes is the event set DeriveWorktreeState reads:
 // the newest of these per worktree decides its state. Standalone
@@ -47,4 +54,30 @@ func DeriveWorktreeState(last Event) (state, bucket string) {
 		return StateTeardown, BucketDown
 	}
 	return StateReady, BucketStable
+}
+
+func FinalizeFailurePhase(enginesTouched bool) string {
+	if enginesTouched {
+		return ""
+	}
+	return PhaseBeforeEngines
+}
+
+func FailedBeforeEngines(last Event) bool {
+	return last.EventType == EvtWorktreeCreateError && last.Level == LevelError && last.Phase == PhaseBeforeEngines
+}
+
+func (s *Store) LatestWorktreeStateEvent(ctx context.Context, wtID int64) (Event, error) {
+	rows, err := s.QueryEvents(ctx, EventFilter{
+		WorktreeID: wtID,
+		EventTypes: WorktreeStateEventTypes,
+		Limit:      1,
+	})
+	if err != nil {
+		return Event{}, fmt.Errorf("latest lifecycle event of worktree %d: %w", wtID, err)
+	}
+	if len(rows) == 0 {
+		return Event{}, nil
+	}
+	return rows[0], nil
 }

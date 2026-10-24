@@ -420,15 +420,8 @@ func statusOverviewTool(ctx context.Context, _ *mcpsdk.CallToolRequest, _ struct
 // deriveStatusBucket maps a worktree's latest lifecycle event to a
 // (state, bucket) pair.
 func deriveStatusBucket(ctx context.Context, st *store.Store, wtID int64) (state, bucket string) {
-	rows, _ := st.QueryEvents(ctx, store.EventFilter{
-		WorktreeID: wtID,
-		EventTypes: store.WorktreeStateEventTypes,
-		Limit:      1,
-	})
-	if len(rows) == 0 {
-		return store.DeriveWorktreeState(store.Event{})
-	}
-	return store.DeriveWorktreeState(rows[0])
+	last, _ := st.LatestWorktreeStateEvent(ctx, wtID)
+	return store.DeriveWorktreeState(last)
 }
 
 // ─── notify_test ───────────────────────────────────────────────────
