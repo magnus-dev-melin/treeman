@@ -168,6 +168,32 @@ func TestHasUnpushedCommitsNoUpstream(t *testing.T) {
 	}
 }
 
+func TestHasUnpushedCommitsAgainstAnUpstream(t *testing.T) {
+	ctx := context.Background()
+	remote := initRepo(t)
+	clone := filepath.Join(t.TempDir(), "clone")
+	run(t, "", "clone", "-q", remote, clone)
+	run(t, clone, "config", "user.email", "t@t")
+	run(t, clone, "config", "user.name", "t")
+	if unpushed, err := HasUnpushedCommits(ctx, clone); err != nil || unpushed {
+		t.Fatalf("fresh clone: unpushed=%v err=%v, want false, nil", unpushed, err)
+	}
+	run(t, clone, "commit", "-q", "--allow-empty", "-m", "local")
+	if unpushed, err := HasUnpushedCommits(ctx, clone); err != nil || !unpushed {
+		t.Fatalf("local commit ahead of upstream: unpushed=%v err=%v, want true, nil", unpushed, err)
+	}
+	run(t, clone, "checkout", "-q", "--detach")
+	if unpushed, err := HasUnpushedCommits(ctx, clone); err != nil || unpushed {
+		t.Fatalf("detached HEAD: unpushed=%v err=%v, want false, nil", unpushed, err)
+	}
+}
+
+func TestHasUnpushedCommitsFailsOutsideARepo(t *testing.T) {
+	if unpushed, err := HasUnpushedCommits(context.Background(), t.TempDir()); err == nil {
+		t.Fatalf("outside a repo: unpushed=%v, err=nil; want an error, not \"nothing unpushed\"", unpushed)
+	}
+}
+
 func TestDetectBranch(t *testing.T) {
 	repo := initRepo(t)
 	if got := DetectBranch(context.Background(), repo); got != "main" {

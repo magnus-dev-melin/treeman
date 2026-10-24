@@ -15,7 +15,6 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/stubbedev/treeman/internal/gitcmd"
-	"github.com/stubbedev/treeman/internal/gitenv"
 	"github.com/stubbedev/treeman/internal/store"
 	"github.com/stubbedev/treeman/internal/ui"
 	"github.com/stubbedev/treeman/internal/wt"
@@ -276,13 +275,14 @@ func gcMergedCandidate(ctx context.Context, cand gcCandidate, merged map[string]
 		return cand, false
 	}
 	// Batch safety: never delete dirty or unpushed work.
-	if dirty, _ := gitenv.HasWorkingTreeChanges(ctx, cand.row.Path); dirty {
-		ui.Warn("skip %s: merged but dirty (uncommitted changes)", cand.row.Path)
+	reasons, err := unregenerableState(ctx, cand.row.Path)
+	if err != nil {
+		ui.Warn("skip %s: merged, but %v", cand.row.Path, err)
 		cand.action = "skip"
 		return cand, false
 	}
-	if unpushed, _ := gitenv.HasUnpushedCommits(ctx, cand.row.Path); unpushed {
-		ui.Warn("skip %s: merged but has unpushed commits", cand.row.Path)
+	if len(reasons) > 0 {
+		ui.Warn("skip %s: merged but has %s", cand.row.Path, strings.Join(reasons, " and "))
 		cand.action = "skip"
 		return cand, false
 	}

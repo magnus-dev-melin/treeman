@@ -127,15 +127,32 @@ func HasWorkingTreeChanges(ctx context.Context, path string) (bool, error) {
 // commits not reachable from its upstream tracking branch. Used to
 // avoid silently dropping work on auto-remove.
 func HasUnpushedCommits(ctx context.Context, path string) (bool, error) {
-	// `git -C <path> rev-list @{upstream}..HEAD --count` — empty
-	// upstream returns non-zero exit which we treat as "no tracking
-	// branch yet → can't be unpushed".
-	count, err := gitcmd.String(ctx, path, "rev-list", "@{upstream}..HEAD", "--count")
-	if err != nil {
-		// No upstream — treat as no unpushed work.
-		return false, nil //nolint:nilerr // no tracking branch means nothing can be unpushed
+	ref, err := gitcmd.String(ctx, path, "symbolic-ref", "-q", "HEAD")
+	if gerr, ok := errors.AsType[*gitcmd.Error](err); ok && gerr.ExitCode == 1 {
+		return false, nil
 	}
-	return count != "0" && count != "", nil
+	if err != nil {
+		return false, fmt.Errorf("read the branch of %s: %w", path, err)
+	}
+	upstream, err := gitcmd.String(ctx, path, "for-each-ref", "--format=%(upstream)", ref)
+	if err != nil {
+		return false, fmt.Errorf("read the upstream of %s in %s: %w", ref, path, err)
+	}
+	if upstream == "" {
+		return false, nil
+	}
+	err = gitcmd.RunOptional(ctx, path, "rev-parse", "--verify", "--quiet", upstream)
+	if gerr, ok := errors.AsType[*gitcmd.Error](err); ok && gerr.ExitCode == 1 {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("check that upstream %s of %s exists in %s: %w", upstream, ref, path, err)
+	}
+	count, err := gitcmd.String(ctx, path, "rev-list", upstream+"..HEAD", "--count")
+	if err != nil {
+		return false, fmt.Errorf("count commits of %s ahead of %s in %s: %w", ref, upstream, path, err)
+	}
+	return count != "0", nil
 }
 
 // HeadPath returns the absolute path of a working tree's HEAD file,

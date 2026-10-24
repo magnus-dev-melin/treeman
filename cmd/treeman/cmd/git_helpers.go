@@ -446,14 +446,21 @@ func buildSwitchMenu(ctx context.Context, repoRoot string) (items, targets []str
 }
 
 // worktreeMarkers returns " *" (dirty) / " !" (unpushed commits) / " *!"
-// suffix for a worktree, or "" when clean and pushed.
+// suffix for a worktree, " ?" when either probe failed, or "" when
+// clean and pushed.
 func worktreeMarkers(ctx context.Context, path string) string {
 	m := ""
-	if dirty, _ := gitenv.HasWorkingTreeChanges(ctx, path); dirty {
-		m += "*"
-	}
-	if up, _ := gitenv.HasUnpushedCommits(ctx, path); up {
-		m += "!"
+	dirty, dirtyErr := gitenv.HasWorkingTreeChanges(ctx, path)
+	up, upErr := gitenv.HasUnpushedCommits(ctx, path)
+	switch {
+	case dirtyErr != nil || upErr != nil:
+		m = "?"
+	case dirty && up:
+		m = "*!"
+	case dirty:
+		m = "*"
+	case up:
+		m = "!"
 	}
 	if m != "" {
 		return " " + m

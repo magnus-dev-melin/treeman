@@ -549,6 +549,25 @@ Examples:
 // All-clean batches return (false, false): nothing risky, so the
 // delete proceeds without ceremony, exactly like the single-target
 // path.
+func unregenerableState(ctx context.Context, wtPath string) ([]string, error) {
+	dirty, err := gitenv.HasWorkingTreeChanges(ctx, wtPath)
+	if err != nil {
+		return nil, fmt.Errorf("check %s for uncommitted changes before deleting it: %w", wtPath, err)
+	}
+	unpushed, err := gitenv.HasUnpushedCommits(ctx, wtPath)
+	if err != nil {
+		return nil, fmt.Errorf("check %s for unpushed commits before deleting it: %w", wtPath, err)
+	}
+	var reasons []string
+	if dirty {
+		reasons = append(reasons, "uncommitted changes")
+	}
+	if unpushed {
+		reasons = append(reasons, "unpushed commits")
+	}
+	return reasons, nil
+}
+
 func confirmBatchDelete(ctx context.Context, repoRoot string, targets []string) (confirmed, aborted bool, err error) {
 	type finding struct {
 		path, branch string
@@ -564,12 +583,9 @@ func confirmBatchDelete(ctx context.Context, repoRoot string, targets []string) 
 		if ok {
 			wtPath = p
 		}
-		var reasons []string
-		if dirty, _ := gitenv.HasWorkingTreeChanges(ctx, wtPath); dirty {
-			reasons = append(reasons, "uncommitted changes")
-		}
-		if unpushed, _ := gitenv.HasUnpushedCommits(ctx, wtPath); unpushed {
-			reasons = append(reasons, "unpushed commits")
+		reasons, err := unregenerableState(ctx, wtPath)
+		if err != nil {
+			return false, false, err
 		}
 		if len(reasons) == 0 {
 			continue
@@ -640,12 +656,9 @@ func deleteWorktreeTarget(ctx context.Context, c *cli.Command, repoRoot, target 
 	// warrant a stop, and then as a default-yes warning naming
 	// the reason.
 	if !c.Bool("yes") && !preConfirmed {
-		var reasons []string
-		if dirty, _ := gitenv.HasWorkingTreeChanges(ctx, wtPath); dirty {
-			reasons = append(reasons, "uncommitted changes")
-		}
-		if unpushed, _ := gitenv.HasUnpushedCommits(ctx, wtPath); unpushed {
-			reasons = append(reasons, "unpushed commits")
+		reasons, err := unregenerableState(ctx, wtPath)
+		if err != nil {
+			return err
 		}
 		if len(reasons) > 0 {
 			q := fmt.Sprintf("Worktree %s has %s — destroy?", wtPath, strings.Join(reasons, ", "))
@@ -1584,7 +1597,13 @@ func wtBack() *cli.Command {
 				fmt.Println(repoRoot)
 				return nil
 			}
-			if unpushed, _ := gitenv.HasUnpushedCommits(ctx, wtRoot); unpushed {
+			unpushed, err := gitenv.HasUnpushedCommits(ctx, wtRoot)
+			if err != nil {
+				ui.Warn("checking for unpushed commits failed: %v; --remove aborted", err)
+				fmt.Println(repoRoot)
+				return nil
+			}
+			if unpushed {
 				fmt.Fprintln(os.Stderr, "keeping worktree (commits ahead of upstream)")
 				fmt.Println(repoRoot)
 				return nil
