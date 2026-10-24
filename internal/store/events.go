@@ -272,17 +272,6 @@ const WorktreeNotTearingDown = `NOT EXISTS (
 		WHERE e2.worktree_id = w.id
 		AND e2.event_type IN ('` + EvtWorktreeDeleteEnd + `','` + EvtWorktreeDeleteError + `')), 0))`
 
-// IsWorktreeTearingDown reports whether a teardown is currently in
-// flight for the worktree — the programmatic form of (the inverse of)
-// WorktreeNotTearingDown, for guards that hold an id rather than a
-// query to extend.
-func (s *Store) IsWorktreeTearingDown(ctx context.Context, wtID int64) bool {
-	var one int
-	err := s.DB.QueryRowContext(ctx,
-		`SELECT 1 FROM worktrees w WHERE w.id = ? AND NOT (`+WorktreeNotTearingDown+`)`, wtID).Scan(&one)
-	return err == nil
-}
-
 // WorktreeMatch is one candidate row returned by LookupWorktreeMatches.
 // Kind records WHICH column produced the hit so callers can apply
 // match-rank precedence (branch beats slug, slug beats path).
