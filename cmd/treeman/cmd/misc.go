@@ -1219,6 +1219,9 @@ func daemonStatus(ctx context.Context, c *cli.Command) error {
 	resp, err := rpc.Call(ctx, rpc.Request{Method: rpc.MethodStatus})
 	var pme *rpc.ProtocolMismatchError
 	mismatch := errors.As(err, &pme)
+	if err != nil && !mismatch && !errors.Is(err, rpc.ErrDaemonUnreachable) {
+		return fmt.Errorf("query daemon status: %w", err)
+	}
 	if c.Bool("json") {
 		out := map[string]any{}
 		if err != nil {

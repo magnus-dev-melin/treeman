@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -121,19 +122,8 @@ Examples:
 			// Daemon path first — preferred so live watchers stop in
 			// the same process. Falls back to direct SQLite when the
 			// daemon socket isn't there.
-			if _, dialErr := os.Stat(mustSocketPath()); dialErr == nil {
-				resp, err := rpcCall(ctx, repoRoot, force)
-				if err == nil {
-					if resp.Kind == rpc.KindError {
-						return fmt.Errorf("daemon: %s", resp.Message)
-					}
-					if c.Bool("json") {
-						return jsonStream(map[string]any{"repo": repoRoot, "removed": true, "via": "daemon"})
-					}
-					PrintOK("removed %s from registry (via daemon)", repoRoot)
-					return nil
-				}
-				PrintWarn("daemon RPC failed (%v) — falling back to direct SQLite", err)
+			if done, err := registryRemoveViaDaemon(ctx, repoRoot, force, c.Bool("json")); done || err != nil {
+				return err
 			}
 
 			st, err := openDefaultStore(ctx)
@@ -169,9 +159,29 @@ Examples:
 	}
 }
 
-func mustSocketPath() string {
-	p, _ := rpc.SocketPath()
-	return p
+func registryRemoveViaDaemon(ctx context.Context, repoRoot string, force, asJSON bool) (bool, error) {
+	sock, err := rpc.SocketPath()
+	if err != nil {
+		return false, err
+	}
+	if _, statErr := os.Stat(sock); errors.Is(statErr, fs.ErrNotExist) {
+		return false, nil
+	} else if statErr != nil {
+		return false, fmt.Errorf("check for the daemon socket %s: %w", sock, statErr)
+	}
+	resp, err := rpcCall(ctx, repoRoot, force)
+	if err != nil {
+		PrintWarn("daemon RPC failed (%v) — falling back to direct SQLite", err)
+		return false, nil
+	}
+	if resp.Kind == rpc.KindError {
+		return true, fmt.Errorf("daemon: %s", resp.Message)
+	}
+	if asJSON {
+		return true, jsonStream(map[string]any{"repo": repoRoot, "removed": true, "via": "daemon"})
+	}
+	PrintOK("removed %s from registry (via daemon)", repoRoot)
+	return true, nil
 }
 
 func rpcCall(ctx context.Context, repoPath string, force bool) (rpc.Response, error) {

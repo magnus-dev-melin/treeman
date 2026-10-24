@@ -5,11 +5,12 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/stubbedev/treeman/internal/sunpath"
 )
 
 const (
 	base             = "/tmp"
-	maxPathBytes     = 103
 	maxBasenameBytes = 32
 )
 
@@ -44,10 +45,9 @@ func Path(tb testing.TB, name string) string {
 }
 
 func fits(dir string, nameBytes int) error {
-	if n := len(dir) + 1 + nameBytes; n > maxPathBytes {
+	if n := len(dir) + 1 + nameBytes; n > sunpath.Max {
 		return fmt.Errorf("unix socket directory %q leaves %d bytes for a %d-byte socket name; "+
-			"sun_path holds at most %d bytes (104 on macOS, 108 on Linux, minus the terminating NUL)",
-			dir, maxPathBytes-len(dir)-1, nameBytes, maxPathBytes)
+			"this platform's sun_path limit is %d bytes", dir, sunpath.Max-len(dir)-1, nameBytes, sunpath.Max)
 	}
 	return nil
 }

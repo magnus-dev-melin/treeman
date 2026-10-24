@@ -31,7 +31,10 @@ func EnsureDaemon(ctx context.Context) error {
 	if _, err := daemonctl.Start(ctx); err != nil {
 		return fmt.Errorf("daemon start: %w", err)
 	}
-	sock, _ := rpc.SocketPath()
+	sock, err := rpc.SocketPath()
+	if err != nil {
+		return fmt.Errorf("resolve the daemon socket to wait for: %w", err)
+	}
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		if _, err := os.Stat(sock); err == nil {

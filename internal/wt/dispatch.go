@@ -2,6 +2,8 @@ package wt
 
 import (
 	"context"
+	"errors"
+	"fmt"
 
 	"github.com/stubbedev/treeman/pkg/rpc"
 )
@@ -40,11 +42,11 @@ func DispatchTeardown(ctx context.Context, repoRoot, wtPath string, force bool, 
 // through it instead of hand-rolling the retry.
 func CallWithStart(ctx context.Context, req rpc.Request) (rpc.Response, error) {
 	resp, err := rpc.Call(ctx, req)
-	if err == nil {
-		return resp, nil
+	if !errors.Is(err, rpc.ErrDaemonUnreachable) {
+		return resp, err
 	}
 	if startErr := EnsureDaemon(ctx); startErr != nil {
-		return rpc.Response{}, err
+		return rpc.Response{}, fmt.Errorf("%w; starting it failed: %w", err, startErr)
 	}
 	return rpc.Call(ctx, req)
 }

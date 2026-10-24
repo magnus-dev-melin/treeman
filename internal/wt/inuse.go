@@ -2,6 +2,7 @@ package wt
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -29,7 +30,11 @@ func EnsureNotInUse(ctx context.Context, wtPath string) error {
 	if err != nil {
 		return fmt.Errorf("check whether worktree %s is in use: %w", wtPath, err)
 	}
-	holders := foreignHolders(scan, os.Getpid(), daemonPID(ctx))
+	daemon, err := daemonPID(ctx)
+	if err != nil {
+		return fmt.Errorf("check whether worktree %s is in use: %w", wtPath, err)
+	}
+	holders := foreignHolders(scan, os.Getpid(), daemon)
 	if len(holders) == 0 {
 		return nil
 	}
@@ -47,10 +52,13 @@ func foreignHolders(scan procuse.Scan, self, daemon int) []procuse.Holder {
 	return foreign
 }
 
-func daemonPID(ctx context.Context) int {
+func daemonPID(ctx context.Context) (int, error) {
 	resp, err := rpc.Call(ctx, rpc.Request{Method: rpc.MethodStatus})
-	if err != nil {
-		return 0
+	if errors.Is(err, rpc.ErrDaemonUnreachable) {
+		return 0, nil
 	}
-	return int(resp.Pid)
+	if err != nil {
+		return 0, fmt.Errorf("ask the daemon for its pid: %w", err)
+	}
+	return int(resp.Pid), nil
 }

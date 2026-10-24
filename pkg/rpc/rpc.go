@@ -16,6 +16,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/stubbedev/treeman/internal/sunpath"
+
 	"github.com/stubbedev/treeman/pkg/safego"
 )
 
@@ -74,10 +76,11 @@ const (
 // SocketPath returns the effective socket path.
 func SocketPath() (string, error) {
 	if p := os.Getenv(SocketEnv); p != "" {
-		return p, nil
+		return checkedSocketPath(p, "set "+SocketEnv+" to a shorter path")
 	}
 	if rt := os.Getenv("XDG_RUNTIME_DIR"); rt != "" {
-		return filepath.Join(rt, SocketBasename), nil
+		return checkedSocketPath(filepath.Join(rt, SocketBasename),
+			"point XDG_RUNTIME_DIR at a shorter directory, or set "+SocketEnv+" to a shorter path")
 	}
 	xdg := os.Getenv("XDG_DATA_HOME")
 	if xdg == "" {
@@ -87,7 +90,15 @@ func SocketPath() (string, error) {
 		}
 		xdg = filepath.Join(home, ".local", "share")
 	}
-	return filepath.Join(xdg, "treeman", SocketBasename), nil
+	return checkedSocketPath(filepath.Join(xdg, "treeman", SocketBasename),
+		"set XDG_RUNTIME_DIR to a shorter directory, or "+SocketEnv+" to a shorter path")
+}
+
+func checkedSocketPath(path, fix string) (string, error) {
+	if err := sunpath.Check(path); err != nil {
+		return "", fmt.Errorf("%w; %s (at most %d bytes)", err, fix, sunpath.Max)
+	}
+	return path, nil
 }
 
 // ─────────────────────────── Request ───────────────────────────
