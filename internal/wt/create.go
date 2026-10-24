@@ -141,7 +141,11 @@ func CreateInStore(ctx context.Context, req CreateRequest, st *store.Store, sink
 	// (linked worktree on the requested branch, registered in
 	// SQLite), treat the call as a no-op so scripts can retry safely.
 	if _, err := os.Stat(wtPath); err == nil {
-		if IsMatchingExistingWorktree(ctx, req.RepoRoot, wtPath, req.Branch) {
+		existing, err := IsMatchingExistingWorktree(ctx, req.RepoRoot, wtPath, req.Branch)
+		if err != nil {
+			return CreateResult{}, false, err
+		}
+		if existing {
 			sink.Info("worktree already exists at %s on %s — no-op", wtPath, req.Branch)
 			return CreateResult{WtPath: wtPath, Status: CreatedNoop}, false, nil
 		}

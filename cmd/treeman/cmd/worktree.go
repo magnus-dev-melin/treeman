@@ -376,7 +376,10 @@ func spawnWorktree(ctx context.Context, repoRoot string, args rpc.WorktreeCreate
 	if err := foregroundTask(ctx, args.Task(repoRoot, CaptureInheritedEnv()), "worktree create"); err != nil {
 		return "", err
 	}
-	path, ok := wt.LookupWorktree(ctx, repoRoot, args.Branch, cliSink{})
+	path, ok, err := wt.LookupWorktree(ctx, repoRoot, args.Branch, cliSink{})
+	if err != nil {
+		return "", err
+	}
 	switch {
 	case ok:
 	case args.Path != "":
@@ -513,7 +516,10 @@ Examples:
 			// ones (#77). --yes skips everything, as before.
 			batchConfirmed := false
 			if len(targets) > 1 && !c.Bool("yes") {
-				confirmed, aborted := confirmBatchDelete(ctx, repoRoot, targets)
+				confirmed, aborted, err := confirmBatchDelete(ctx, repoRoot, targets)
+				if err != nil {
+					return err
+				}
 				if aborted {
 					return nil
 				}
@@ -543,7 +549,7 @@ Examples:
 // All-clean batches return (false, false): nothing risky, so the
 // delete proceeds without ceremony, exactly like the single-target
 // path.
-func confirmBatchDelete(ctx context.Context, repoRoot string, targets []string) (confirmed, aborted bool) {
+func confirmBatchDelete(ctx context.Context, repoRoot string, targets []string) (confirmed, aborted bool, err error) {
 	type finding struct {
 		path, branch string
 		reasons      []string
@@ -551,7 +557,11 @@ func confirmBatchDelete(ctx context.Context, repoRoot string, targets []string) 
 	var findings []finding
 	for _, target := range targets {
 		wtPath := MustAbs(target)
-		if p, ok := wt.LookupWorktree(ctx, repoRoot, target, cliSink{}); ok {
+		p, ok, lookupErr := wt.LookupWorktree(ctx, repoRoot, target, cliSink{})
+		if lookupErr != nil {
+			return false, false, lookupErr
+		}
+		if ok {
 			wtPath = p
 		}
 		var reasons []string
@@ -568,7 +578,7 @@ func confirmBatchDelete(ctx context.Context, repoRoot string, targets []string) 
 		findings = append(findings, finding{path: wtPath, branch: branch, reasons: reasons})
 	}
 	if len(findings) == 0 {
-		return false, false
+		return false, false, nil
 	}
 	_, _ = fmt.Fprintln(ui.Err, ui.Red(fmt.Sprintf("destroying %d worktree(s) with unregenerable state:", len(findings))))
 	for _, f := range findings {
@@ -580,9 +590,9 @@ func confirmBatchDelete(ctx context.Context, repoRoot string, targets []string) 
 	}
 	if !ui.ConfirmYes(fmt.Sprintf("destroy these %d worktrees?", len(findings))) {
 		PrintInfo("aborted: all %d worktrees left intact", len(targets))
-		return false, true
+		return false, true, nil
 	}
-	return true, false
+	return true, false, nil
 }
 
 // deleteWorktreeTarget tears down one worktree named by path, branch or
@@ -596,7 +606,11 @@ func deleteWorktreeTarget(ctx context.Context, c *cli.Command, repoRoot, target 
 	// wt.Delete's lookup but the second pass inside the
 	// orchestrator is cheap (sqlite query).
 	wtPath := MustAbs(target)
-	if p, ok := wt.LookupWorktree(ctx, repoRoot, target, cliSink{}); ok {
+	p, ok, err := wt.LookupWorktree(ctx, repoRoot, target, cliSink{})
+	if err != nil {
+		return err
+	}
+	if ok {
 		wtPath = p
 	}
 
@@ -659,7 +673,7 @@ func deleteWorktreeTarget(ctx context.Context, c *cli.Command, repoRoot, target 
 		return deleteForeground(ctx, c, repoRoot, target, wtPath)
 	}
 
-	_, err := wt.Delete(ctx, wt.DeleteRequest{
+	_, err = wt.Delete(ctx, wt.DeleteRequest{
 		RepoRoot: repoRoot,
 		Target:   target,
 		Force:    c.Bool("force"),
@@ -1439,7 +1453,10 @@ func resolveFinalizeTarget(ctx context.Context, arg, repoRoot string, repoErr er
 					arg,
 				)
 			}
-			p, ok := wt.LookupWorktree(ctx, repoRoot, arg, cliSink{})
+			p, ok, err := wt.LookupWorktree(ctx, repoRoot, arg, cliSink{})
+			if err != nil {
+				return "", "", err
+			}
 			if !ok {
 				return "", "", fmt.Errorf("no worktree matches %q (expected a path or registered slug/branch)", arg)
 			}
@@ -1732,11 +1749,15 @@ which may check out in the main repo). To always land in a worktree, use
 			}
 
 			// Pure resolve: fuzzy worktree lookup, then exact branch.
-			if path, ok := wt.LookupWorktree(ctx, repoRoot, target, cliSink{}); ok {
+			path, ok, err := wt.LookupWorktree(ctx, repoRoot, target, cliSink{})
+			if err != nil {
+				return err
+			}
+			if ok {
 				landExisting(ctx, path)
 				return nil
 			}
-			path, ok, err := registryWorktreeForBranch(ctx, repoRoot, target)
+			path, ok, err = registryWorktreeForBranch(ctx, repoRoot, target)
 			if err != nil {
 				return err
 			}

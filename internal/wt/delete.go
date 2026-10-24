@@ -77,7 +77,11 @@ func Delete(ctx context.Context, req DeleteRequest, sink Sink) (DeleteResult, er
 	// Registry lookup wins over path interpretation. With Force we
 	// fall back to path-as-typed even when the directory is gone.
 	var wtPath string
-	if p, ok := LookupWorktree(ctx, req.RepoRoot, req.Target, sink); ok {
+	p, ok, err := LookupWorktree(ctx, req.RepoRoot, req.Target, sink)
+	if err != nil {
+		return DeleteResult{}, err
+	}
+	if ok {
 		wtPath = p
 	} else {
 		abs, err := filepath.Abs(req.Target)

@@ -56,7 +56,10 @@ func TestLookupWorktree(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got, ok := LookupWorktree(ctx, repoRoot, c.query, NoopSink{})
+			got, ok, err := LookupWorktree(ctx, repoRoot, c.query, NoopSink{})
+			if err != nil {
+				t.Fatal(err)
+			}
 			if ok != c.wantOK {
 				t.Fatalf("ok=%v want %v (got=%q)", ok, c.wantOK, got)
 			}
@@ -76,7 +79,19 @@ func TestLookupWorktreeIgnoresDeleted(t *testing.T) {
 	if err := st.MarkWorktreeDeleted(ctx, id); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := LookupWorktree(ctx, repoRoot, "gone", NoopSink{}); ok {
+	if _, ok, err := LookupWorktree(ctx, repoRoot, "gone", NoopSink{}); err != nil || ok {
 		t.Error("deleted worktree should not be found")
+	}
+}
+
+func TestLookupWorktreeAndIdempotencyCheckSurfaceStoreErrors(t *testing.T) {
+	ctx := context.Background()
+	st := withTempStore(t)
+	repoRoot := t.TempDir()
+	if _, err := st.DB.ExecContext(ctx, "DROP TABLE worktrees"); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok, err := LookupWorktree(ctx, repoRoot, "feature-x", NoopSink{}); err == nil {
+		t.Fatalf("LookupWorktree on a broken store = %q, %v, nil; want the query error", got, ok)
 	}
 }

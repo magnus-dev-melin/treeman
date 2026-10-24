@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"maps"
 	"os"
 	"path/filepath"
@@ -90,35 +91,50 @@ func requestCwd(ctx context.Context) (string, error) {
 // may ignore it), but every caller that acts on the worktree must fail
 // instead of operating on <cwd>/<name>.
 func resolveWorktree(ctx context.Context, path string) (wt, branch string, err error) {
+	cwd, cwdErr := requestCwd(ctx)
 	if path == "" {
-		// Default to the request's workspace root (HTTP header / MCP
-		// roots) and only then the process cwd — see resolveRepo.
-		path, _ = requestCwd(ctx)
-		wt = canonicalDir(path)
+		if cwdErr != nil {
+			return "", "", fmt.Errorf("resolve the worktree: %w", cwdErr)
+		}
+		wt = canonicalDir(cwd)
 		return wt, detectBranch(wt), nil
 	}
-	wt, _ = filepath.Abs(path)
-	// An existing directory is an explicit path the caller chose;
-	// only symlinks are resolved so it matches git's repo root.
-	if fi, statErr := os.Stat(wt); statErr == nil && fi.IsDir() {
+	switch {
+	case filepath.IsAbs(path):
+		wt = filepath.Clean(path)
+	case cwdErr != nil:
+		return "", "", fmt.Errorf("resolve worktree %q against the workspace root: %w", path, cwdErr)
+	default:
+		wt = filepath.Join(cwd, path)
+	}
+	fi, statErr := os.Stat(wt)
+	switch {
+	case statErr == nil && fi.IsDir():
 		wt = canonicalDir(wt)
 		return wt, detectBranch(wt), nil
+	case statErr != nil && !errors.Is(statErr, fs.ErrNotExist):
+		return "", "", fmt.Errorf("resolve worktree %q: %w", path, statErr)
 	}
-	// Not an on-disk path: try resolving it as a registered worktree
-	// name (slug / branch / basename) against the repo inferred from
-	// the request's workspace root (or cwd over stdio).
-	if cwd, cwdErr := requestCwd(ctx); cwdErr == nil {
+	if cwdErr == nil {
 		if repoRoot, rootErr := gitenv.MainRoot(ctx, cwd); rootErr == nil {
-			if p, ok := wtpkg.LookupWorktree(ctx, repoRoot, path, wtpkg.NoopSink{}); ok {
+			p, ok, err := wtpkg.LookupWorktree(ctx, repoRoot, path, wtpkg.NoopSink{})
+			if err != nil {
+				return "", "", err
+			}
+			if ok {
 				return p, detectBranch(p), nil
 			}
 		}
 	}
-	// Neither an on-disk directory nor a registered slug/branch/basename
-	// — e.g. a slug that went stale after a branch switch. Reject it the
-	// way logs_query does instead of handing back <cwd>/<name>, which
-	// queues work against a path that never existed.
-	return wt, detectBranch(wt), fmt.Errorf("no worktree matches %q (try worktree_list)", path)
+	return wt, detectBranch(wt), &noWorktreeMatchError{name: path}
+}
+
+type noWorktreeMatchError struct {
+	name string
+}
+
+func (e *noWorktreeMatchError) Error() string {
+	return fmt.Sprintf("no worktree matches %q (try worktree_list)", e.name)
 }
 
 func canonicalDir(path string) string {

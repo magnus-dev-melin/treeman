@@ -1495,7 +1495,10 @@ func planWorktreeDelete(ctx context.Context, repoRoot, target string) (worktreeD
 		return out, err
 	}
 	defer func() { _ = st.Close() }()
-	wtPath, ok := wt.LookupWorktree(ctx, repoRoot, target, wt.NoopSink{})
+	wtPath, ok, err := wt.LookupWorktree(ctx, repoRoot, target, wt.NoopSink{})
+	if err != nil {
+		return out, err
+	}
 	if !ok {
 		abs, absErr := filepath.Abs(target)
 		if absErr != nil {
