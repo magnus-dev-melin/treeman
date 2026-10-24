@@ -29,16 +29,16 @@ func TestTemplateBuiltTargets(t *testing.T) {
 	present := func(context.Context, string) (bool, error) { return true, nil }
 	clones := []string{"db_a_test_1", "db_a_test_2"}
 
-	if templateBuiltTargets(ctx, st, present, wtID, "db_a", "mysql", "", clones, "fp1") {
+	if builtTargets(ctx, t, st, present, wtID, clones, "fp1") {
 		t.Fatal("no recorded row: must restore")
 	}
 	if err := st.SetTemplateBuilt(ctx, wtID, "db_a", "mysql", "", "fp1"); err != nil {
 		t.Fatal(err)
 	}
-	if !templateBuiltTargets(ctx, st, present, wtID, "db_a", "mysql", "", clones, "fp1") {
+	if !builtTargets(ctx, t, st, present, wtID, clones, "fp1") {
 		t.Fatal("recorded fingerprint + all targets present: must skip")
 	}
-	if templateBuiltTargets(ctx, st, present, wtID, "db_a", "mysql", "", clones, "fp2") {
+	if builtTargets(ctx, t, st, present, wtID, clones, "fp2") {
 		t.Fatal("changed fingerprint: must restore")
 	}
 
@@ -47,11 +47,11 @@ func TestTemplateBuiltTargets(t *testing.T) {
 	exists := map[string]bool{}
 	probe := func(_ context.Context, name string) (bool, error) { return exists[name], nil }
 	exists = map[string]bool{"db_a": true, "db_a_test_1": true} // clone 2 gone
-	if templateBuiltTargets(ctx, st, probe, wtID, "db_a", "mysql", "", clones, "fp1") {
+	if builtTargets(ctx, t, st, probe, wtID, clones, "fp1") {
 		t.Fatal("missing clone: must restore")
 	}
 	exists = map[string]bool{"db_a": true, "db_a_test_1": true, "db_a_test_2": true}
-	if !templateBuiltTargets(ctx, st, probe, wtID, "db_a", "mysql", "", clones, "fp1") {
+	if !builtTargets(ctx, t, st, probe, wtID, clones, "fp1") {
 		t.Fatal("all targets back: must skip")
 	}
 }
@@ -83,7 +83,9 @@ func TestCacheHitGenericAlwaysReturnsCallableFinish(t *testing.T) {
 			_ = st.DeleteSnapshot(ctx, key.Fingerprint())
 			_ = st.ClearTemplateBuiltForKey(ctx, wtID, "db_a")
 			if scenario == "skip-gate" || scenario == "full-restore" {
-				recordSnapshot(ctx, st, key, "mysql", "8", "db_a", key.TemplateName(), nil, repoID)
+				if err := recordSnapshot(ctx, st, key, "mysql", "8", "db_a", key.TemplateName(), nil, repoID); err != nil {
+					t.Fatal(err)
+				}
 			}
 			// The skip gate needs a recorded built-at fingerprint matching
 			// this key AND every target present (exists always true here).
@@ -141,4 +143,21 @@ func TestBuildFlightsDedupe(t *testing.T) {
 	// The zero flight (no cold build in progress) is a safe no-op.
 	buildFlight{}.finish()
 	finish2.finish()
+}
+
+func builtTargets(
+	ctx context.Context,
+	t *testing.T,
+	st *store.Store,
+	exists func(context.Context, string) (bool, error),
+	worktreeID int64,
+	clones []string,
+	fingerprint string,
+) bool {
+	t.Helper()
+	ok, err := templateBuiltTargets(ctx, st, exists, worktreeID, "db_a", "mysql", "", clones, fingerprint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ok
 }

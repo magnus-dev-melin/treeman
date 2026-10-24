@@ -584,7 +584,9 @@ func cacheHitRestoreAndFanout(
 				"fingerprint": fingerprint,
 				"error":       fanoutErr.Error(),
 			})
-		_ = st.DeleteSnapshot(ctx, fingerprint)
+		if err := st.DeleteSnapshot(ctx, fingerprint); err != nil {
+			return false, fmt.Errorf("forget %s snapshot %s whose template is gone: %w", d.Engine, template, err)
+		}
 	}
 	return true, nil
 }
@@ -695,14 +697,10 @@ func RunFiltered(
 		}
 		g.Go(func() error {
 			o, err := prepareOneEngine(ctx, cfg, d, i, tplCtx, worktreePath, st, repoID, worktreeID, inheritedEnv)
+			if err == nil && !o.CacheHit && o.Fingerprint != "" && o.SourceDB != "" {
+				err = recordTemplateBuilt(ctx, st, worktreeID, o.SourceDB, d.Engine, d.Connection, o.Fingerprint)
+			}
 			if err == nil {
-				// A successful template-path run leaves the worktree's
-				// namespaces populated at this fingerprint — record it so the
-				// next cache hit can skip the restore entirely (branch-scoped
-				// outcomes carry no fingerprint and skip the record).
-				if !o.CacheHit && o.Fingerprint != "" && o.SourceDB != "" {
-					_ = st.SetTemplateBuilt(ctx, worktreeID, o.SourceDB, d.Engine, d.Connection, o.Fingerprint)
-				}
 				results[i] = o
 				hasResult[i] = true
 			} else {
@@ -887,11 +885,10 @@ func prepareMySQL(
 	// the active namespace, not a migrations-only template shared
 	// across worktrees.
 	if d.BranchScoped {
-		return runBranchScoped(ctx, branchScopedArgs{
+		return runBranchScopedAt(ctx, version, branchScopedArgs{
 			cfg: cfg, d: d, dbIdx: dbIdx, tplCtx: tplCtx, worktreePath: worktreePath,
 			st: st, repoID: repoID, worktreeID: worktreeID, inheritedEnv: inheritedEnv,
-			migrateFP: computeSnapshotKey(ctx, st, d, worktreePath, version).Fingerprint(),
-			eng:       &branchEngine{drv: mysqlNS{drv}, scope: scopeName, engine: "mysql"},
+			eng: &branchEngine{drv: mysqlNS{drv}, scope: scopeName, engine: "mysql"},
 			loadDump: func(ctx context.Context, active string, dump dumpFile) error {
 				_, e := dumpload.LoadMySQL(ctx, drv.DB, mysqlConn, active, dump.Path)
 				return e
@@ -899,7 +896,10 @@ func prepareMySQL(
 		})
 	}
 
-	key, inputs := computeKeyAndVectors(ctx, st, d, worktreePath, version)
+	key, inputs, err := computeKeyAndVectors(ctx, st, d, worktreePath, version)
+	if err != nil {
+		return Outcome{}, err
+	}
 	templateName := key.TemplateName()
 
 	// Pin the fingerprint for the lifetime of this prepare so the
@@ -1126,31 +1126,21 @@ func cacheHitGeneric(
 	maxConns int,
 	started time.Time,
 ) (Outcome, bool, buildFlight, error) {
-	// A lookup error is treated as a cache miss (fall through to cold
-	// build), matching the original `err == nil && rec != nil` guard.
-	// The lookup also touches the row in the same statement — BEFORE the
-	// existence probe — so a concurrent EvictExcess sees this template
-	// as most-recently-used and won't pick it as the LRU victim while
-	// we're about to use it.
-	rec, _ := st.LookupAndTouchSnapshot(ctx, key.Fingerprint())
-	if rec == nil {
+	rec, err := lookupCachedSnapshot(ctx, st, d.Engine, key.Fingerprint(), func() {
 		emitCacheMiss(ctx, st, repoID, worktreeID, d.Engine, sourceDB, key.Fingerprint(), cacheMissNoRow)
-		// A sibling worktree may be cold-building this exact fingerprint
-		// right now. Wait for it and retry once — its snapshot row then
-		// turns our would-be duplicate cold build into a restore.
-		if waitForBuild(d.Engine, key.Fingerprint()) {
-			rec, _ = st.LookupAndTouchSnapshot(ctx, key.Fingerprint())
-		}
+	})
+	if err != nil {
+		return Outcome{}, false, buildFlight{}, err
 	}
 	if rec == nil {
 		return Outcome{}, false, beginBuild(d.Engine, key.Fingerprint()), nil
 	}
-	alive, _ := exists(ctx, rec.TemplateName)
+	alive, err := liveSnapshot(ctx, st, exists, d.Engine, rec)
+	if err != nil {
+		return Outcome{}, false, buildFlight{}, err
+	}
 	if !alive {
-		// Row stale (template was dropped externally). Wipe so the
-		// cold-build path overwrites it cleanly.
 		emitCacheMiss(ctx, st, repoID, worktreeID, d.Engine, sourceDB, key.Fingerprint(), cacheMissTemplateGone)
-		_ = st.DeleteSnapshot(ctx, key.Fingerprint())
 		return Outcome{}, false, beginBuild(d.Engine, key.Fingerprint()), nil
 	}
 	_ = st.WriteEvent(ctx, store.LevelInfo, store.EvtSnapshotsCacheHit,
@@ -1171,7 +1161,7 @@ func cacheHitGeneric(
 	// it, every finalize re-restored the source + every clone from the
 	// template even though the inputs hadn't changed: ~90s of I/O on a
 	// 16-clone repo per HEAD move.)
-	if restored := templateBuiltTargets(
+	restored, err := templateBuiltTargets(
 		ctx,
 		st,
 		exists,
@@ -1181,7 +1171,11 @@ func cacheHitGeneric(
 		d.Connection,
 		clones,
 		key.Fingerprint(),
-	); restored {
+	)
+	if err != nil {
+		return Outcome{}, false, buildFlight{}, err
+	}
+	if restored {
 		ms := time.Since(started).Milliseconds()
 		_ = st.WriteEvent(ctx, store.LevelInfo, store.EvtPrepareEnd,
 			fmt.Sprintf("cache_hit clones=%d restored=0 duration=%dms", len(clones), ms),
@@ -1223,7 +1217,9 @@ func cacheHitGeneric(
 	if templateGone {
 		return Outcome{}, false, beginBuild(d.Engine, key.Fingerprint()), nil
 	}
-	_ = st.SetTemplateBuilt(ctx, worktreeID, sourceDB, d.Engine, d.Connection, key.Fingerprint())
+	if err := recordTemplateBuilt(ctx, st, worktreeID, sourceDB, d.Engine, d.Connection, key.Fingerprint()); err != nil {
+		return Outcome{}, false, buildFlight{}, err
+	}
 	ms := time.Since(started).Milliseconds()
 	_ = st.WriteEvent(ctx, store.LevelInfo, store.EvtPrepareEnd,
 		fmt.Sprintf("cache_hit clones=%d duration=%dms", len(clones), ms),
@@ -1258,10 +1254,13 @@ func templateBuiltTargets(
 	sourceDB, engine, connection string,
 	clones []string,
 	fingerprint string,
-) bool {
+) (bool, error) {
 	builtFP, ok, err := st.GetTemplateBuilt(ctx, worktreeID, sourceDB, engine, connection)
-	if err != nil || !ok || builtFP != fingerprint {
-		return false
+	if err != nil {
+		return false, fmt.Errorf("read the built-at fingerprint of %s %s: %w", engine, sourceDB, err)
+	}
+	if !ok || builtFP != fingerprint {
+		return false, nil
 	}
 	targets := make([]string, 0, len(clones)+1)
 	targets = append(targets, sourceDB)
@@ -1272,13 +1271,69 @@ func templateBuiltTargets(
 	}
 	for _, t := range targets {
 		present, err := exists(ctx, t)
-		if err != nil || !present {
-			// Any missing namespace (manual drop, reset, engine wipe)
-			// re-arms the restore for the whole set.
-			return false
+		if err != nil {
+			return false, fmt.Errorf("probe %s %s: %w", engine, t, err)
+		}
+		if !present {
+			return false, nil
 		}
 	}
-	return true
+	return true, nil
+}
+
+func lookupCachedSnapshot(ctx context.Context, st *store.Store, engine, fingerprint string, onMiss func()) (*store.SnapshotRecord, error) {
+	rec, err := st.LookupAndTouchSnapshot(ctx, fingerprint)
+	if err != nil {
+		return nil, fmt.Errorf("look up the %s snapshot %s: %w", engine, fingerprint, err)
+	}
+	if rec != nil {
+		return rec, nil
+	}
+	onMiss()
+	if !waitForBuild(engine, fingerprint) {
+		return nil, nil
+	}
+	rec, err = st.LookupAndTouchSnapshot(ctx, fingerprint)
+	if err != nil {
+		return nil, fmt.Errorf("look up the %s snapshot %s: %w", engine, fingerprint, err)
+	}
+	return rec, nil
+}
+
+func runBranchScopedAt(ctx context.Context, engineVersion string, a branchScopedArgs) (Outcome, error) {
+	key, err := computeSnapshotKey(ctx, a.st, a.d, a.worktreePath, engineVersion)
+	if err != nil {
+		return Outcome{}, err
+	}
+	a.migrateFP = key.Fingerprint()
+	return runBranchScoped(ctx, a)
+}
+
+func liveSnapshot(
+	ctx context.Context,
+	st *store.Store,
+	exists func(context.Context, string) (bool, error),
+	engine string,
+	rec *store.SnapshotRecord,
+) (bool, error) {
+	alive, err := exists(ctx, rec.TemplateName)
+	if err != nil {
+		return false, fmt.Errorf("probe %s template %s: %w", engine, rec.TemplateName, err)
+	}
+	if alive {
+		return true, nil
+	}
+	if err := st.DeleteSnapshot(ctx, rec.Fingerprint); err != nil {
+		return false, fmt.Errorf("forget %s snapshot %s whose template is gone: %w", engine, rec.TemplateName, err)
+	}
+	return false, nil
+}
+
+func recordTemplateBuilt(ctx context.Context, st *store.Store, worktreeID int64, sourceDB, engine, connection, fingerprint string) error {
+	if err := st.SetTemplateBuilt(ctx, worktreeID, sourceDB, engine, connection, fingerprint); err != nil {
+		return fmt.Errorf("record that %s %s was built at %s: %w", engine, sourceDB, fingerprint, err)
+	}
+	return nil
 }
 
 // runPhase runs one cold-build runner phase (migrate or seed) against
@@ -1353,12 +1408,11 @@ func mysqlColdBuildSteps(
 		}
 		emitDumpLoadPhase(ctx, st, repoID, worktreeID, d.Engine, sourceDB, dr.Path, i, len(dumps), stepStart, string(strategy))
 	}
-	// Seed the dump-only intermediate template (post-dump, pre-migrate)
-	// so a later migration edit can rebuild from it without reloading
-	// the dump. Best-effort: failure here only forfeits the fast path.
-	seedDumpOnlyTemplate(ctx, st, d, repoID, worktreeID, sourceDB, version, dumpKey, len(dumps),
+	if err := seedDumpOnlyTemplate(ctx, st, d, repoID, worktreeID, sourceDB, version, dumpKey, len(dumps),
 		drv.DatabaseExists,
-		func(ctx context.Context, src, tmpl string) error { return drv.SnapshotCreate(ctx, src, tmpl) })
+		func(ctx context.Context, src, tmpl string) error { return drv.SnapshotCreate(ctx, src, tmpl) }); err != nil {
+		return err
+	}
 	if d.Migrate != nil {
 		if err := runPhase(
 			ctx,
@@ -1411,8 +1465,8 @@ func recordSnapshot(
 	engine, version, source, template string,
 	inputs map[string]store.InputVector,
 	repoID int64,
-) {
-	_ = st.RecordSnapshot(ctx, store.SnapshotRecord{
+) error {
+	err := st.RecordSnapshot(ctx, store.SnapshotRecord{
 		Fingerprint:    key.Fingerprint(),
 		Engine:         engine,
 		EngineVersion:  version,
@@ -1424,6 +1478,10 @@ func recordSnapshot(
 		Inputs:         inputs,
 		RepoID:         repoID,
 	})
+	if err != nil {
+		return fmt.Errorf("record %s snapshot %s of %s: %w", engine, template, source, err)
+	}
+	return nil
 }
 
 func mysqlSnapshotAndRecord(
@@ -1443,7 +1501,9 @@ func mysqlSnapshotAndRecord(
 	}
 	emitPhaseDone(ctx, st, repoID, worktreeID, d.Engine, sourceDB, "snapshot-create", snapStart)
 	emitCloneStrategy(ctx, st, repoID, worktreeID, d.Engine, sourceDB, templateName, string(drv.LastCloneStrategy()))
-	recordSnapshot(ctx, st, key, d.Engine, version, sourceDB, templateName, inputs, repoID)
+	if err := recordSnapshot(ctx, st, key, d.Engine, version, sourceDB, templateName, inputs, repoID); err != nil {
+		return err
+	}
 	// Fire-and-forget LRU eviction for this repo. Uses a fresh
 	// background context with a hard deadline so a stalled DROP
 	// (e.g. lock contention) can't leak this goroutine forever.
@@ -1574,7 +1634,9 @@ func mysqlMergedColdFanout(
 	// template's strategy + a per-template phase boundary.
 	emitPhaseDone(ctx, st, repoID, worktreeID, d.Engine, sourceDB, "snapshot-create", started)
 	emitCloneStrategy(ctx, st, repoID, worktreeID, d.Engine, sourceDB, templateName, string(drv.LastCloneStrategy()))
-	recordSnapshot(ctx, st, key, d.Engine, version, sourceDB, templateName, inputs, repoID)
+	if err := recordSnapshot(ctx, st, key, d.Engine, version, sourceDB, templateName, inputs, repoID); err != nil {
+		return err
+	}
 	spawnEvict(cfg, st, repoID)
 	return nil
 }
@@ -1727,7 +1789,10 @@ func tryIncrementalBuild(
 	ops incrementalOps,
 ) (Outcome, bool, error) {
 	commandsHash := key.LockfileHashes[store.CommandsHashKey]
-	anc, _ := st.FindAncestorSnapshot(ctx, repoID, d.Engine, version, key.DumpHashHex, commandsHash, inputs)
+	anc, err := st.FindAncestorSnapshot(ctx, repoID, d.Engine, version, key.DumpHashHex, commandsHash, inputs)
+	if err != nil {
+		return Outcome{}, false, fmt.Errorf("find an ancestor %s snapshot: %w", d.Engine, err)
+	}
 	if anc == nil {
 		return Outcome{}, false, nil
 	}
@@ -1736,13 +1801,8 @@ func tryIncrementalBuild(
 	unpinAnc := snapshot.Pin(anc.Fingerprint)
 	defer unpinAnc()
 
-	exists, _ := ops.exists(ctx, anc.TemplateName)
-	if !exists {
-		// Ghost row: SQLite remembers the template but the engine
-		// doesn't. Clear the row so future preps stop picking it and
-		// fall through to a full cold build for this run.
-		_ = st.DeleteSnapshot(ctx, anc.Fingerprint)
-		return Outcome{}, false, nil
+	if live, err := liveSnapshot(ctx, st, ops.exists, d.Engine, anc); !live || err != nil {
+		return Outcome{}, false, err
 	}
 
 	delta := vectorDelta(anc.Inputs, inputs)
@@ -1793,7 +1853,9 @@ func tryIncrementalBuild(
 		return Outcome{}, false, fmt.Errorf("incremental snapshot create %s → %s: %w", source, templateName, err)
 	}
 	emitPhaseDone(ctx, st, repoID, worktreeID, d.Engine, source, "snapshot-create", snapStart)
-	recordSnapshot(ctx, st, key, d.Engine, version, source, templateName, inputs, repoID)
+	if err := recordSnapshot(ctx, st, key, d.Engine, version, source, templateName, inputs, repoID); err != nil {
+		return Outcome{}, false, err
+	}
 	spawnEvict(cfg, st, repoID)
 
 	clones, err := resolveCloneNames(d.TestClones, tplCtx, worktreePath)
@@ -1878,17 +1940,18 @@ func seedDumpOnlyTemplate(
 	dumpCount int,
 	exists func(context.Context, string) (bool, error),
 	snapshotCreate func(ctx context.Context, src, tmpl string) error,
-) {
+) error {
 	if dumpCount == 0 || d.Migrate == nil {
-		return
+		return nil
 	}
 	dumpTpl := dumpKey.TemplateName()
-	// Skip the full template copy when a live dump-only template already
-	// exists — the post-dump state is immutable for a given dump hash, so
-	// the copy used to re-run on EVERY cold build for nothing.
-	if rec, lerr := st.LookupSnapshot(ctx, dumpKey.Fingerprint()); lerr == nil && rec != nil {
+	rec, err := st.LookupSnapshot(ctx, dumpKey.Fingerprint())
+	if err != nil {
+		return fmt.Errorf("look up the dump-only %s template %s: %w", d.Engine, dumpTpl, err)
+	}
+	if rec != nil {
 		if alive, aerr := exists(ctx, rec.TemplateName); aerr == nil && alive {
-			return
+			return nil
 		}
 	}
 	start := time.Now()
@@ -1899,10 +1962,10 @@ func seedDumpOnlyTemplate(
 				"engine": d.Engine, "source_db": sourceDB, "template": dumpTpl,
 				"error": err.Error(),
 			})
-		return
+		return nil
 	}
 	emitPhaseDone(ctx, st, repoID, worktreeID, d.Engine, sourceDB, "dumponly-snapshot", start)
-	recordSnapshot(ctx, st, dumpKey, d.Engine, version, sourceDB, dumpTpl, nil, repoID)
+	return recordSnapshot(ctx, st, dumpKey, d.Engine, version, sourceDB, dumpTpl, nil, repoID)
 }
 
 // snapshotRecordFanout is the shared tail of the incremental build
@@ -1927,7 +1990,9 @@ func snapshotRecordFanout(
 		return nil, fmt.Errorf("snapshot create %s → %s: %w", source, templateName, err)
 	}
 	emitPhaseDone(ctx, st, repoID, worktreeID, d.Engine, source, "snapshot-create", snapStart)
-	recordSnapshot(ctx, st, key, d.Engine, version, source, templateName, inputs, repoID)
+	if err := recordSnapshot(ctx, st, key, d.Engine, version, source, templateName, inputs, repoID); err != nil {
+		return nil, err
+	}
 	spawnEvict(cfg, st, repoID)
 
 	clones, err := resolveCloneNames(d.TestClones, tplCtx, worktreePath)
@@ -1975,19 +2040,18 @@ func tryDumpOnlyBuild(
 	// Touch the row on use (LRU): a hot dump-only template must not age
 	// out of the cache — a migration edit then silently falls back to a
 	// full dump reload, the dominant cold cost.
-	anc, _ := st.LookupAndTouchSnapshot(ctx, dumpKey.Fingerprint())
+	anc, err := st.LookupAndTouchSnapshot(ctx, dumpKey.Fingerprint())
+	if err != nil {
+		return Outcome{}, false, fmt.Errorf("look up the dump-only %s snapshot: %w", d.Engine, err)
+	}
 	if anc == nil {
 		return Outcome{}, false, nil
 	}
 	unpin := snapshot.Pin(anc.Fingerprint)
 	defer unpin()
 
-	exists, _ := ops.exists(ctx, anc.TemplateName)
-	if !exists {
-		// Ghost row: SQLite remembers the dump-only template but the
-		// engine doesn't. Clear it and cold-build (which re-seeds it).
-		_ = st.DeleteSnapshot(ctx, anc.Fingerprint)
-		return Outcome{}, false, nil
+	if live, err := liveSnapshot(ctx, st, ops.exists, d.Engine, anc); !live || err != nil {
+		return Outcome{}, false, err
 	}
 
 	_ = st.WriteEvent(ctx, store.LevelInfo, store.EvtPrepareDumpOnlyStart,
@@ -2078,18 +2142,19 @@ func tryRollbackIncrementalBuild(
 		return Outcome{}, false, nil
 	}
 	commandsHash := key.LockfileHashes[store.CommandsHashKey]
-	anc, steps, _ := st.FindRollbackAncestor(ctx, repoID, d.Engine, version,
+	anc, steps, err := st.FindRollbackAncestor(ctx, repoID, d.Engine, version,
 		key.DumpHashHex, commandsHash, inputs)
+	if err != nil {
+		return Outcome{}, false, fmt.Errorf("find a rollback ancestor %s snapshot: %w", d.Engine, err)
+	}
 	if anc == nil || steps <= 0 {
 		return Outcome{}, false, nil
 	}
 	unpin := snapshot.Pin(anc.Fingerprint)
 	defer unpin()
 
-	exists, _ := ops.exists(ctx, anc.TemplateName)
-	if !exists {
-		_ = st.DeleteSnapshot(ctx, anc.Fingerprint)
-		return Outcome{}, false, nil
+	if live, err := liveSnapshot(ctx, st, ops.exists, d.Engine, anc); !live || err != nil {
+		return Outcome{}, false, err
 	}
 
 	_ = st.WriteEvent(ctx, store.LevelInfo, store.EvtPrepareRollbackStart,
@@ -2215,11 +2280,10 @@ func preparePostgres(
 	maxConns, _ := cachedProbe(ctx, "postgres-maxconns:"+d.Connection, func() (int, error) { return drv.MaxConnections(ctx) })
 
 	if d.BranchScoped {
-		return runBranchScoped(ctx, branchScopedArgs{
+		return runBranchScopedAt(ctx, version, branchScopedArgs{
 			cfg: cfg, d: d, dbIdx: dbIdx, tplCtx: tplCtx, worktreePath: worktreePath,
 			st: st, repoID: repoID, worktreeID: worktreeID, inheritedEnv: inheritedEnv,
-			migrateFP: computeSnapshotKey(ctx, st, d, worktreePath, version).Fingerprint(),
-			eng:       &branchEngine{drv: postgresNS{drv}, scope: scopeName, engine: "postgres"},
+			eng: &branchEngine{drv: postgresNS{drv}, scope: scopeName, engine: "postgres"},
 			loadDump: func(ctx context.Context, active string, dump dumpFile) error {
 				scoped, e := drv.OpenScoped(ctx, active)
 				if e != nil {
@@ -2232,7 +2296,10 @@ func preparePostgres(
 		})
 	}
 
-	key, inputs := computeKeyAndVectors(ctx, st, d, worktreePath, version)
+	key, inputs, err := computeKeyAndVectors(ctx, st, d, worktreePath, version)
+	if err != nil {
+		return Outcome{}, err
+	}
 	templateName := key.TemplateName()
 
 	// See prepareMySQL's pin comment — same race, same fix.
@@ -2323,30 +2390,9 @@ func preparePostgres(
 	); err != nil {
 		return Outcome{}, err
 	}
-	snapStart := time.Now()
-	if err := drv.SnapshotCreate(ctx, sourceDB, templateName); err != nil {
-		return Outcome{}, fmt.Errorf("snapshot create %s → %s: %w", sourceDB, templateName, err)
-	}
-	emitPhaseDone(ctx, st, repoID, worktreeID, d.Engine, sourceDB, "snapshot-create", snapStart)
-	recordSnapshot(ctx, st, key, d.Engine, version, sourceDB, templateName, inputs, repoID)
-	spawnEvict(cfg, st, repoID)
-
-	clones, err := resolveCloneNames(d.TestClones, tplCtx, worktreePath)
+	clones, err := snapshotRecordFanout(ctx, cfg, d, tplCtx, worktreePath, st, repoID, worktreeID,
+		sourceDB, templateName, version, maxConns, key, inputs, ops)
 	if err != nil {
-		return Outcome{}, err
-	}
-	if err := fanOutClones(
-		ctx,
-		st,
-		repoID,
-		worktreeID,
-		drv.SnapshotRestore,
-		templateName,
-		clones,
-		d.Engine,
-		d.Fanout,
-		maxConns,
-	); err != nil {
 		return Outcome{}, err
 	}
 	ms := time.Since(started).Milliseconds()
@@ -2417,9 +2463,21 @@ func postgresColdBuildSteps(
 		}
 		_ = scoped.Close()
 	}
-	// Seed the dump-only intermediate template (post-dump, pre-migrate).
-	// Best-effort; see the mysql cold-build site for rationale.
-	seedDumpOnlyTemplate(ctx, st, d, repoID, worktreeID, sourceDB, version, dumpKey, len(dumps), drv.DatabaseExists, drv.SnapshotCreate)
+	if err := seedDumpOnlyTemplate(
+		ctx,
+		st,
+		d,
+		repoID,
+		worktreeID,
+		sourceDB,
+		version,
+		dumpKey,
+		len(dumps),
+		drv.DatabaseExists,
+		drv.SnapshotCreate,
+	); err != nil {
+		return err
+	}
 	if d.Migrate != nil {
 		if err := runPhase(
 			ctx,
@@ -2497,11 +2555,10 @@ func prepareMongo(
 	version, _ := cachedProbe(ctx, "mongo-version:"+d.Connection, func() (string, error) { return drv.EngineVersion(ctx) })
 
 	if d.BranchScoped {
-		return runBranchScoped(ctx, branchScopedArgs{
+		return runBranchScopedAt(ctx, version, branchScopedArgs{
 			cfg: cfg, d: d, dbIdx: dbIdx, tplCtx: tplCtx, worktreePath: worktreePath,
 			st: st, repoID: repoID, worktreeID: worktreeID, inheritedEnv: inheritedEnv,
-			migrateFP: computeSnapshotKey(ctx, st, d, worktreePath, version).Fingerprint(),
-			eng:       &branchEngine{drv: mongoNS{drv}, scope: scopeName, engine: "mongodb"},
+			eng: &branchEngine{drv: mongoNS{drv}, scope: scopeName, engine: "mongodb"},
 			loadDump: func(ctx context.Context, active string, dump dumpFile) error {
 				// Per-entry SourceDB: each dump in the list can carry its own
 				// `source_db:` for `--nsFrom=<source_db>.* --nsTo=<active>.*`.
@@ -2511,7 +2568,10 @@ func prepareMongo(
 		})
 	}
 
-	key, inputs := computeKeyAndVectors(ctx, st, d, worktreePath, version)
+	key, inputs, err := computeKeyAndVectors(ctx, st, d, worktreePath, version)
+	if err != nil {
+		return Outcome{}, err
+	}
 	templateName := key.TemplateName()
 
 	// See prepareMySQL's pin comment — same race, same fix.
@@ -2579,7 +2639,9 @@ func prepareMongo(
 		return Outcome{}, fmt.Errorf("mongo snapshot create %s → %s: %w", sourceDB, templateName, err)
 	}
 	emitPhaseDone(ctx, st, repoID, worktreeID, d.Engine, sourceDB, "snapshot-create", snapStart)
-	recordSnapshot(ctx, st, key, d.Engine, version, sourceDB, templateName, inputs, repoID)
+	if err := recordSnapshot(ctx, st, key, d.Engine, version, sourceDB, templateName, inputs, repoID); err != nil {
+		return Outcome{}, err
+	}
 	spawnEvict(cfg, st, repoID)
 
 	clones, err := resolveCloneNames(d.TestClones, tplCtx, worktreePath)
@@ -2735,6 +2797,10 @@ func prepareRedis(
 	defer func() { _ = drv.Close() }()
 
 	if d.BranchScoped {
+		others, err := siblingSlugs(ctx, st, repoID, worktreeID)
+		if err != nil {
+			return Outcome{}, err
+		}
 		return runBranchScoped(ctx, branchScopedArgs{
 			cfg:          cfg,
 			d:            d,
@@ -2746,7 +2812,7 @@ func prepareRedis(
 			worktreeID:   worktreeID,
 			inheritedEnv: inheritedEnv,
 			eng: &branchEngine{
-				drv:    redisNS{d: drv, keep: siblingKeep(siblingSlugs(ctx, st, repoID, worktreeID))},
+				drv:    redisNS{d: drv, keep: siblingKeep(others)},
 				scope:  scopePrefix,
 				engine: "redis",
 			},
@@ -2776,7 +2842,10 @@ func prepareRedisPrefix(
 		return Outcome{}, fmt.Errorf("render key_prefix: %w", err)
 	}
 	version, _ := cachedProbe(ctx, "redis-version:"+d.Connection, func() (string, error) { return drv.EngineVersion(ctx) })
-	key, inputs := computeKeyAndVectors(ctx, st, d, worktreePath, version)
+	key, inputs, err := computeKeyAndVectors(ctx, st, d, worktreePath, version)
+	if err != nil {
+		return Outcome{}, err
+	}
 	templatePrefix := "_tm:" + key.Fingerprint()[:16] + ":"
 
 	// See prepareMySQL's pin comment — same race, same fix.
@@ -2798,7 +2867,10 @@ func prepareRedisPrefix(
 	// restore so cache-hit / incremental / cold-build never pull in or wipe
 	// a sibling's keys. Template prefixes are hash-derived and never
 	// collide, so existence probes stay unfiltered.
-	rdOthers := siblingSlugs(ctx, st, repoID, worktreeID)
+	rdOthers, err := siblingSlugs(ctx, st, repoID, worktreeID)
+	if err != nil {
+		return Outcome{}, err
+	}
 	rdKeep := func(k string) bool { return !nameOwnedByOtherSlug(k, rdOthers) }
 	rdRestore := func(ctx context.Context, templatePrefix, target string) error {
 		return drv.SnapshotRestoreFiltered(ctx, templatePrefix, target, rdKeep)
@@ -2848,7 +2920,9 @@ func prepareRedisPrefix(
 		return Outcome{}, fmt.Errorf("redis snapshot create %s → %s: %w", sourcePrefix, templatePrefix, err)
 	}
 	emitPhaseDone(ctx, st, repoID, worktreeID, d.Engine, sourcePrefix, "snapshot-create", snapStart)
-	recordSnapshot(ctx, st, key, d.Engine, version, sourcePrefix, templatePrefix, inputs, repoID)
+	if err := recordSnapshot(ctx, st, key, d.Engine, version, sourcePrefix, templatePrefix, inputs, repoID); err != nil {
+		return Outcome{}, err
+	}
 	spawnEvict(cfg, st, repoID)
 
 	clones, err := resolveCloneNames(d.TestClones, tplCtx, worktreePath)
@@ -2901,7 +2975,10 @@ func redisColdBuildSteps(
 	// `<sourcePrefix><slug>_*` keys. Skip keys containing
 	// `_<otherslug>` as a whole token so sibling worktrees'
 	// branch-scoped keys survive.
-	redisOthers := siblingSlugs(ctx, st, repoID, worktreeID)
+	redisOthers, err := siblingSlugs(ctx, st, repoID, worktreeID)
+	if err != nil {
+		return err
+	}
 	keepRedisKey := func(k string) bool { return !nameOwnedByOtherSlug(k, redisOthers) }
 	droppedCount, err := drv.DropPrefixFiltered(ctx, sourcePrefix, keepRedisKey)
 	if err != nil {
@@ -3013,7 +3090,11 @@ func prepareES(
 
 	version, _ := cachedProbe(ctx, "es-version:"+d.Connection, func() (string, error) { return drv.EngineVersion(ctx) })
 	if d.BranchScoped {
-		return runBranchScoped(ctx, branchScopedArgs{
+		others, err := siblingSlugs(ctx, st, repoID, worktreeID)
+		if err != nil {
+			return Outcome{}, err
+		}
+		return runBranchScopedAt(ctx, version, branchScopedArgs{
 			cfg:          cfg,
 			d:            d,
 			dbIdx:        dbIdx,
@@ -3023,9 +3104,8 @@ func prepareES(
 			repoID:       repoID,
 			worktreeID:   worktreeID,
 			inheritedEnv: inheritedEnv,
-			migrateFP:    computeSnapshotKey(ctx, st, d, worktreePath, version).Fingerprint(),
 			eng: &branchEngine{
-				drv:    esNS{d: drv, keep: siblingKeep(siblingSlugs(ctx, st, repoID, worktreeID))},
+				drv:    esNS{d: drv, keep: siblingKeep(others)},
 				scope:  scopePrefix,
 				engine: "elasticsearch",
 			},
@@ -3040,7 +3120,10 @@ func prepareES(
 	// every restore so cache-hit / incremental / cold-build never pull in
 	// or wipe a sibling's data. Template prefixes are hash-derived and
 	// never collide, so existence probes stay unfiltered.
-	esOthers := siblingSlugs(ctx, st, repoID, worktreeID)
+	esOthers, err := siblingSlugs(ctx, st, repoID, worktreeID)
+	if err != nil {
+		return Outcome{}, err
+	}
 	esKeep := func(n string) bool { return !nameOwnedByOtherSlug(n, esOthers) }
 	esRestore := func(ctx context.Context, templatePrefix, target string) error {
 		return drv.SnapshotRestoreFiltered(ctx, templatePrefix, target, esKeep)
@@ -3049,7 +3132,10 @@ func prepareES(
 		return drv.SnapshotCreateFiltered(ctx, src, templatePrefix, esKeep)
 	}
 
-	key, inputs := computeKeyAndVectors(ctx, st, d, worktreePath, version)
+	key, inputs, err := computeKeyAndVectors(ctx, st, d, worktreePath, version)
+	if err != nil {
+		return Outcome{}, err
+	}
 	// ES forbids index names starting with `_`, so we use a
 	// dedicated prefix (tm_<fingerprint>_) for the template indices.
 	templatePrefix := key.IndexPrefix() + "_"
@@ -3130,7 +3216,9 @@ func prepareES(
 		return Outcome{}, fmt.Errorf("es snapshot create %s → %s: %w", sourcePrefix, templatePrefix, err)
 	}
 	emitPhaseDone(ctx, st, repoID, worktreeID, d.Engine, sourcePrefix, "snapshot-create", snapStart)
-	recordSnapshot(ctx, st, key, d.Engine, version, sourcePrefix, templatePrefix, inputs, repoID)
+	if err := recordSnapshot(ctx, st, key, d.Engine, version, sourcePrefix, templatePrefix, inputs, repoID); err != nil {
+		return Outcome{}, err
+	}
 	spawnEvict(cfg, st, repoID)
 
 	clones, err := resolveCloneNames(d.TestClones, tplCtx, worktreePath)
@@ -3277,7 +3365,10 @@ func prepareFileEngine(
 	if err != nil {
 		return Outcome{}, err
 	}
-	key, inputs := computeKeyAndVectors(ctx, st, d, worktreePath, "")
+	key, inputs, err := computeKeyAndVectors(ctx, st, d, worktreePath, "")
+	if err != nil {
+		return Outcome{}, err
+	}
 	templatePath := dbfile.TemplatePath(sourceFile, key.Fingerprint())
 
 	// See prepareMySQL's pin comment — same race, same fix.
@@ -3318,30 +3409,21 @@ func prepareFileEngine(
 		return dbfile.CopyDatabase(tmpl, p)
 	}
 
-	// Cache hit?
-	out, done, flight, err := cacheHitGeneric(
-		ctx,
-		fileExists,
-		fileRestore,
-		d,
-		tplCtx,
-		worktreePath,
-		st,
-		repoID,
-		worktreeID,
-		sourceFile,
-		key,
-		0,
-		started,
-	)
+	out, done, flight, err := cacheHitGeneric(ctx, fileExists, fileRestore, d, tplCtx, worktreePath,
+		st, repoID, worktreeID, sourceFile, key, 0, started)
 	defer flight.finish()
-	if done || err != nil {
-		for i, c := range out.Clones {
-			if p, perr := resolveFile(c); perr == nil {
-				out.Clones[i] = p
-			}
-		}
+	if err != nil {
 		return out, err
+	}
+	if done {
+		for i, c := range out.Clones {
+			p, perr := resolveFile(c)
+			if perr != nil {
+				return Outcome{}, fmt.Errorf("resolve clone %s: %w", c, perr)
+			}
+			out.Clones[i] = p
+		}
+		return out, nil
 	}
 
 	// Cold build: drop the family, seed the source file, snapshot it.
@@ -3353,7 +3435,9 @@ func prepareFileEngine(
 		return Outcome{}, fmt.Errorf("file snapshot create %s → %s: %w", sourceFile, templatePath, err)
 	}
 	emitPhaseDone(ctx, st, repoID, worktreeID, d.Engine, sourceFile, "snapshot-create", snapStart)
-	recordSnapshot(ctx, st, key, d.Engine, "", sourceFile, templatePath, inputs, repoID)
+	if err := recordSnapshot(ctx, st, key, d.Engine, "", sourceFile, templatePath, inputs, repoID); err != nil {
+		return Outcome{}, err
+	}
 	spawnEvict(cfg, st, repoID)
 
 	clones, err := fileCloneNames(cfg, d, tplCtx, worktreePath)
@@ -3495,7 +3579,10 @@ func esColdBuildSteps(
 	// `<sourcePrefix>_<slug>_*` indices. Skip names containing
 	// `_<otherslug>` as a whole token so sibling worktrees'
 	// branch-scoped indices survive.
-	others := siblingSlugs(ctx, st, repoID, worktreeID)
+	others, err := siblingSlugs(ctx, st, repoID, worktreeID)
+	if err != nil {
+		return err
+	}
 	keep := func(n string) bool { return !nameOwnedByOtherSlug(n, others) }
 	dropped, err := drv.DropMatchingFiltered(ctx, sourcePrefix, keep)
 	if err != nil {
@@ -3574,26 +3661,26 @@ type inputWalk struct {
 	hashByAbs map[string]string
 }
 
-func walkInputs(ctx context.Context, st *store.Store, d config.DatabaseConfig, worktreePath string) []inputWalk {
+func walkInputs(ctx context.Context, st *store.Store, d config.DatabaseConfig, worktreePath string) ([]inputWalk, error) {
 	if st == nil {
-		return nil
+		return nil, nil
 	}
 	var walks []inputWalk
 	for _, in := range d.Inputs {
-		// doublestar (not stdlib filepath.Glob) so `**` matches
-		// zero-or-more path segments, including files sitting directly in
-		// the glob base dir.
-		matches, _ := doublestar.FilepathGlob(filepath.Join(worktreePath, in.Glob))
+		matches, err := doublestar.FilepathGlob(filepath.Join(worktreePath, in.Glob))
+		if err != nil {
+			return nil, fmt.Errorf("expand input glob %q: %w", in.Glob, err)
+		}
 		if len(matches) == 0 {
 			continue
 		}
 		hashByAbs, err := st.BatchHashedFiles(ctx, matches)
 		if err != nil {
-			continue
+			return nil, fmt.Errorf("hash the %d files of input glob %q: %w", len(matches), in.Glob, err)
 		}
 		walks = append(walks, inputWalk{glob: in.Glob, hashByAbs: hashByAbs})
 	}
-	return walks
+	return walks, nil
 }
 
 // computeKeyAndVectors is the single-walk form of computeSnapshotKey +
@@ -3605,9 +3692,16 @@ func computeKeyAndVectors(
 	st *store.Store,
 	d config.DatabaseConfig,
 	worktreePath, engineVersion string,
-) (snapshot.Key, map[string]store.InputVector) {
-	walks := walkInputs(ctx, st, d, worktreePath)
-	return keyFromWalks(ctx, st, walks, d, worktreePath, engineVersion), vectorsFromWalks(worktreePath, walks)
+) (snapshot.Key, map[string]store.InputVector, error) {
+	walks, err := walkInputs(ctx, st, d, worktreePath)
+	if err != nil {
+		return snapshot.Key{}, nil, err
+	}
+	key, err := keyFromWalks(ctx, st, walks, d, worktreePath, engineVersion)
+	if err != nil {
+		return snapshot.Key{}, nil, err
+	}
+	return key, vectorsFromWalks(worktreePath, walks), nil
 }
 
 func computeSnapshotKey(
@@ -3615,8 +3709,12 @@ func computeSnapshotKey(
 	st *store.Store,
 	d config.DatabaseConfig,
 	worktreePath, engineVersion string,
-) snapshot.Key {
-	return keyFromWalks(ctx, st, walkInputs(ctx, st, d, worktreePath), d, worktreePath, engineVersion)
+) (snapshot.Key, error) {
+	walks, err := walkInputs(ctx, st, d, worktreePath)
+	if err != nil {
+		return snapshot.Key{}, err
+	}
+	return keyFromWalks(ctx, st, walks, d, worktreePath, engineVersion)
 }
 
 // keyFromWalks builds the canonical Key from a completed input walk.
@@ -3626,7 +3724,7 @@ func keyFromWalks(
 	walks []inputWalk,
 	d config.DatabaseConfig,
 	worktreePath, engineVersion string,
-) snapshot.Key {
+) (snapshot.Key, error) {
 	// 1. Fold each glob's per-file hashes into one entry, keyed by the
 	//    glob so the user can tell from the SQLite row what changed.
 	//    Files are keyed by worktree-relative path: unique within the
@@ -3658,7 +3756,10 @@ func keyFromWalks(
 		for _, dn := range d.Dump {
 			absPaths = append(absPaths, filepath.Join(worktreePath, dn.Path))
 		}
-		hashes, _ := snapshot.LockfileHashesForWithCache(ctx, st, absPaths)
+		hashes, err := snapshot.LockfileHashesForWithCache(ctx, st, absPaths)
+		if err != nil {
+			return snapshot.Key{}, fmt.Errorf("hash the dump files of %s: %w", d.Engine, err)
+		}
 		if len(d.Dump) == 1 {
 			dumpHash = hashes[absPaths[0]]
 		} else {
@@ -3687,7 +3788,7 @@ func keyFromWalks(
 	if cmdHash != "" {
 		inputHashes["__commands__"] = cmdHash
 	}
-	return snapshot.New(d.Engine, engineVersion, d.Connection, "", "", dumpHash, inputHashes)
+	return snapshot.New(d.Engine, engineVersion, d.Connection, "", "", dumpHash, inputHashes), nil
 }
 
 // FingerprintReport is what InspectFingerprint surfaces to callers
@@ -3705,6 +3806,7 @@ type FingerprintReport struct {
 	CommandsHash      string                `json:"commands_hash,omitempty"`
 	CachedSnapshot    *store.SnapshotRecord `json:"cached_snapshot,omitempty"`
 	CacheHitAvailable bool                  `json:"cache_hit_available"`
+	Error             string                `json:"error,omitempty"`
 }
 
 // InspectFingerprint computes the snapshot fingerprint for one
@@ -3725,7 +3827,10 @@ func InspectFingerprint(
 	d config.DatabaseConfig,
 	worktreePath, sourceDB, engineVersion string,
 ) FingerprintReport {
-	key := computeSnapshotKey(ctx, st, d, worktreePath, engineVersion)
+	key, err := computeSnapshotKey(ctx, st, d, worktreePath, engineVersion)
+	if err != nil {
+		return FingerprintReport{Engine: d.Engine, EngineVersion: engineVersion, SourceDB: sourceDB, Error: err.Error()}
+	}
 	rep := FingerprintReport{
 		Engine:        d.Engine,
 		EngineVersion: engineVersion,
@@ -3743,7 +3848,12 @@ func InspectFingerprint(
 		rep.InputHashes[k] = v
 	}
 	if st != nil {
-		if rec, err := st.LookupSnapshot(ctx, key.Fingerprint()); err == nil && rec != nil {
+		rec, err := st.LookupSnapshot(ctx, key.Fingerprint())
+		if err != nil {
+			rep.Error = fmt.Sprintf("look up the cached snapshot %s: %v", key.Fingerprint(), err)
+			return rep
+		}
+		if rec != nil {
 			rep.CachedSnapshot = rec
 			rep.CacheHitAvailable = true
 		}

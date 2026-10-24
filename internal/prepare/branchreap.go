@@ -145,7 +145,10 @@ func reapViaEngine(
 					"durable", dur, "branch", branch, "err", err)
 				continue
 			}
-			_ = st.DeleteBranchDurable(ctx, repoID, dur)
+			if err := st.DeleteBranchDurable(ctx, repoID, dur); err != nil {
+				slog.Warn("reap durables: forget dropped durable", "engine", eng.engine,
+					"durable", dur, "branch", branch, "err", err)
+			}
 			_ = st.WriteEvent(ctx, store.LevelInfo, store.EvtBranchReap,
 				fmt.Sprintf("%s: dropped durable for deleted branch %q (active=%s)", eng.engine, branch, tgt.active),
 				repoID, tgt.wtID, "", 0, map[string]string{
@@ -259,7 +262,10 @@ func dropTrackedDurables(
 					"durable", d.DurableName, "branch", d.Branch, "err", err)
 				continue
 			}
-			_ = st.DeleteBranchDurable(ctx, repoID, d.DurableName)
+			if err := st.DeleteBranchDurable(ctx, repoID, d.DurableName); err != nil {
+				slog.Warn("drop tracked durables: forget dropped durable", "engine", eng, "reason", reason,
+					"durable", d.DurableName, "branch", d.Branch, "err", err)
+			}
 			_ = st.WriteEvent(ctx, store.LevelInfo, store.EvtBranchReap, describe(d),
 				repoID, d.WorktreeID, "", 0, map[string]string{
 					"engine":  eng,
@@ -496,10 +502,10 @@ func reapUntrackedEngine(
 
 	keep, err := st.ListAllDurableNamesByEngine(ctx, eng)
 	if err != nil {
-		// Couldn't read the registry — declining to drop is the safe default;
-		// the next sweep retries. Dropping on an unreadable keep-set would risk
-		// wiping every durable.
 		slog.Warn("reap untracked durables: list registry", "engine", eng, "err", err)
+		_ = st.WriteEvent(ctx, store.LevelWarn, store.EvtBranchReap,
+			fmt.Sprintf("%s: skipped the untracked-durable sweep: reading the durable registry failed: %v", eng, err),
+			repoID, 0, "", 0, map[string]string{"engine": eng, "error": err.Error()})
 		return
 	}
 	names, ok, err := listDurableCandidates(ctx, be.drv, untrackedMarker[eng])

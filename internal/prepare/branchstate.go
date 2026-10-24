@@ -734,7 +734,10 @@ func runBranchScoped(ctx context.Context, a branchScopedArgs) (Outcome, error) {
 	if err != nil {
 		return Outcome{}, fmt.Errorf("render active namespace: %w", err)
 	}
-	branch, _ := a.st.WorktreeBranch(ctx, a.worktreeID)
+	branch, err := a.st.WorktreeBranch(ctx, a.worktreeID)
+	if err != nil {
+		return Outcome{}, fmt.Errorf("read the branch of worktree %d: %w", a.worktreeID, err)
+	}
 	if branch == "" {
 		branch = "_detached"
 	}
@@ -803,7 +806,9 @@ func runBranchScoped(ctx context.Context, a branchScopedArgs) (Outcome, error) {
 
 	// Lever-1 bookkeeping: record whether `active` now mirrors `branch`'s
 	// durable copy so the next swap can skip a redundant capture.
-	a.recordClean(ctx, active, branch, decision, migrated, seeded)
+	if err := a.recordClean(ctx, active, branch, decision, migrated, seeded); err != nil {
+		return Outcome{}, err
+	}
 
 	ms := time.Since(started).Milliseconds()
 	a.event(ctx, store.EvtPrepareEnd,
@@ -860,7 +865,10 @@ func (a branchScopedArgs) seedFreshFrom(ctx context.Context, active, branch stri
 // `branch` for a linked worktree, the default branch for the main checkout
 // — see adoptBranch.
 func (a branchScopedArgs) adoptExisting(ctx context.Context, active, branch string) (string, error) {
-	label := a.adoptBranch(ctx, branch)
+	label, err := a.adoptBranch(ctx, branch)
+	if err != nil {
+		return "", err
+	}
 	if err := a.captureDurable(ctx, active, label); err != nil {
 		return "", fmt.Errorf("adopt-capture %s: %w", active, err)
 	}
@@ -882,7 +890,11 @@ func (a branchScopedArgs) swapBranch(ctx context.Context, active, old, branch st
 	// Lever 1: skip capturing old → durable(old) when `active` provably
 	// still mirrors that durable copy. Sound because the watermark is a
 	// monotonic write counter — an unchanged value cannot hide a write.
-	if a.captureRedundant(ctx, active, old) {
+	redundant, err := a.captureRedundant(ctx, active, old)
+	if err != nil {
+		return "", err
+	}
+	if redundant {
 		a.event(ctx, store.EvtBranchCaptureSkip,
 			fmt.Sprintf("engine=%s active=%s branch=%s capture skipped (no writes since resume)", a.eng.engine, active, old),
 			map[string]string{"old_branch": old})
@@ -938,20 +950,26 @@ func captureSkippable(prevClean, durableExists bool, prevWM, curWM string) bool 
 // captureRedundant probes the live state to decide whether swapBranch may
 // skip capturing `active` into durable(old). Any probe error falls back to
 // "not redundant" (capture), so a transient failure never risks data loss.
-func (a branchScopedArgs) captureRedundant(ctx context.Context, active, old string) bool {
+func (a branchScopedArgs) captureRedundant(ctx context.Context, active, old string) (bool, error) {
 	prevClean, prevWM, ok, err := a.st.GetActiveBranchClean(ctx, a.worktreeID, active)
-	if err != nil || !ok || !prevClean {
-		return false
+	if err != nil {
+		return false, fmt.Errorf("read the clean marker of %s: %w", active, err)
 	}
-	durExists, derr := a.eng.drv.Exists(ctx, a.eng.durable(active, old))
-	if derr != nil {
-		return false
+	if !ok || !prevClean {
+		return false, nil
 	}
-	curWM, werr := a.eng.drv.Watermark(ctx, active)
-	if werr != nil {
-		return false
+	dur := a.eng.durable(active, old)
+	durExists, err := a.eng.drv.Exists(ctx, dur)
+	if err == nil {
+		var curWM string
+		if curWM, err = a.eng.drv.Watermark(ctx, active); err == nil {
+			return captureSkippable(prevClean, durExists, prevWM, curWM), nil
+		}
 	}
-	return captureSkippable(prevClean, durExists, prevWM, curWM)
+	a.warn(ctx, store.EvtBranchVerifyWarn,
+		fmt.Sprintf("engine=%s active=%s branch=%s could not prove the capture redundant (%v); capturing", a.eng.engine, active, old, err),
+		map[string]string{"durable": dur, "branch": old, "error": err.Error()})
+	return false, nil
 }
 
 // recordClean writes the lever-1 bookkeeping at the end of a prepare:
@@ -961,32 +979,34 @@ func (a branchScopedArgs) captureRedundant(ctx context.Context, active, old stri
 // since — and only when the engine exposes a sound watermark. A `noop`
 // (same branch already loaded) carries the prior clean state forward iff
 // the watermark is unchanged. Everything else is recorded dirty.
-func (a branchScopedArgs) recordClean(ctx context.Context, active, branch, decision string, migrated, seeded bool) {
-	dirty := func() {
-		_ = a.st.SetActiveBranchClean(ctx, a.repoID, a.worktreeID, active, branch, a.eng.engine, false, "")
+func (a branchScopedArgs) recordClean(ctx context.Context, active, branch, decision string, migrated, seeded bool) error {
+	set := func(clean bool, watermark string) error {
+		if err := a.st.SetActiveBranchClean(ctx, a.repoID, a.worktreeID, active, branch, a.eng.engine, clean, watermark); err != nil {
+			return fmt.Errorf("record the clean marker of %s (branch %q): %w", active, branch, err)
+		}
+		return nil
 	}
 	if migrated || seeded {
-		dirty()
-		return
+		return set(false, "")
 	}
 	if decision == "noop" {
 		prevClean, prevWM, ok, err := a.st.GetActiveBranchClean(ctx, a.worktreeID, active)
-		if err == nil && ok && prevClean {
+		if err != nil {
+			return fmt.Errorf("read the clean marker of %s: %w", active, err)
+		}
+		if ok && prevClean {
 			if w, werr := a.eng.drv.Watermark(ctx, active); werr == nil && w != "" && w == prevWM {
-				_ = a.st.SetActiveBranchClean(ctx, a.repoID, a.worktreeID, active, branch, a.eng.engine, true, prevWM)
-				return
+				return set(true, prevWM)
 			}
 		}
-		dirty()
-		return
+		return set(false, "")
 	}
 	if decision == "adopt" || isResume(decision) {
 		if w, werr := a.eng.drv.Watermark(ctx, active); werr == nil && w != "" {
-			_ = a.st.SetActiveBranchClean(ctx, a.repoID, a.worktreeID, active, branch, a.eng.engine, true, w)
-			return
+			return set(true, w)
 		}
 	}
-	dirty()
+	return set(false, "")
 }
 
 // fill populates `active` with `branch`'s data. Order: the branch's own
@@ -998,8 +1018,14 @@ func (a branchScopedArgs) recordClean(ctx context.Context, active, branch, decis
 // caller decides the fallback (empty). useDurable=false skips the resume
 // source (see reseedPastDurable).
 func (a branchScopedArgs) fill(ctx context.Context, active, branch string, useDurable bool) (bool, string, error) {
-	if useDurable && a.resumeDurableVerified(ctx, active, branch) {
-		return true, "resume", nil
+	if useDurable {
+		resumed, err := a.resumeDurableVerified(ctx, active, branch)
+		if err != nil {
+			return false, "", err
+		}
+		if resumed {
+			return true, "resume", nil
+		}
 	}
 	parent, ok, err := a.parentDB(ctx, branch)
 	if err != nil {
@@ -1020,12 +1046,18 @@ func (a branchScopedArgs) fill(ctx context.Context, active, branch string, useDu
 	// migrate then applies only the new branch's own added migrations on
 	// top (incremental), so a branch off develop still inherits develop's
 	// data without a dump.
-	if snap, base, ok := a.baseBranchDurable(ctx, branch); ok {
+	snap, base, ok, err := a.baseBranchDurable(ctx, branch)
+	if err != nil {
+		return false, "", err
+	}
+	if ok {
 		if err := a.eng.drv.Restore(ctx, snap, active); err != nil {
 			return false, "", fmt.Errorf("seed %q from base branch %q durable snapshot %q: %w",
 				active, base, snap, err)
 		}
-		_ = a.st.TouchBranchDurable(ctx, a.repoID, snap)
+		if err := a.st.TouchBranchDurable(ctx, a.repoID, snap); err != nil {
+			return false, "", fmt.Errorf("record use of durable %q: %w", snap, err)
+		}
 		return true, "parent-snapshot", nil
 	}
 	// Last resort: the main worktree's live DB. It holds whatever branch
@@ -1051,10 +1083,10 @@ func (a branchScopedArgs) fill(ctx context.Context, active, branch string, useDu
 // tracking row) and false is returned so fill falls through to parent
 // seeding. Verification is best-effort: engines without row-count
 // samples always resume.
-func (a branchScopedArgs) resumeDurableVerified(ctx context.Context, active, branch string) bool {
+func (a branchScopedArgs) resumeDurableVerified(ctx context.Context, active, branch string) (bool, error) {
 	dur := a.eng.durable(active, branch)
 	if ok, _ := a.eng.drv.Exists(ctx, dur); !ok {
-		return false
+		return false, nil
 	}
 	if err := retryTransient(ctx, func() error { return a.eng.drv.Restore(ctx, dur, active) }); err != nil {
 		// A broken restore must not fail the whole prepare — the parent
@@ -1062,29 +1094,34 @@ func (a branchScopedArgs) resumeDurableVerified(ctx context.Context, active, bra
 		a.event(ctx, store.EvtBranchVerifyWarn,
 			fmt.Sprintf("restore durable %s failed (%v); trying parent seeding", dur, err),
 			map[string]string{"durable": dur, "branch": branch})
-		return false
+		return false, nil
 	}
 	srcSample, ok := sampleRows(ctx, a.eng.drv, dur)
 	if !ok || !sampleHasRows(srcSample) {
-		return true // no sample to contradict — resume stands
+		return true, nil
 	}
 	bad, why := sampleMissingRows(ctx, a.eng.drv, active, srcSample)
 	if !bad {
-		return true
+		return true, nil
 	}
 	a.event(ctx, store.EvtBranchVerifyWarn,
 		fmt.Sprintf("durable %s for branch %q verified EMPTY (%s) — dropping it and falling back to parent seeding", dur, branch, why),
 		map[string]string{"durable": dur, "branch": branch})
 	_ = a.eng.drv.DropDurable(ctx, dur)
-	_ = a.st.DeleteBranchDurable(ctx, a.repoID, dur)
-	return false
+	if err := a.st.DeleteBranchDurable(ctx, a.repoID, dur); err != nil {
+		return false, fmt.Errorf("forget dropped durable %q: %w", dur, err)
+	}
+	return false, nil
 }
 
 // seedParentVerified copies the parent branch's live namespace into
 // `active` and REFUSES to hand back a schema-only copy when the parent
 // has rows (#41): an empty copy would seed the branch with nothing.
 func (a branchScopedArgs) seedParentVerified(ctx context.Context, parent, active string) error {
-	keep := a.parentSourceKeep(ctx, parent)
+	keep, err := a.parentSourceKeep(ctx, parent)
+	if err != nil {
+		return err
+	}
 	if err := retryTransient(ctx, func() error { return a.eng.drv.RestoreParent(ctx, parent, active, keep) }); err != nil {
 		return fmt.Errorf("seed %q from parent branch's live db %q: %w%s",
 			active, parent, err, parentSeedHint(a.eng.engine, err))
@@ -1124,16 +1161,19 @@ func (a branchScopedArgs) seedParentVerified(ctx context.Context, parent, active
 // default branch is already checked out, or when the default branch can't
 // be resolved to a LOCAL ref — ReapOrphanDurables drops any durable whose
 // branch isn't a local ref, so a fabricated label would be reaped.
-func (a branchScopedArgs) adoptBranch(ctx context.Context, branch string) string {
+func (a branchScopedArgs) adoptBranch(ctx context.Context, branch string) (string, error) {
 	row, err := a.st.LookupMainWorktree(ctx, a.repoID)
-	if err != nil || row.ID == 0 || row.ID != a.worktreeID {
-		return branch
+	if err != nil {
+		return "", fmt.Errorf("look up the main worktree of repo %d: %w", a.repoID, err)
+	}
+	if row.ID == 0 || row.ID != a.worktreeID {
+		return branch, nil
 	}
 	def := a.defaultBranch(ctx, row.Path)
 	if def == "" || def == branch {
-		return branch
+		return branch, nil
 	}
-	return def
+	return def, nil
 }
 
 // defaultBranch resolves the repo's default branch from origin/HEAD in the
@@ -1161,11 +1201,15 @@ func (a branchScopedArgs) defaultBranch(ctx context.Context, mainPath string) st
 // seed should inherit from (e.g. `develop`). Tests override via
 // resolveBaseBranchFn; production uses the git-upstream + main-worktree
 // resolver shared with resolveBaseSourceDB.
-func (a branchScopedArgs) baseBranchName(ctx context.Context, branch string) string {
+func (a branchScopedArgs) baseBranchName(ctx context.Context, branch string) (string, error) {
 	if a.resolveBaseBranchFn != nil {
-		return a.resolveBaseBranchFn(ctx, branch)
+		return a.resolveBaseBranchFn(ctx, branch), nil
 	}
-	return resolveBaseBranch(ctx, a.st, a.repoPath(ctx), a.repoID, branch)
+	repoRoot, err := a.repoPath(ctx)
+	if err != nil {
+		return "", err
+	}
+	return resolveBaseBranch(ctx, a.st, repoRoot, a.repoID, branch)
 }
 
 // baseBranchDurable finds the freshest existing durable snapshot of the base
@@ -1177,14 +1221,17 @@ func (a branchScopedArgs) baseBranchName(ctx context.Context, branch string) str
 // share a name prefix (e.g. the test DB) are never matched. Among existing
 // candidates it picks the most-recently-used. Returns ("", "", false) when
 // no base branch resolves or no snapshot exists.
-func (a branchScopedArgs) baseBranchDurable(ctx context.Context, branch string) (string, string, bool) {
-	base := a.baseBranchName(ctx, branch)
+func (a branchScopedArgs) baseBranchDurable(ctx context.Context, branch string) (string, string, bool, error) {
+	base, err := a.baseBranchName(ctx, branch)
+	if err != nil {
+		return "", "", false, err
+	}
 	if base == "" || base == branch {
-		return "", "", false
+		return "", "", false, nil
 	}
 	rows, err := a.st.ListWorktreesForRepo(ctx, a.repoID)
 	if err != nil {
-		return "", "", false
+		return "", "", false, fmt.Errorf("list the worktrees of repo %d: %w", a.repoID, err)
 	}
 	mainCfg := *a.cfg
 	config.ApplyMainWorktreeOverlay(&mainCfg)
@@ -1205,11 +1252,11 @@ func (a branchScopedArgs) baseBranchDurable(ctx context.Context, branch string) 
 		candidates[a.eng.durable(act, base)] = struct{}{}
 	}
 	if len(candidates) == 0 {
-		return "", "", false
+		return "", "", false, nil
 	}
 	durs, err := a.st.ListBranchDurables(ctx, a.repoID)
 	if err != nil {
-		return "", "", false
+		return "", "", false, fmt.Errorf("list the durable copies of repo %d: %w", a.repoID, err)
 	}
 	best, bestUsed := "", int64(-1)
 	for _, d := range durs {
@@ -1228,9 +1275,9 @@ func (a branchScopedArgs) baseBranchDurable(ctx context.Context, branch string) 
 		best, bestUsed = d.DurableName, d.LastUsedAt
 	}
 	if best == "" {
-		return "", "", false
+		return "", "", false, nil
 	}
-	return best, base, true
+	return best, base, true, nil
 }
 
 // parentSourceKeep returns a predicate excluding keys/indices that belong
@@ -1240,13 +1287,13 @@ func (a branchScopedArgs) baseBranchDurable(ctx context.Context, branch string) 
 // `<prefix>_<slug>_*` data); without it a feature branch would be seeded
 // with every sibling worktree's data too. Returns nil for name-scoped
 // engines (exact-db copy, no nesting) or when nothing nests under `parent`.
-func (a branchScopedArgs) parentSourceKeep(ctx context.Context, parent string) func(string) bool {
+func (a branchScopedArgs) parentSourceKeep(ctx context.Context, parent string) (func(string) bool, error) {
 	if a.eng.scope != scopePrefix {
-		return nil
+		return nil, nil
 	}
 	wts, err := a.st.ListWorktreesForRepo(ctx, a.repoID)
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("list the worktrees of repo %d to scope the parent seed from %q: %w", a.repoID, parent, err)
 	}
 	mainCfg := *a.cfg
 	config.ApplyMainWorktreeOverlay(&mainCfg)
@@ -1266,7 +1313,7 @@ func (a branchScopedArgs) parentSourceKeep(ctx context.Context, parent string) f
 		deeper = append(deeper, p)
 	}
 	if len(deeper) == 0 {
-		return nil
+		return nil, nil
 	}
 	return func(name string) bool {
 		for _, p := range deeper {
@@ -1275,12 +1322,15 @@ func (a branchScopedArgs) parentSourceKeep(ctx context.Context, parent string) f
 			}
 		}
 		return true
-	}
+	}, nil
 }
 
-func (a branchScopedArgs) repoPath(ctx context.Context) string {
-	p, _ := a.st.RepoPath(ctx, a.repoID)
-	return p
+func (a branchScopedArgs) repoPath(ctx context.Context) (string, error) {
+	p, err := a.st.RepoPath(ctx, a.repoID)
+	if err != nil {
+		return "", fmt.Errorf("read the path of repo %d: %w", a.repoID, err)
+	}
+	return p, nil
 }
 
 // markActive records `branch` as the owner of `active`. Seed and adopt
@@ -1300,7 +1350,11 @@ func (a branchScopedArgs) parentDB(ctx context.Context, branch string) (string, 
 	if a.resolveParent != nil {
 		return a.resolveParent(ctx, branch)
 	}
-	return resolveBaseSourceDB(ctx, a.st, a.cfg, a.repoPath(ctx), a.repoID, a.dbIdx, a.eng.scope, branch)
+	repoRoot, err := a.repoPath(ctx)
+	if err != nil {
+		return "", false, err
+	}
+	return resolveBaseSourceDB(ctx, a.st, a.cfg, repoRoot, a.repoID, a.dbIdx, a.eng.scope, branch)
 }
 
 // mainFallbackDB resolves the main worktree's live database as fill's
@@ -1314,7 +1368,11 @@ func (a branchScopedArgs) mainFallbackDB(ctx context.Context, branch string) (st
 	if a.resolveParent != nil {
 		return "", false, nil
 	}
-	return mainWorktreeBaseDB(ctx, a.st, a.cfg, a.repoPath(ctx), a.repoID, a.dbIdx, a.eng.scope, branch)
+	repoRoot, err := a.repoPath(ctx)
+	if err != nil {
+		return "", false, err
+	}
+	return mainWorktreeBaseDB(ctx, a.st, a.cfg, repoRoot, a.repoID, a.dbIdx, a.eng.scope, branch)
 }
 
 // migrateStep runs the branch_scoped migrate when migrateNeeded says so
@@ -1330,7 +1388,10 @@ func (a branchScopedArgs) migrateStep(
 	if a.d.Migrate == nil {
 		return false, builtEmpty, decision, nil
 	}
-	prevFP, hasPrev, _ := a.st.GetBranchMigrated(ctx, a.worktreeID, active, branch)
+	prevFP, hasPrev, err := a.st.GetBranchMigrated(ctx, a.worktreeID, active, branch)
+	if err != nil {
+		return false, builtEmpty, decision, fmt.Errorf("read the migrated fingerprint of %s (branch %q): %w", active, branch, err)
+	}
 	if !migrateNeeded(builtEmpty, hasPrev, prevFP, a.migrateFP) {
 		a.event(ctx, store.EvtMigrateSkip,
 			fmt.Sprintf("engine=%s active=%s branch=%s migrate skipped (inputs unchanged)", a.eng.engine, active, branch),
@@ -1354,7 +1415,20 @@ func (a branchScopedArgs) migrateStep(
 	// fingerprint can never be matched, so the next prepare
 	// re-migrates (correct — we couldn't prove it was at head).
 	if a.migrateFP != "" {
-		_ = a.st.SetBranchMigrated(ctx, a.worktreeID, active, branch, a.migrateFP)
+		if err := a.st.SetBranchMigrated(ctx, a.worktreeID, active, branch, a.migrateFP); err != nil {
+			a.warn(
+				ctx,
+				store.EvtMigrateSkip,
+				fmt.Sprintf(
+					"engine=%s active=%s branch=%s migrated, but recording its fingerprint failed (%v); the next prepare migrates again",
+					a.eng.engine,
+					active,
+					branch,
+					err,
+				),
+				map[string]string{"fingerprint": a.migrateFP, "error": err.Error()},
+			)
+		}
 	}
 	return true, builtEmpty, decision, nil
 }
@@ -1396,7 +1470,9 @@ func (a branchScopedArgs) reseedPastDurable(ctx context.Context, active, branch 
 		return false, "", err
 	}
 	_ = a.eng.drv.DropDurable(ctx, dur)
-	_ = a.st.DeleteBranchDurable(ctx, a.repoID, dur)
+	if err := a.st.DeleteBranchDurable(ctx, a.repoID, dur); err != nil {
+		return false, "", fmt.Errorf("forget dropped durable %q: %w", dur, err)
+	}
 	a.event(ctx, store.EvtBranchVerifyWarn,
 		fmt.Sprintf("dropped durable %s for branch %q: it failed to migrate, %s migrated cleanly after %s", dur, branch, active, seeded),
 		map[string]string{"durable": dur, "branch": branch})
@@ -1432,9 +1508,17 @@ func (a branchScopedArgs) runStep(ctx context.Context, spec runner.Spec, active,
 }
 
 func (a branchScopedArgs) event(ctx context.Context, typ, msg string, extra map[string]string) {
+	a.writeEvent(ctx, store.LevelInfo, typ, msg, extra)
+}
+
+func (a branchScopedArgs) warn(ctx context.Context, typ, msg string, extra map[string]string) {
+	a.writeEvent(ctx, store.LevelWarn, typ, msg, extra)
+}
+
+func (a branchScopedArgs) writeEvent(ctx context.Context, level, typ, msg string, extra map[string]string) {
 	fields := map[string]string{"engine": a.eng.engine, "mode": "branch_scoped"}
 	maps.Copy(fields, extra)
-	_ = a.st.WriteEvent(ctx, store.LevelInfo, typ, msg, a.repoID, a.worktreeID, "", 0, fields)
+	_ = a.st.WriteEvent(ctx, level, typ, msg, a.repoID, a.worktreeID, "", 0, fields)
 }
 
 // captureDurable captures `active` into `branch`'s durable copy and records
@@ -1447,7 +1531,7 @@ func (a branchScopedArgs) captureDurable(ctx context.Context, active, branch str
 	if err := captureVerified(ctx, a.eng.drv, active, dur); err != nil {
 		return err
 	}
-	_ = a.st.RecordBranchDurable(ctx, store.BranchDurableRow{
+	return recordDurable(ctx, a.st, store.BranchDurableRow{
 		RepoID:      a.repoID,
 		WorktreeID:  a.worktreeID,
 		Engine:      a.eng.engine,
@@ -1455,6 +1539,12 @@ func (a branchScopedArgs) captureDurable(ctx context.Context, active, branch str
 		Branch:      branch,
 		DurableName: dur,
 	})
+}
+
+func recordDurable(ctx context.Context, st *store.Store, row store.BranchDurableRow) error {
+	if err := st.RecordBranchDurable(ctx, row); err != nil {
+		return fmt.Errorf("record durable %q of branch %q: %w", row.DurableName, row.Branch, err)
+	}
 	return nil
 }
 
@@ -1477,10 +1567,7 @@ func captureBranchScopedOnTeardown(ctx context.Context, eng *branchEngine, st *s
 	if err := captureVerified(ctx, eng.drv, active, dur); err != nil {
 		return err
 	}
-	// Record so the orphan sweep can reclaim this durable once `branch` is
-	// gone — the worktree row is about to be soft-deleted, so the durable
-	// must be tracked independently of it.
-	_ = st.RecordBranchDurable(ctx, store.BranchDurableRow{
+	return recordDurable(ctx, st, store.BranchDurableRow{
 		RepoID:      repoID,
 		WorktreeID:  worktreeID,
 		Engine:      eng.engine,
@@ -1488,7 +1575,6 @@ func captureBranchScopedOnTeardown(ctx context.Context, eng *branchEngine, st *s
 		Branch:      branch,
 		DurableName: dur,
 	})
-	return nil
 }
 
 // teardownBranchScoped handles `wt delete` for one branch_scoped
@@ -1521,12 +1607,16 @@ func teardownBranchScoped(
 	if err != nil {
 		return err
 	}
+	others, serr := siblingSlugs(ctx, st, repoID, worktreeID)
+	if serr != nil {
+		return serr
+	}
 	eng, closeEng, cerr := connectBranchEngine(
 		ctx,
 		cfg,
 		d.Engine,
 		d.Connection,
-		siblingSlugs(ctx, st, repoID, worktreeID),
+		others,
 		d.PhysicalCloneMinBytes,
 	)
 	if cerr != nil {
@@ -1536,19 +1626,25 @@ func teardownBranchScoped(
 		return nil
 	}
 	defer closeEng()
+	return teardownActive(ctx, eng, st, repoID, worktreeID, active)
+}
 
+func teardownActive(ctx context.Context, eng *branchEngine, st *store.Store, repoID, worktreeID int64, active string) error {
 	if capErr := captureBranchScopedOnTeardown(ctx, eng, st, repoID, worktreeID, active); capErr != nil {
-		_ = st.WriteEvent(ctx, store.LevelWarn, store.EvtBranchCaptureError,
-			capErr.Error(), repoID, worktreeID, "", 0, nil)
+		_ = st.WriteEvent(ctx, store.LevelError, store.EvtBranchCaptureError,
+			fmt.Sprintf("%s: capture of %s before teardown failed, keeping it: %v", eng.engine, active, capErr),
+			repoID, worktreeID, "", 0, map[string]string{"engine": eng.engine, "active": active, "error": capErr.Error()})
+		return fmt.Errorf("capture %s into its durable copy before dropping it: %w", active, capErr)
 	}
 	if err := eng.drv.Drop(ctx, active); err != nil {
 		return err
 	}
-	_ = st.ClearActiveBranch(ctx, worktreeID, active)
-	_ = st.ClearBranchMigratedForKey(ctx, worktreeID, active)
+	if err := clearActiveMarkers(ctx, st, worktreeID, active); err != nil {
+		return err
+	}
 	_ = st.WriteEvent(ctx, store.LevelInfo, store.EvtDBDrop,
-		fmt.Sprintf("%s: dropped active %s (branch_scoped; durable copies kept)", d.Engine, active),
-		repoID, worktreeID, "", 0, map[string]any{"engine": d.Engine, "active": active})
+		fmt.Sprintf("%s: dropped active %s (branch_scoped; durable copies kept)", eng.engine, active),
+		repoID, worktreeID, "", 0, map[string]any{"engine": eng.engine, "active": active})
 	return nil
 }
 
@@ -1589,12 +1685,16 @@ func ResetBranchScoped(
 		if err != nil {
 			return fmt.Errorf("render active namespace for %s: %w", d.Engine, err)
 		}
+		others, serr := siblingSlugs(ctx, st, repoID, worktreeID)
+		if serr != nil {
+			return serr
+		}
 		eng, closeEng, cerr := connectBranchEngine(
 			ctx,
 			cfg,
 			d.Engine,
 			d.Connection,
-			siblingSlugs(ctx, st, repoID, worktreeID),
+			others,
 			d.PhysicalCloneMinBytes,
 		)
 		if cerr != nil {
@@ -1630,16 +1730,31 @@ func ResetBranchScoped(
 func resetActiveNamespace(ctx context.Context, eng *branchEngine, st *store.Store, repoID, worktreeID int64, active string) error {
 	// Drop the durable copy for whatever branch currently owns the active
 	// slot (so a re-seed can't restore the stale copy).
-	if branch, has, _ := st.GetActiveBranch(ctx, worktreeID, active); has && branch != "" {
+	branch, has, err := st.GetActiveBranch(ctx, worktreeID, active)
+	if err != nil {
+		return fmt.Errorf("read the active-branch marker of %s: %w", active, err)
+	}
+	if has && branch != "" {
 		dur := eng.durable(active, branch)
 		_ = eng.drv.DropDurable(ctx, dur)
-		_ = st.DeleteBranchDurable(ctx, repoID, dur)
+		if err := st.DeleteBranchDurable(ctx, repoID, dur); err != nil {
+			return fmt.Errorf("forget dropped durable %q: %w", dur, err)
+		}
 	}
 	if err := eng.drv.Drop(ctx, active); err != nil {
 		return err
 	}
-	_ = st.ClearBranchMigratedForKey(ctx, worktreeID, active)
-	return st.ClearActiveBranch(ctx, worktreeID, active)
+	return clearActiveMarkers(ctx, st, worktreeID, active)
+}
+
+func clearActiveMarkers(ctx context.Context, st *store.Store, worktreeID int64, active string) error {
+	if err := st.ClearBranchMigratedForKey(ctx, worktreeID, active); err != nil {
+		return fmt.Errorf("clear the migrated fingerprint of %s: %w", active, err)
+	}
+	if err := st.ClearActiveBranch(ctx, worktreeID, active); err != nil {
+		return fmt.Errorf("clear the active-branch marker of %s: %w", active, err)
+	}
+	return nil
 }
 
 // BranchScopedSave reports one database handled by SaveBranchScoped.
@@ -1690,12 +1805,16 @@ func SaveBranchScoped(
 		if err != nil {
 			return saves, fmt.Errorf("render active namespace for %s: %w", d.Engine, err)
 		}
+		others, serr := siblingSlugs(ctx, st, repoID, worktreeID)
+		if serr != nil {
+			return saves, serr
+		}
 		eng, closeEng, cerr := connectBranchEngine(
 			ctx,
 			cfg,
 			d.Engine,
 			d.Connection,
-			siblingSlugs(ctx, st, repoID, worktreeID),
+			others,
 			d.PhysicalCloneMinBytes,
 		)
 		if cerr != nil {
@@ -1752,7 +1871,10 @@ func saveActiveNamespace(
 	dur := eng.durable(active, branch)
 	out.Durable = dur
 	prevClean, prevWM, hasClean, cerr := st.GetActiveBranchClean(ctx, worktreeID, active)
-	if cerr == nil && hasClean {
+	if cerr != nil {
+		return out, fmt.Errorf("read the clean marker of %s: %w", active, cerr)
+	}
+	if hasClean {
 		durExists, _ := eng.drv.Exists(ctx, dur)
 		if w, werr := eng.drv.Watermark(ctx, active); werr == nil && captureSkippable(prevClean, durExists, prevWM, w) {
 			out.Skipped = "unchanged since last capture (watermark match)"
@@ -1762,17 +1884,20 @@ func saveActiveNamespace(
 	if err := captureRetrying(ctx, eng.drv, active, dur); err != nil {
 		return out, fmt.Errorf("capture %s into durable copy for %q: %w", active, branch, err)
 	}
-	_ = st.RecordBranchDurable(ctx, store.BranchDurableRow{
+	if err := recordDurable(ctx, st, store.BranchDurableRow{
 		RepoID:      repoID,
 		WorktreeID:  worktreeID,
 		Engine:      eng.engine,
 		DBKey:       active,
 		Branch:      branch,
 		DurableName: dur,
-	})
-	// Mark clean so the next swap (or save) can skip a redundant capture.
+	}); err != nil {
+		return out, err
+	}
 	if w, werr := eng.drv.Watermark(ctx, active); werr == nil && w != "" {
-		_ = st.SetActiveBranchClean(ctx, repoID, worktreeID, active, branch, eng.engine, true, w)
+		if err := st.SetActiveBranchClean(ctx, repoID, worktreeID, active, branch, eng.engine, true, w); err != nil {
+			return out, fmt.Errorf("record the clean marker of %s (branch %q): %w", active, branch, err)
+		}
 	}
 	return out, nil
 }
@@ -1831,7 +1956,11 @@ func BranchScopedStatus(
 		if eng == nil {
 			continue
 		}
-		activeBranch, _, _ := st.GetActiveBranch(ctx, worktreeID, active)
+		activeBranch, _, err := st.GetActiveBranch(ctx, worktreeID, active)
+		if err != nil {
+			closeEng()
+			return nil, fmt.Errorf("read the active-branch marker of %s: %w", active, err)
+		}
 		resumable := []string{}
 		for _, b := range branches {
 			exists, perr := eng.drv.Exists(ctx, eng.durable(active, b))

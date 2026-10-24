@@ -2,6 +2,7 @@ package prepare
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	"github.com/stubbedev/treeman/internal/config"
@@ -62,7 +63,7 @@ func baseBranchOf(ctx context.Context, repoRoot, branch string) string {
 // were getting `seed:empty` because their `branch.<name>.merge`
 // pointed at `develop` on the remote but the worktree's
 // `@{upstream}` was unset. The tier-2 fallback fills that gap.
-func resolveBaseBranch(ctx context.Context, st *store.Store, repoRoot string, repoID int64, newBranch string) string {
+func resolveBaseBranch(ctx context.Context, st *store.Store, repoRoot string, repoID int64, newBranch string) (string, error) {
 	// A pushed feature branch tracks its OWN remote (`git push -u`
 	// sets `@{upstream}` to `origin/<newBranch>`), so baseBranchOf
 	// returns newBranch itself. That is not a base — discard it and
@@ -70,9 +71,13 @@ func resolveBaseBranch(ctx context.Context, st *store.Store, repoRoot string, re
 	// seeds from `develop`. Without the `b != newBranch` guard every
 	// pushed feature branch silently degraded to `seed:empty`.
 	if b := baseBranchOf(ctx, repoRoot, newBranch); b != "" && b != newBranch {
-		return b
+		return b, nil
 	}
-	return nearestBaseCandidate(ctx, repoRoot, newBranch, baseCandidates(ctx, st, repoRoot, repoID))
+	candidates, err := baseCandidates(ctx, st, repoRoot, repoID)
+	if err != nil {
+		return "", err
+	}
+	return nearestBaseCandidate(ctx, repoRoot, newBranch, candidates), nil
 }
 
 // baseCandidates lists the local branches that could be newBranch's
@@ -82,7 +87,7 @@ func resolveBaseBranch(ctx context.Context, st *store.Store, repoRoot string, re
 // `develop`) is parked: a worktree that just switched develop → feature
 // has develop only as a durable copy, and the main checkout may sit on
 // an unrelated branch (#120).
-func baseCandidates(ctx context.Context, st *store.Store, repoRoot string, repoID int64) []string {
+func baseCandidates(ctx context.Context, st *store.Store, repoRoot string, repoID int64) ([]string, error) {
 	var out []string
 	seen := map[string]bool{}
 	add := func(b string, mustExist bool) {
@@ -95,23 +100,31 @@ func baseCandidates(ctx context.Context, st *store.Store, repoRoot string, repoI
 		}
 		out = append(out, b)
 	}
-	add(lookupMainBranch(ctx, st, repoRoot, repoID), false)
+	mainBranch, err := lookupMainBranch(ctx, st, repoRoot, repoID)
+	if err != nil {
+		return nil, err
+	}
+	add(mainBranch, false)
 	if st == nil || repoID <= 0 {
-		return out
+		return out, nil
 	}
-	if rows, err := st.ListWorktreesForRepo(ctx, repoID); err == nil {
-		for _, w := range rows {
-			if !w.Deleted {
-				add(w.Branch, true)
-			}
+	rows, err := st.ListWorktreesForRepo(ctx, repoID)
+	if err != nil {
+		return nil, fmt.Errorf("list the worktrees of repo %d for base-branch candidates: %w", repoID, err)
+	}
+	for _, w := range rows {
+		if !w.Deleted {
+			add(w.Branch, true)
 		}
 	}
-	if durs, err := st.ListBranchDurables(ctx, repoID); err == nil {
-		for _, d := range durs {
-			add(d.Branch, true)
-		}
+	durs, err := st.ListBranchDurables(ctx, repoID)
+	if err != nil {
+		return nil, fmt.Errorf("list the durable copies of repo %d for base-branch candidates: %w", repoID, err)
 	}
-	return out
+	for _, d := range durs {
+		add(d.Branch, true)
+	}
+	return out, nil
 }
 
 // nearestBaseCandidate picks the candidate newBranch most recently forked
@@ -159,22 +172,25 @@ func nearestBaseCandidate(ctx context.Context, repoRoot, newBranch string, candi
 // currently on. Enrolled (`main_worktree.enabled: true`) repos
 // expose this via the store; un-enrolled repos still have a repo-root
 // checkout we can read directly with `git rev-parse`.
-func lookupMainBranch(ctx context.Context, st *store.Store, repoRoot string, repoID int64) string {
+func lookupMainBranch(ctx context.Context, st *store.Store, repoRoot string, repoID int64) (string, error) {
 	if st != nil && repoID > 0 {
 		row, err := st.LookupMainWorktree(ctx, repoID)
-		if err == nil && !row.Deleted && row.Branch != "" {
-			return row.Branch
+		if err != nil {
+			return "", fmt.Errorf("look up the main worktree of repo %d: %w", repoID, err)
+		}
+		if !row.Deleted && row.Branch != "" {
+			return row.Branch, nil
 		}
 	}
 	out, err := gitcmd.String(ctx, repoRoot, "rev-parse", "--abbrev-ref", "HEAD")
 	if err != nil {
-		return ""
+		return "", nil //nolint:nilerr // an unborn or missing HEAD means no main branch to seed from
 	}
 	cur := strings.TrimSpace(out)
-	if cur == "HEAD" { // detached
-		return ""
+	if cur == "HEAD" {
+		return "", nil
 	}
-	return cur
+	return cur, nil
 }
 
 // stripRemotePrefix removes a leading `<remote>/` from `ref` when the
@@ -226,7 +242,10 @@ func resolveBaseSourceDB(
 	scope bsScope,
 	newBranch string,
 ) (string, bool, error) {
-	baseBranch := resolveBaseBranch(ctx, st, repoRoot, repoID, newBranch)
+	baseBranch, err := resolveBaseBranch(ctx, st, repoRoot, repoID, newBranch)
+	if err != nil {
+		return "", false, err
+	}
 	if baseBranch == "" {
 		return "", false, nil
 	}
@@ -277,7 +296,10 @@ func mainWorktreeBaseDB(
 	scope bsScope,
 	newBranch string,
 ) (string, bool, error) {
-	mainBranch := lookupMainBranch(ctx, st, repoRoot, repoID)
+	mainBranch, err := lookupMainBranch(ctx, st, repoRoot, repoID)
+	if err != nil {
+		return "", false, err
+	}
 	if mainBranch == "" || mainBranch == newBranch {
 		return "", false, nil
 	}
@@ -292,7 +314,11 @@ func mainWorktreeBaseDB(
 	// Prefer the enrolled main worktree row's path; fall back to the repo
 	// root checkout for repos that don't enroll a main worktree.
 	path := repoRoot
-	if row, lerr := st.LookupMainWorktree(ctx, repoID); lerr == nil && !row.Deleted && row.Path != "" {
+	row, err := st.LookupMainWorktree(ctx, repoID)
+	if err != nil {
+		return "", false, fmt.Errorf("look up the main worktree of repo %d: %w", repoID, err)
+	}
+	if !row.Deleted && row.Path != "" {
 		path = row.Path
 	}
 	return renderMainBaseDB(cfg, dbIdx, scope, path, mainBranch)

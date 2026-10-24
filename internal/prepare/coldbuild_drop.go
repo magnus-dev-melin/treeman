@@ -52,10 +52,10 @@ func emitColdBuildDrop(
 // unfiltered list (worst case = the pre-fix behaviour, best case =
 // nothing extra to skip). A logged store error would be noisy on
 // every prepare; the caller emits an event if it cares.
-func siblingSlugs(ctx context.Context, st *store.Store, repoID, selfWtID int64) []string {
+func siblingSlugs(ctx context.Context, st *store.Store, repoID, selfWtID int64) ([]string, error) {
 	rows, err := st.ListWorktreesForRepo(ctx, repoID)
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("list the sibling worktrees of repo %d: %w", repoID, err)
 	}
 	out := make([]string, 0, len(rows))
 	for _, w := range rows {
@@ -64,7 +64,7 @@ func siblingSlugs(ctx context.Context, st *store.Store, repoID, selfWtID int64) 
 		}
 		out = append(out, w.Slug)
 	}
-	return out
+	return out, nil
 }
 
 // nameOwnedByOtherSlug reports whether `name` contains one of `otherSlugs`

@@ -94,7 +94,7 @@ func TestResolveBaseBranch_FallsBackToMainWhenNoUpstream(t *testing.T) {
 	}
 	defer func() { _ = st.Close() }()
 
-	got := resolveBaseBranch(ctx, st, repo, 0, "feature/KON-1")
+	got := mustResolveBaseBranch(ctx, t, st, repo, 0, "feature/KON-1")
 	if got != "develop" {
 		t.Fatalf("want develop (main-wt fallback), got %q", got)
 	}
@@ -135,7 +135,7 @@ func TestResolveBaseBranch_PrefersEnrolledMainWorktreeRow(t *testing.T) {
 		t.Fatalf("EnsureMainWorktree: %v", err)
 	}
 
-	got := resolveBaseBranch(ctx, st, repo, repoID, "feature/KON-1")
+	got := mustResolveBaseBranch(ctx, t, st, repo, repoID, "feature/KON-1")
 	if got != "develop" {
 		t.Fatalf("want develop (enrolled row), got %q", got)
 	}
@@ -165,7 +165,7 @@ func TestResolveBaseBranch_EmptyWhenNoSharedHistory(t *testing.T) {
 		t.Fatalf("store.Open: %v", err)
 	}
 	defer func() { _ = st.Close() }()
-	got := resolveBaseBranch(ctx, st, repo, 0, "orphan")
+	got := mustResolveBaseBranch(ctx, t, st, repo, 0, "orphan")
 	if got != "" {
 		t.Fatalf("want empty (no common ancestor), got %q", got)
 	}
@@ -190,7 +190,7 @@ func TestResolveBaseBranch_EmptyWhenBranchEqualsMain(t *testing.T) {
 		t.Fatalf("store.Open: %v", err)
 	}
 	defer func() { _ = st.Close() }()
-	if got := resolveBaseBranch(ctx, st, repo, 0, "develop"); got != "" {
+	if got := mustResolveBaseBranch(ctx, t, st, repo, 0, "develop"); got != "" {
 		t.Fatalf("want empty (self-base), got %q", got)
 	}
 }
@@ -227,7 +227,7 @@ func TestResolveBaseBranch_FallsBackWhenUpstreamIsSelf(t *testing.T) {
 	}
 	defer func() { _ = st.Close() }()
 
-	got := resolveBaseBranch(ctx, st, repo, 0, "feature/KON-1")
+	got := mustResolveBaseBranch(ctx, t, st, repo, 0, "feature/KON-1")
 	if got != "develop" {
 		t.Fatalf("want develop (self-upstream discarded, main-wt fallback), got %q", got)
 	}
@@ -387,7 +387,7 @@ func TestResolveBaseBranch_PrefersRecordedBase(t *testing.T) {
 	}
 	defer func() { _ = st.Close() }()
 
-	if got := resolveBaseBranch(ctx, st, repo, 0, "feature/KON-2"); got != "develop" {
+	if got := mustResolveBaseBranch(ctx, t, st, repo, 0, "feature/KON-2"); got != "develop" {
 		t.Fatalf("want develop (recorded base), got %q", got)
 	}
 }
@@ -429,7 +429,7 @@ func TestResolveBaseBranchPrefersNearestForkPoint(t *testing.T) {
 
 	// Without develop known to treeman, the repo root's branch is all
 	// there is.
-	if got := resolveBaseBranch(ctx, st, repo, repoID, "feature/x"); got != "main" {
+	if got := mustResolveBaseBranch(ctx, t, st, repo, repoID, "feature/x"); got != "main" {
 		t.Fatalf("base without candidates = %q, want main", got)
 	}
 
@@ -440,7 +440,16 @@ func TestResolveBaseBranchPrefersNearestForkPoint(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if got := resolveBaseBranch(ctx, st, repo, repoID, "feature/x"); got != "develop" {
+	if got := mustResolveBaseBranch(ctx, t, st, repo, repoID, "feature/x"); got != "develop" {
 		t.Fatalf("base = %q, want develop", got)
 	}
+}
+
+func mustResolveBaseBranch(ctx context.Context, t *testing.T, st *store.Store, repoRoot string, repoID int64, newBranch string) string {
+	t.Helper()
+	b, err := resolveBaseBranch(ctx, st, repoRoot, repoID, newBranch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
 }

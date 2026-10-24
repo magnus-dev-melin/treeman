@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/stubbedev/treeman/internal/config"
+	"github.com/stubbedev/treeman/internal/snapshot"
 	"github.com/stubbedev/treeman/internal/store"
 )
 
@@ -37,7 +38,7 @@ func TestSingleDumpFingerprintMatchesV5(t *testing.T) {
 		Engine: "postgres",
 		Dump:   config.DumpList{{Path: "seed.sql"}},
 	}
-	k := computeSnapshotKey(ctx, st, d, wt, "16")
+	k := mustSnapshotKey(ctx, t, st, d, wt, "16")
 
 	if k.DumpHashHex == "" {
 		t.Fatal("DumpHashHex must be populated for a single-dump config")
@@ -78,8 +79,8 @@ func TestMultiDumpFingerprintIsOrderSensitive(t *testing.T) {
 		Engine: "postgres",
 		Dump:   config.DumpList{{Path: "b.sql"}, {Path: "a.sql"}},
 	}
-	kAB := computeSnapshotKey(ctx, st, ab, wt, "16")
-	kBA := computeSnapshotKey(ctx, st, ba, wt, "16")
+	kAB := mustSnapshotKey(ctx, t, st, ab, wt, "16")
+	kBA := mustSnapshotKey(ctx, t, st, ba, wt, "16")
 
 	if kAB.Fingerprint() == kBA.Fingerprint() {
 		t.Errorf("reordering dumps must flip the fingerprint: ab=%s ba=%s",
@@ -114,4 +115,19 @@ func TestMultiDumpSkipsMissingOptional(t *testing.T) {
 	}, wt); err == nil {
 		t.Error("required missing dump should surface an error")
 	}
+}
+
+func mustSnapshotKey(
+	ctx context.Context,
+	t *testing.T,
+	st *store.Store,
+	d config.DatabaseConfig,
+	worktreePath, engineVersion string,
+) snapshot.Key {
+	t.Helper()
+	k, err := computeSnapshotKey(ctx, st, d, worktreePath, engineVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return k
 }

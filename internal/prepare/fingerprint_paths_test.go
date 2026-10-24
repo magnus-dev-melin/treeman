@@ -18,7 +18,11 @@ func TestFingerprintSeesEverySameNamedInput(t *testing.T) {
 			wt + "/frontend/package-lock.json": front,
 			wt + "/backend/package-lock.json":  back,
 		}}}
-		return keyFromWalks(context.Background(), nil, walks, config.DatabaseConfig{Engine: "mysql"}, wt, "8.4").Fingerprint()
+		k, err := keyFromWalks(context.Background(), nil, walks, config.DatabaseConfig{Engine: "mysql"}, wt, "8.4")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return k.Fingerprint()
 	}
 	base := key("f1", "b1")
 	if key("f2", "b1") == base || key("f1", "b2") == base {
@@ -33,7 +37,11 @@ func TestFingerprintSeesEverySameNamedInput(t *testing.T) {
 		"/other/frontend/package-lock.json": "f1",
 		"/other/backend/package-lock.json":  "b1",
 	}}}
-	if keyFromWalks(context.Background(), nil, walks, config.DatabaseConfig{Engine: "mysql"}, "/other", "8.4").Fingerprint() != base {
+	other, err := keyFromWalks(context.Background(), nil, walks, config.DatabaseConfig{Engine: "mysql"}, "/other", "8.4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if other.Fingerprint() != base {
 		t.Error("same inputs in another worktree must share the fingerprint")
 	}
 }

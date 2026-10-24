@@ -215,13 +215,20 @@ func (f *bsFixture) runErr(branch string) (Outcome, error) {
 	if f.defaultBranch != nil {
 		rdb = func(context.Context) string { return f.defaultBranch() }
 	}
-	out, err := runBranchScoped(ctx, branchScopedArgs{
+	return runBranchScoped(ctx, f.args(rp, rm, rbb, rdb))
+}
+
+func (f *bsFixture) args(
+	rp, rm func(ctx context.Context, branch string) (string, bool, error),
+	rbb func(ctx context.Context, branch string) string,
+	rdb func(ctx context.Context) string,
+) branchScopedArgs {
+	return branchScopedArgs{
 		cfg: f.cfg, d: f.d, dbIdx: 0, worktreePath: f.worktreePath,
 		st: f.st, repoID: f.repoID, worktreeID: f.worktreeID,
 		eng: f.eng, resolveParent: rp, resolveMainFn: rm, resolveBaseBranchFn: rbb,
 		resolveDefaultBranchFn: rdb, migrateFP: f.migrateFP, migrateFn: f.migrateFn,
-	})
-	return out, err
+	}
 }
 
 func (f *bsFixture) durable(branch string) string { return f.eng.durable(f.active, branch) }

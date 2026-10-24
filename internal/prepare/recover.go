@@ -101,10 +101,19 @@ func RecoverDatabases(
 		// into are gone now — drop their built-at fingerprints so the next
 		// prepare restores instead of trusting the skip gate. A filtered
 		// recovery clears only the dropped database's fingerprint.
+		var clearErr error
 		if only == nil {
-			_ = st.ClearTemplateBuiltForWorktree(ctx, worktreeID)
+			clearErr = st.ClearTemplateBuiltForWorktree(ctx, worktreeID)
 		} else if name != "" {
-			_ = st.ClearTemplateBuiltForKey(ctx, worktreeID, name)
+			clearErr = st.ClearTemplateBuiltForKey(ctx, worktreeID, name)
+		}
+		if clearErr != nil {
+			_ = st.WriteEvent(ctx, store.LevelWarn, store.EvtWorktreeRecoverError,
+				fmt.Sprintf("engine=%s: clear the built-at fingerprints after recovery: %v", d.Engine, clearErr),
+				repoID, worktreeID, "", 0, map[string]string{
+					"engine": d.Engine,
+					"error":  clearErr.Error(),
+				})
 		}
 	}
 }
@@ -181,12 +190,16 @@ func recoverBranchScoped(
 	if err != nil {
 		return err
 	}
+	others, serr := siblingSlugs(ctx, st, repoID, worktreeID)
+	if serr != nil {
+		return serr
+	}
 	eng, closeEng, cerr := connectBranchEngine(
 		ctx,
 		cfg,
 		d.Engine,
 		d.Connection,
-		siblingSlugs(ctx, st, repoID, worktreeID),
+		others,
 		d.PhysicalCloneMinBytes,
 	)
 	if cerr != nil {
