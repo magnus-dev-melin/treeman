@@ -2,7 +2,9 @@ package hooks
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/stubbedev/treeman/internal/store"
@@ -37,6 +39,7 @@ func PersistOutcome(
 	}
 
 	runIDs := make([]int64, len(out.Groups))
+	var persistErrs []error
 	failed := 0
 	nonFatal := 0
 	maxExit := 0
@@ -50,16 +53,11 @@ func PersistOutcome(
 		if g.LogPath != "" {
 			cmd = fmt.Sprintf("%s  # log=%s", cmd, g.LogPath)
 		}
-		runID, _ := st.WriteHookRun(ctx, wtID, phase, i, cmd,
-			startedMs, finishedMs, g.ExitCode, g.StdoutTail, g.StderrTail)
-		runIDs[i] = runID
-		// Stash the merged stdout+stderr capture so the failure (or
-		// success) survives worktree teardown. ANSI escapes are
-		// preserved verbatim — `treeman logs hooks show <id>` writes
-		// the bytes back to stdout so terminal color round-trips.
-		if runID > 0 && len(g.LogBody) > 0 {
-			_ = st.AppendHookLogChunk(ctx, runID, "merged", g.LogBody)
+		runID, err := persistGroup(ctx, st, wtID, phase, i, cmd, startedMs, finishedMs, g)
+		if err != nil {
+			persistErrs = append(persistErrs, err)
 		}
+		runIDs[i] = runID
 		if g.ExitCode != 0 {
 			failed++
 			if g.ContinueOnError {
@@ -94,6 +92,14 @@ func PersistOutcome(
 	}
 
 	msg := fmt.Sprintf("groups=%d failed=%d", len(out.Groups), failed)
+	if persistErr := errors.Join(persistErrs...); persistErr != nil {
+		slog.Error("hook runs not recorded", "phase", phase, "worktree_id", wtID, "err", persistErr)
+		payload["persist_error"] = persistErr.Error()
+		msg += "; hook runs not recorded: " + persistErr.Error()
+		if level == store.LevelInfo {
+			level = store.LevelWarn
+		}
+	}
 	if nonFatal > 0 {
 		payload["non_fatal"] = nonFatal
 		msg += fmt.Sprintf(" non-fatal=%d", nonFatal)
@@ -103,6 +109,29 @@ func PersistOutcome(
 	}
 	_ = st.WriteEvent(ctx, level, store.EvtHooksEnd, msg, repoID, wtID, phase, dur, payload)
 	return runIDs
+}
+
+func persistGroup(
+	ctx context.Context,
+	st *store.Store,
+	wtID int64,
+	phase string,
+	i int,
+	cmd string,
+	startedMs, finishedMs int64,
+	g GroupOutcome,
+) (int64, error) {
+	runID, err := st.WriteHookRun(ctx, wtID, phase, i, cmd,
+		startedMs, finishedMs, g.ExitCode, g.StdoutTail, g.StderrTail)
+	if err != nil {
+		return 0, fmt.Errorf("record %s hook group %d (%s): %w", phase, i, g.Command, err)
+	}
+	if len(g.LogBody) > 0 {
+		if err := st.AppendHookLogChunk(ctx, runID, "merged", g.LogBody); err != nil {
+			return runID, fmt.Errorf("store the log of %s hook run %d: %w", phase, runID, err)
+		}
+	}
+	return runID, nil
 }
 
 // EmitHookStart writes a hooks:start event so `treeman logs tail` shows

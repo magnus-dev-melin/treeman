@@ -1086,12 +1086,14 @@ func applyINIMarshal(content string, pairs map[string]string) (string, error) {
 		}
 		s, err := cfg.GetSection(section)
 		if err != nil {
-			s, _ = cfg.NewSection(section)
+			if s, err = cfg.NewSection(section); err != nil {
+				return "", fmt.Errorf("ini driver: create section %q: %w", section, err)
+			}
 		}
 		if s.HasKey(key) {
 			s.Key(key).SetValue(pairs[k])
-		} else {
-			_, _ = s.NewKey(key, pairs[k])
+		} else if _, err := s.NewKey(key, pairs[k]); err != nil {
+			return "", fmt.Errorf("ini driver: set %q: %w", k, err)
 		}
 	}
 	var buf bytes.Buffer

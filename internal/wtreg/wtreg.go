@@ -127,9 +127,10 @@ func loadRepairRows(ctx context.Context, tx *sql.Tx, repoID int64) (map[string]d
 		var id int64
 		var p string
 		var isMain int
-		if err := rows.Scan(&id, &p, &isMain); err == nil {
-			dbWTs[p] = dbRow{id: id, isMain: isMain == 1}
+		if err := rows.Scan(&id, &p, &isMain); err != nil {
+			return nil, fmt.Errorf("scan worktree row of repo %d: %w", repoID, err)
 		}
+		dbWTs[p] = dbRow{id: id, isMain: isMain == 1}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err

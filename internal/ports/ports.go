@@ -105,10 +105,13 @@ func (defaultAllocator) Allocate(
 			// Roll back only the slots this call added — ports the
 			// worktree already held must survive a partial-allocation
 			// failure (e.g. a newly-declared slot whose range is full).
+			allocErr := fmt.Errorf("allocate port %q: %w", name, err)
 			for _, n := range allocatedThisCall {
-				_ = st.ReleaseWorktreePort(ctx, worktreeID, n)
+				if relErr := st.ReleaseWorktreePort(ctx, worktreeID, n); relErr != nil {
+					allocErr = errors.Join(allocErr, fmt.Errorf("roll back port slot %q of worktree %d: %w", n, worktreeID, relErr))
+				}
 			}
-			return nil, fmt.Errorf("allocate port %q: %w", name, err)
+			return nil, allocErr
 		}
 		// A reused slot was written by a concurrent allocate pass, not
 		// this one — leave it out of the rollback set so a later failure
